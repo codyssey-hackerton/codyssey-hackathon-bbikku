@@ -5,7 +5,7 @@ import type { StoredContactResponse } from './contact-response.ts';
 import type { HttpResult } from './idempotency.ts';
 
 export type StoredApproval = { approval: Approval; subject: Proposal };
-export type Conversation = { turns: { role: 'user' | 'assistant'; content: string }[]; lock?: { token: string; until: string } };
+export type Conversation = { turns: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; lock?: { token: string; until: string } };
 export type DurableIdempotencyRecord = { fingerprint: string; operationId: string; state: 'running' | 'retryable' | 'completed';
   result?: HttpResult; token?: string; leaseUntil?: string };
 export type UserPlanningState = {

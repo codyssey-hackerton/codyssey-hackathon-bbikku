@@ -44,3 +44,13 @@ test('observations retain each validated tool input alongside its result', async
   assert.equal(result.decision?.kind, 'answer');
   assert.deepEqual(invoked, [{ from: 'first', to: 'second' }, { from: 'third', to: 'fourth' }]);
 });
+
+test('default step limit permits nine reads and a final answer', async () => {
+  let calls = 0;
+  const tool: ReadTool = { name: 'read_schedule', description: 'read', input: z.object({}), async run() { calls++; return {}; } };
+  const model: ModelPort = { async decide(input) { return input.observations.length < 9
+    ? { kind: 'tool_call', name: 'read_schedule', input: {} } : { kind: 'answer', text: '확인했습니다.' }; } };
+  const graph = createPlanningAgent({ model, tools: [tool], validateProposal: async () => [] });
+  assert.equal((await graph.invoke({ userId: 'alice', message: '조회', context: {} })).decision?.kind, 'answer');
+  assert.equal(calls, 9);
+});

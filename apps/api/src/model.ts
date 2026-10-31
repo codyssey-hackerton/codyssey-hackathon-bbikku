@@ -8,7 +8,9 @@ import { changeSet } from './planning-schemas.ts';
 export const MODEL_ID = 'gpt-6.1-terra';
 export const REASONING_EFFORT = 'high';
 
-const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes']);
+const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes',
+  'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
+  'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
 const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authorization', 'permissions', 'coordinationTarget']);
 
 const FinalDecision = z.discriminatedUnion('kind', [

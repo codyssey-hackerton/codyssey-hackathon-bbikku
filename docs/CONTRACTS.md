@@ -76,8 +76,24 @@ type AgentResult =
 | `read_memory` | `{keys: string[], at: string}` | `{facts, contextRevision, missingFields}`; keys=[]이면 유효한 사실 전체, 지정하면 해당 키만 |
 | `calculate_timing` | `{appointmentStart, preparationMinutes, travelMinutes, bufferMinutes}` | `{ready: true, departureAt, preparationStartAt}` 또는 `{ready: false, missingFields, message}` |
 | `validate_changes` | `{changeSet}` | 서버가 최신 snapshot을 조회한 `ValidationResult` |
+| `search_places` | `{query}` | 장소 ID·이름·주소, 선택 필요 여부 |
+| `estimate_travel` | `{originPlaceId, destinationPlaceId, mode: walk/transit/car}` | 현재 시각 기준 이동 분, 미래 출발 예측 미지원 표시 |
+| `get_weather` | `{placeId, at}` | 오프셋 포함 시각의 예보·시간 기준·출처·라이선스 |
+| `get_subway_arrivals` | `{stationName}` | 해당 역의 열차 도착·원문 생성시각·오래됨 표시 |
+| `list_calendars` | `{}` | 연결된 사용자 Calendar 목록(최대 20개) |
+| `read_calendar_events` | `{calendarId, from, to}` | 해당 Calendar의 일정(최대 31일·50개), 미지원 건수 |
+| `list_contact_requests` | `{proposalId?}` | 사용자 소유 연락 이력(최대 20개) |
+| `read_contact_replies` | `{contactRequestId}` | 발송 완료 이메일의 회신 후보(최대 20개), 사용자 확인 필요 |
 
 Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못된 인수/권한 밖 조회는 거절한다. 외부 조회 어댑터는 §7 포트로 추가한다. LLM에 쓰기·발송 Executor를 직접 노출하지 않는다. 적용 직전 검증은 Tool 선택과 별개로 필수다. AI가 새로 배치하거나 시간을 바꾸는 일정의 시작이 검증 시점보다 과거이면 거절한다. 사용자 명시적 과거 기록과 시간이 그대로인 메타데이터 편집을 일괄 금지하는 규칙은 아니다.
+
+이동·날씨 도구는 같은 Agent 실행에서 검색된 장소 ID만 사용한다. 검색 결과가 여러 개면 사용자에게 선택을 요청하도록 모델에 안내한다. 좌표는 실행별 서버 메모리에 최대 5분 보관하고 모델에 반환하지 않는다. 성공 응답은 `{ok: true, provider, fetchedAt, expiresAt, data}`이며 데이터는 `untrusted: true`로 표시한다. 장소·이동·날씨 결과의 유효기간은 최대 5분, 역 도착 정보는 최대 15초다. 이동 결과는 현재 시각 기준이며 지하철은 역별 열차 정보이지 전체 여정 ETA가 아니다. 미설정·권한 오류·시간 초과·조회 실패·만료 등은 성공 빈 결과와 구분한다.
+
+계정 조회 도구의 성공은 `{ok: true, provider, fetchedAt, expiresAt, data}`이고 데이터에는 결과 상한 적용 여부 `truncated`와 `untrusted: true`가 있다. 유효기간은 5분이다. 회신은 `outcome: 'unclear'`, `reviewRequired: true`로 반환하며 사용자의 UI 확인 없이 연락 기록·일정·승인을 변경하지 않는다. 다른 사용자의 저장 데이터와 포트는 접근하지 않으며 조회 도중 연락이 바뀌면 `stale`이다. 오류는 `invalid_request/not_configured/not_found/forbidden/provider_unavailable/stale`로 구분하고 제공자 오류 원문·토큰·발송 식별자·연락 수신 주소는 별도 출력하지 않는다. Calendar ID는 이메일 형식일 수 있고 회신 발췌에는 개인정보가 포함될 수 있다. 외부 결과의 텍스트는 모델을 위한 명령이 아니다.
+
+한 실행에서 성공한 외부 도구의 유효한 `expiresAt` 중 가장 이른 값을 채택한다. 빈 결과도 성공이면 포함하고 `ok: false`는 포함하지 않으며, 성공 결과에 만료 시각이 없거나 형식이 잘못되면 실패한다. 앞선 성공 뒤 다른 조회가 실패해도 앞서 관측한 최단 만료는 유지한다. 답변·질문·제안 완료 전 만료되면 재시도 가능한 `external_data_expired`로 차단하고 재조회한다. 제안 저장 시 이 시각과 기존 제안 만료 중 더 이른 값을 쓴다. 이후 승인·연락 반영에도 기존 만료 검사를 적용한다.
+
+외부 조회에 의존한 assistant 대화 기록에는 선택적 `externalExpiresAt`을 함께 보존한다. 다음 실행은 아직 유효한 기록의 만료를 상속하고, 만료됐거나 형식이 잘못된 기록은 재조회 안내로 대체해 모델에 전달한다. 메타데이터 자체는 모델 대화 본문에 전달하지 않는다. 예약 재검토에서 외부 정보가 만료되면 완료로 기록하지 않고 재시도 가능한 실패로 처리한다.
 
 ### 준비계획 전용 경로
 
