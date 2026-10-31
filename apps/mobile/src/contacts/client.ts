@@ -36,11 +36,14 @@ export interface ContactDecisionInput { id: string; contactRevision: number; dec
 export interface ContactSendInput { id: string; contactRevision: number; expectedSenderAddress: string }
 export interface ContactCallInput { id: string; contactRevision: number; expectedSenderNumber: string }
 export type PhoneProvider = 'twilio' | 'clawops';
+export type PhoneMode = 'agent' | 'voiceml';
 export type PhoneConnectionInput = { accountSid: string; authToken: string; fromNumber: string } |
-  { provider: 'clawops'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string };
-export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null; provider?: PhoneProvider };
-export function matchesPhoneProvider(connection: PhoneConnection, provider: PhoneProvider): boolean {
-  return provider === 'twilio' ? connection.provider === undefined || connection.provider === 'twilio' : connection.provider === 'clawops';
+  { provider: 'clawops'; mode: 'agent'; accountId: string; apiKey: string; agentId: string; fromNumber: string } |
+  { provider: 'clawops'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string; mode?: 'voiceml' };
+export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null; provider?: PhoneProvider; mode?: PhoneMode };
+export function matchesPhoneProvider(connection: PhoneConnection, provider: PhoneProvider, mode: PhoneMode = 'voiceml'): boolean {
+  return provider === 'twilio' ? (connection.provider === undefined || connection.provider === 'twilio') && connection.mode === undefined
+    : connection.provider === 'clawops' && (mode === 'agent' ? connection.mode === 'agent' : connection.mode === undefined || connection.mode === 'voiceml');
 }
 export type EmailConnection = { status: 'available'; senderAddress: string } | { status: 'not_configured'; senderAddress: string | null };
 export interface ContactResponse {
@@ -50,6 +53,7 @@ export interface ContactResponse {
 }
 export interface ContactResults { contactRequest: ContactRequest; responses: ContactResponse[] }
 export interface ContactReplyCheck extends ContactResults { checkedCount: number; unmatchedCount: number }
+export interface ContactCallCheck extends ContactReplyCheck { callStatus?: string; complete?: boolean; truncated?: boolean }
 export interface ContactConfirmResult { contactRequest: ContactRequest; response: ContactResponse; scheduleRevision: number; changed: boolean }
 
 export interface ContactClient {
@@ -59,6 +63,7 @@ export interface ContactClient {
   emailReplyConnection(): Promise<EmailConnection>;
   responses(id: string): Promise<ContactResults>;
   checkReplies(op: Mutation<{ id: string; contactRevision: number }>): Promise<ContactReplyCheck>;
+  checkCall(op: Mutation<{ id: string; contactRevision: number }>): Promise<ContactCallCheck>;
   confirmResponse(op: Mutation<{ id: string; responseId: string; contactRevision: number; selectedOptionId: string }>): Promise<ContactConfirmResult>;
   phoneConnection(): Promise<PhoneConnection>;
   connectPhone(op: Mutation<PhoneConnectionInput>): Promise<PhoneConnection>;
@@ -150,12 +155,14 @@ function phoneConnectionFrom(data: unknown): PhoneConnection {
   if (!isRecord(data) || (data.status !== 'available' && data.status !== 'not_configured') ||
       !(data.senderNumber === null || typeof data.senderNumber === 'string') ||
       !(data.provider === undefined || data.provider === 'twilio' || data.provider === 'clawops') ||
+      !(data.mode === undefined || (data.provider === 'clawops' && (data.mode === 'agent' || data.mode === 'voiceml'))) ||
       !(data.lastRequestId === undefined || data.lastRequestId === null || isId(data.lastRequestId)) ||
       (data.status === 'available' && (typeof data.senderNumber !== 'string' || !/^\+[1-9]\d{1,14}$/.test(data.senderNumber)))) throw invalidResponse();
   const receipt = data.lastRequestId === undefined ? {} : { lastRequestId: data.lastRequestId as string | null };
   const provider = data.provider === undefined ? {} : { provider: data.provider as PhoneProvider };
-  if (data.status === 'available') return { status: data.status, senderNumber: data.senderNumber as string, ...receipt, ...provider };
-  return { status: data.status, senderNumber: data.senderNumber as string | null, ...receipt, ...provider };
+  const mode = data.mode === undefined ? {} : { mode: data.mode as PhoneMode };
+  if (data.status === 'available') return { status: data.status, senderNumber: data.senderNumber as string, ...receipt, ...provider, ...mode };
+  return { status: data.status, senderNumber: data.senderNumber as string | null, ...receipt, ...provider, ...mode };
 }
 
 function dispatched(contact: ContactRequest, id: string, contactRevision: number, channel: ContactRequest['channel']): ContactRequest {
@@ -208,6 +215,18 @@ export function createContactClient(api: ApiClient): ContactClient {
       if (!isRecord(data) || !isRevision(data.checkedCount, 0) || !isRevision(data.unmatchedCount, 0)) throw invalidResponse();
       return { ...result, checkedCount: data.checkedCount as number, unmatchedCount: data.unmatchedCount as number };
     },
+    async checkCall({ input, requestId, idempotencyKey }) {
+      const data = await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(input.id)}/check-call`,
+        { requestId, contactRevision: input.contactRevision }, { idempotencyKey, timeoutMs: 60_000 });
+      const result = resultsFrom(data, input.id);
+      if (!isRecord(data) || result.contactRequest.channel !== 'phone' || !isRevision(data.checkedCount, 0) || !isRevision(data.unmatchedCount, 0) ||
+          !(data.callStatus === undefined || (typeof data.callStatus === 'string' && data.callStatus.length <= 200)) ||
+          !(data.complete === undefined || typeof data.complete === 'boolean') || !(data.truncated === undefined || typeof data.truncated === 'boolean')) throw invalidResponse();
+      return { ...result, checkedCount: data.checkedCount as number, unmatchedCount: data.unmatchedCount as number,
+        ...(data.callStatus === undefined ? {} : { callStatus: data.callStatus as string }),
+        ...(data.complete === undefined ? {} : { complete: data.complete as boolean }),
+        ...(data.truncated === undefined ? {} : { truncated: data.truncated as boolean }) };
+    },
     async confirmResponse({ input, requestId, idempotencyKey }) {
       const { id, responseId, contactRevision, selectedOptionId } = input;
       const data = await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(id)}/responses/${encodeURIComponent(responseId)}/confirm`,
@@ -225,7 +244,7 @@ export function createContactClient(api: ApiClient): ContactClient {
         { requestId, ...input }, { idempotencyKey }));
       if (('provider' in input && result.lastRequestId !== requestId) ||
           (result.lastRequestId !== undefined && result.lastRequestId !== requestId)) throw invalidResponse();
-      if (!matchesPhoneProvider(result, 'provider' in input ? input.provider : 'twilio')) throw invalidResponse();
+      if (!matchesPhoneProvider(result, 'provider' in input ? input.provider : 'twilio', 'mode' in input && input.mode === 'agent' ? 'agent' : 'voiceml')) throw invalidResponse();
       return result;
     },
     async createRecipient({ input, requestId, idempotencyKey }) {

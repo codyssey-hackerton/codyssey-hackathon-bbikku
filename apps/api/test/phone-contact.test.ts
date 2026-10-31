@@ -102,6 +102,26 @@ test('phone connection is user-scoped, private, validated and never returns cred
   assert.equal((await env.connections.status('alice')).senderNumber, credential.fromNumber);
 });
 
+test('managed ClawOps connection verifies the owned number and agent before saving', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pikku-managed-phone-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const managed = { provider: 'clawops' as const, mode: 'agent' as const, accountId: 'account1', apiKey: 'test-key', agentId: 'agent1', fromNumber: '+821012345678' };
+  const requests: string[] = [];
+  const connections = new PhoneConnections({ directory, fetcher: async url => {
+    requests.push(String(url));
+    return String(url).endsWith('/numbers') ? Response.json({ data: [{ number: '01012345678' }] }) : Response.json({ agentId: 'agent1' });
+  } });
+  assert.deepEqual(await connections.connect('alice', managed, 'managed-connect'), { status: 'available', provider: 'clawops', mode: 'agent', senderNumber: managed.fromNumber, lastRequestId: 'managed-connect' });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(await connections.read('alice'), managed);
+  assert.equal((await stat(join(directory, (await readdir(directory))[0]!))).mode & 0o777, 0o600);
+  assert.ok(!JSON.stringify(await connections.status('alice')).includes(managed.apiKey));
+  const missing = new PhoneConnections({ directory, fetcher: async url => String(url).endsWith('/numbers')
+    ? Response.json({ data: [{ number: '01012345678' }] }) : Response.json({ agentId: 'different' }) });
+  await assert.rejects(missing.connect('alice', managed));
+  assert.deepEqual(await connections.read('alice'), managed);
+});
+
 test('same-number token update has an atomic request receipt and old files remain readable', async t => {
   const env = await fixture(t);
   await env.connections.connect('alice', credential, 'first-request');

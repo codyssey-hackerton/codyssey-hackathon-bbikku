@@ -12,7 +12,7 @@ import { PhoneDispatch } from '../src/phone-dispatch.ts';
 import { PlanningService } from '../src/planning-service.ts';
 import { MemoryPlanningStore, type PlanningStore } from '../src/planning-store.ts';
 import { VoiceTokens } from '../src/voice-token.ts';
-import { VoiceWebhook } from '../src/voice-webhook.ts';
+import { approvedVoiceOptions, VoiceWebhook } from '../src/voice-webhook.ts';
 import type { VoiceClassifier } from '../src/voice-model.ts';
 
 const user = 'synthetic-user';
@@ -130,6 +130,7 @@ test('unspoken seconds or subsecond precision blocks calls and rejects an alread
 test('identical spoken alternatives cannot place a call or be accepted', async t => {
   const slot = { startsAt: '2030-01-02T12:00:00+09:00', endsAt: '2030-01-02T13:00:00+09:00', timezone: 'Asia/Seoul' };
   const env = await fixture(t, undefined, [slot, { ...slot, timezone: 'Asia/Pyongyang' }]); const before = await env.store.read(user);
+  await assert.rejects(approvedVoiceOptions(env.store, env.planning, user, before, before.contactRequests.get(env.contact.id)!, clock, 'before_call', 'managed'), /VOICE_OPTIONS_AMBIGUOUS/);
   assert.equal((await env.attemptCall('same-key')).status, 409);
   assert.equal(env.calls, 0); assert.deepEqual(await env.store.read(user), before);
   await env.store.transaction(user, state => {
@@ -184,6 +185,10 @@ test('DST repeated hour options and confirmation state include their distinct sp
     { startsAt: '2030-11-03T01:30:00-05:00', endsAt: '2030-11-03T01:45:00-05:00', timezone: 'America/New_York' },
   ];
   const env = await fixture(t, undefined, slots); const before = await env.store.read(user);
+  const ready = before.contactRequests.get(env.contact.id)!;
+  const managed = await approvedVoiceOptions(env.store, env.planning, user, before, ready, clock, 'before_call', 'managed');
+  const explicit = await approvedVoiceOptions(env.store, env.planning, user, before, ready, clock, 'before_call');
+  assert.deepEqual(managed, explicit);
   const token = await env.sendCall(); const menu = await env.callback(token, 0);
   assert.match(menu.twiml, /미 동부 하계 표준시/); assert.match(menu.twiml, /미 동부 표준시/);
   assert.match(menu.twiml, /협정 세계시보다 4시간 느림/); assert.match(menu.twiml, /협정 세계시보다 5시간 느림/);
@@ -194,6 +199,20 @@ test('DST repeated hour options and confirmation state include their distinct sp
   const after = await env.store.read(user);
   assert.equal(after.contactRequests.get(env.contact.id)?.negotiationStatus, 'applied');
   assert.equal(after.items.get(env.item.id)?.timeSlot?.startsAt, slots[1]!.startsAt);
+});
+
+test('managed Seoul labels omit current year and timezone but preserve dates and other years', async t => {
+  const slots = [
+    { startsAt: '2030-01-02T18:00:00+09:00', endsAt: '2030-01-02T19:00:00+09:00', timezone: 'Asia/Seoul' },
+    { startsAt: '2031-01-02T23:30:00+09:00', endsAt: '2031-01-03T00:15:00+09:00', timezone: 'Asia/Seoul' },
+  ];
+  const env = await fixture(t, undefined, slots); const state = await env.store.read(user);
+  const contact = state.contactRequests.get(env.contact.id)!;
+  const managed = await approvedVoiceOptions(env.store, env.planning, user, state, contact, clock, 'before_call', 'managed');
+  assert.equal(managed[0]!.label, '1월 2일 오후 6시부터 오후 7시까지');
+  assert.equal(managed[1]!.label, '2031년 1월 2일 오후 11시 30분부터 2031년 1월 3일 오전 12시 15분까지');
+  const explicit = await approvedVoiceOptions(env.store, env.planning, user, state, contact, clock, 'before_call');
+  assert.match(explicit[0]!.label, /한국 표준시/); assert.match(explicit[0]!.label, /협정 세계시보다 9시간 빠름/);
 });
 
 test('out-of-range classifier result requests review and never applies', async t => {

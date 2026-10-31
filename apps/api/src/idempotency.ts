@@ -25,7 +25,7 @@ function retryableReview(operation: string, result: HttpResult): boolean {
 }
 function retryableReplyLookup(operation: string, result: HttpResult): boolean {
   const body = result.body as { error?: { code?: string } } | null;
-  return operation === 'contact_reply_check' && result.retryableWithoutEffects === true &&
+  return (operation === 'contact_reply_check' || operation === 'contact_call_check') && result.retryableWithoutEffects === true &&
     result.status === 503 && body?.error?.code === 'provider_unavailable';
 }
 
@@ -89,7 +89,7 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const leaseUntil = new Date(now.getTime() + 15 * 60_000).toISOString();
     const conflict = (): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'idempotency_conflict', message: '동일한 중복 키에 다른 요청을 사용할 수 없습니다.', retryable: false } } });
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
-    const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check';
+    const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check' || input.operation === 'contact_call_check';
     // Only operations whose entire effect is committed with this record may recover a stale claim.
     const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
       'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);

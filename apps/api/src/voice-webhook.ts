@@ -40,7 +40,7 @@ function bound(contact: ContactRequest | undefined, sid: string, from: string, t
     validCallId(provider, sid) && !!from && contact.providerOperationId === sid && contact.deliveryStatus === 'sent_or_connected';
 }
 export async function approvedVoiceOptions(store: PlanningStore, planning: PlanningService, userId: string, state: UserPlanningState,
-  contact: ContactRequest, clock: () => Date, phase: 'before_call' | 'webhook' = 'webhook'): Promise<VoiceOption[]> {
+  contact: ContactRequest, clock: () => Date, phase: 'before_call' | 'webhook' = 'webhook', format: 'explicit' | 'managed' = 'explicit'): Promise<VoiceOption[]> {
   const approved = state.contactApprovals.filter(value => value.approval.id === contact.approvalId);
   const approval = approved[0];
   const draft = state.contactDraftSnapshots.get(contact.id);
@@ -53,11 +53,12 @@ export async function approvedVoiceOptions(store: PlanningStore, planning: Plann
       contact.allowedOptions.length < 1 || contact.allowedOptions.length > 9) throw new Error('VOICE_APPROVAL_INVALID');
   const baseline = await planning.capture(userId, 'UTC');
   const { proposals } = validateFreshContact(state, userId, draft.subject, draft, baseline, clock);
+  const explicitLabels: string[] = [];
   const options = contact.allowedOptions.map(option => {
     const proposal = proposals.find(value => value.id === option.proposalId && value.revision === option.proposalRevision);
     if (!proposal || proposal.changeSet.changes.length !== 1) throw new Error('VOICE_OPTION_INVALID');
     const change = proposal.changeSet.changes[0]!;
-    if (change.operation === 'delete') return { optionId: option.optionId, label: '기존 약속 취소' };
+    if (change.operation === 'delete') { explicitLabels.push('기존 약속 취소'); return { optionId: option.optionId, label: '기존 약속 취소' }; }
     if (change.operation !== 'update' || !change.after.timeSlot) throw new Error('VOICE_OPTION_INVALID');
     const { startsAt, endsAt, timezone } = change.after.timeSlot;
     const minuteAligned = (value: string) => /T\d{2}:\d{2}(?::00(?:\.0+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value);
@@ -74,9 +75,19 @@ export async function approvedVoiceOptions(store: PlanningStore, planning: Plann
         `협정 세계시보다 ${hours ? `${hours}시간 ` : ''}${minutes ? `${minutes}분 ` : ''}${match[1] === '+' ? '빠름' : '느림'}`;
       return `${formatter.format(date)}, ${difference}`;
     };
-    return { optionId: option.optionId, label: `${describe(startsAt)}부터 ${describe(endsAt)}까지` };
+    const explicitLabel = `${describe(startsAt)}부터 ${describe(endsAt)}까지`;
+    explicitLabels.push(explicitLabel);
+    if (format === 'managed' && timezone === 'Asia/Seoul') {
+      const parts = (date: Date) => Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
+      const start = parts(new Date(startsAt)); const end = parts(new Date(endsAt)); const year = parts(clock()).year;
+      const date = (value: typeof start) => `${value.year === year ? '' : `${value.year}년 `}${value.month} ${value.day}일`;
+      const time = (value: typeof start) => `${value.dayPeriod} ${value.hour}시${value.minute === '00' ? '' : ` ${Number(value.minute)}분`}`;
+      const sameDay = start.year === end.year && start.month === end.month && start.day === end.day;
+      return { optionId: option.optionId, label: `${date(start)} ${time(start)}부터 ${sameDay ? '' : `${date(end)} `}${time(end)}까지` };
+    }
+    return { optionId: option.optionId, label: explicitLabel };
   });
-  if (new Set(options.map(option => option.label)).size !== options.length) throw new Error('VOICE_OPTIONS_AMBIGUOUS');
+  if (new Set(options.map(option => option.label)).size !== options.length || new Set(explicitLabels).size !== options.length) throw new Error('VOICE_OPTIONS_AMBIGUOUS');
   return options;
 }
 
@@ -105,7 +116,7 @@ export class VoiceWebhook {
     const turn = Number(query[1]); const retry = Number(query[2]);
     const externalUrl = this.tokens.publicBaseUrl + `/v1/voice/${provider}/${input.token}` + input.rawQuery;
     if (!credential || (provider === 'clawops'
-      ? credential.provider !== 'clawops' || !verifyClawOpsSignature(credential.signingSecret, input.signature, externalUrl, input.params)
+      ? credential.provider !== 'clawops' || credential.mode === 'agent' || !verifyClawOpsSignature(credential.signingSecret, input.signature, externalUrl, input.params)
       : credential.provider === 'clawops' || !verifyTwilioSignature(credential.authToken, input.signature, externalUrl, input.params))) return denied();
     // Normalize only after verifying the exact original provider parameters.
     const sid = single(input.params, provider === 'clawops' ? 'CallId' : 'CallSid');
