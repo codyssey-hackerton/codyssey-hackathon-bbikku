@@ -1,0 +1,10 @@
+# 내부 회의록과 비공개 참고자료
+/PIKKU_통합회의록_14유저스토리_1293줄.txt
+/_references/
+
+# 로컬 환경 변수와 개인 키
+.env
+.env.*
+!.env.example
+*.pem
+*.key
