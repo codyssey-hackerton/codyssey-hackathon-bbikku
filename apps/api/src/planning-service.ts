@@ -56,7 +56,7 @@ function proposalExpiry(current: ContextSnapshot, changes: ChangeSet): string | 
   }
   return compareInstants(expiresAt, current.now) <= 0 ? null : expiresAt;
 }
-export function applyChanges(state: UserPlanningState, changes: ChangeSet): { items: ScheduleItem[]; deletedIds: string[]; scheduleRevision: number } {
+export function applyChanges(state: UserPlanningState, changes: ChangeSet, deletedAt = new Date().toISOString()): { items: ScheduleItem[]; deletedIds: string[]; scheduleRevision: number } {
   const items: ScheduleItem[] = []; const deletedIds: string[] = [];
   for (const change of changes.changes) {
     if (change.operation === 'create') {
@@ -67,6 +67,8 @@ export function applyChanges(state: UserPlanningState, changes: ChangeSet): { it
       const item: ScheduleItem = { ...change.after, id: before.id, revision: before.revision + 1, sourceRefs: before.sourceRefs };
       state.items.set(item.id, item); items.push(item);
     } else {
+      const before = state.items.get(change.targetId)!;
+      (state.tombstones ??= new Map()).set(before.id, { itemId: before.id, deletedRevision: before.revision + 1, priorInvolvement: before.involvement, deletedAt });
       state.items.delete(change.targetId); deletedIds.push(change.targetId);
     }
   }
@@ -163,9 +165,10 @@ export class PlanningService {
   async command(userId: string, input: { expectedScheduleRevision: number; changeSet: ChangeSet }) {
     return this.store.transaction(userId, state => {
       if (state.scheduleRevision !== input.expectedScheduleRevision) throw new PlanningError(409, 'conflict', '일정 버전이 변경되었습니다.');
-      const result = assessment(userId, snapshot(state, 'UTC', this.now()), input.changeSet, 'user_command');
+      const now = this.now();
+      const result = assessment(userId, snapshot(state, 'UTC', now), input.changeSet, 'user_command');
       if (!result.validation.valid) throw validationError(result.validation);
-      return { outcome: 'applied' as const, ...applyChanges(state, input.changeSet) };
+      return { outcome: 'applied' as const, ...applyChanges(state, input.changeSet, now) };
     });
   }
   async checkin(userId: string, id: string, input: { expectedRevision: number; completion: 'completed' | 'incomplete' | 'unknown' }) {
@@ -256,7 +259,7 @@ export class PlanningService {
         decision: input.decision, decidedAt: now, actorRef: userId };
       state.approvals.push({ approval, subject });
       const status = input.decision === 'reject' ? 'rejected' : proposal.mode === 'coordination' ? 'awaiting_contact' : 'applied';
-      if (status === 'applied') applyChanges(state, proposal.changeSet);
+      if (status === 'applied') applyChanges(state, proposal.changeSet, now);
       const updated: Proposal = { ...proposal, revision: proposal.revision + 1, status };
       state.proposals.set(id, updated);
       return { data: { outcome: status, proposal: updated, scheduleRevision: state.scheduleRevision } } as const;

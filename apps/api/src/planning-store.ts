@@ -12,6 +12,7 @@ export type UserPlanningState = {
   scheduleRevision: number;
   contextRevision: number;
   items: Map<string, ScheduleItem>;
+  tombstones?: Map<string, { itemId: string; deletedRevision: number; priorInvolvement: 'personal' | 'shared'; deletedAt: string }>;
   facts: Map<string, MemoryFact>;
   proposals: Map<string, Proposal>;
   proposalFacts: Map<string, string>;
@@ -30,7 +31,7 @@ export type UserPlanningState = {
 };
 
 export function emptyState(): UserPlanningState {
-  return { scheduleRevision: 0, contextRevision: 0, items: new Map(), facts: new Map(), proposals: new Map(), proposalFacts: new Map(), approvals: [],
+  return { scheduleRevision: 0, contextRevision: 0, items: new Map(), tombstones: new Map(), facts: new Map(), proposals: new Map(), proposalFacts: new Map(), approvals: [],
     recipients: new Map(), contactRequests: new Map(), contactDraftSnapshots: new Map(), contactApprovals: [], contactResponses: new Map(), voiceSessions: new Map(),
     conversations: new Map(), idempotency: new Map(), reviewSchedule: null, reviewScheduleUpdatedAt: null, reviewLedger: new Map() };
 }

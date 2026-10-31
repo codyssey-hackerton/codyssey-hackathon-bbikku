@@ -18,6 +18,11 @@ import { resolveGoogleConnectionOwner } from './google-connection-owner.ts';
 import { createGoogleOAuth } from './google-oauth.ts';
 import { PhoneConnections } from './phone-connection.ts';
 import { createVoiceResponsesModel } from './voice-model.ts';
+import { createMemberAuth } from './member-auth.ts';
+import { PlanningService } from './planning-service.ts';
+import { createRoutineService } from './routine-service.ts';
+import { PostgresCalendarSyncStore } from './calendar-sync-store.ts';
+import { CalendarSyncService } from './calendar-sync.ts';
 
 const port = Number(process.env.PORT ?? 3001);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -77,6 +82,19 @@ if (connectionString) {
   store = new PostgresPlanningStore(pool);
   try { await store.migrate(); } catch { await pool.end(); throw new Error('PostgreSQL initialization failed'); }
 }
+const memberAuth = pool ? createMemberAuth({ pool, env: process.env }) : undefined;
+const routineService = pool && store ? createRoutineService({ pool, store, planning: new PlanningService(store) }) : undefined;
+const calendarSyncStore = pool ? new PostgresCalendarSyncStore(pool) : undefined;
+const calendarSync = store && calendarSyncStore ? new CalendarSyncService(store, calendarSyncStore,
+  async userId => (await googleOAuth.connections(userId)).calendarWriteConnection) : undefined;
+try {
+  await memberAuth?.migrate();
+  await routineService?.migrate();
+  await calendarSyncStore?.migrate();
+} catch {
+  await pool?.end();
+  throw new Error('Member, routine or calendar synchronization initialization failed');
+}
 let scheduler: ReviewScheduler | undefined;
 let schedulerState: 'not_configured' | 'available' | 'degraded' = schedulerEnabled ? 'degraded' : 'not_configured';
 const webOrigins = (process.env.PIKKU_WEB_ORIGINS ?? '').split(',').map(value => value.trim()).filter(Boolean);
@@ -84,7 +102,9 @@ for (const origin of webOrigins) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PIKKU_WEB_ORIGINS must contain exact HTTP(S) origins');
 }
-const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, subwayConfigured, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
+const app = buildApp({ memberAuth, routineService, calendarSync,
+  memberAllowLocalInsecure: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host),
+  previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, subwayConfigured, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }

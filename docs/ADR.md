@@ -133,3 +133,12 @@
 - **권한/의미:** 항목을 직접 선택하고 버튼을 누른 뒤 읽기만 요청한다. 빈 값과 관측 0, iOS 권한 불명확을 구분한다. 운동시간은 일시정지 포함 기록 구간이며 실제 활동 시간이 아니다. 출처/표본/5분 만료 신호를 사용하고 건강 상태·장기 선호를 추정하지 않는다.
 - **영향:** Expo Go/웹은 미지원 안내를 제공하며 네이티브 개발 빌드가 필요하다. 앱 Android 최소 API를 24→26으로 올렸고 건강 연결은 API 28 이상이다. 개발용 앱 ID·읽기 권한만 설정했다. iPhone은 무료 Personal Team으로 테스트 가능하나 실제 서명/설치는 별도다.
 - **다음 경계:** 건강 원본·요약을 서버/LLM/연락에 전송하지 않는다. 이후 AI 활용은 별도 동의·최소 전송·보관/삭제 계약을 먼저 합의한다. [구현·설치·검증 기록](WEARABLE_INTEGRATION.md) · [로컬 계약 §15](CONTRACTS.md#15-건강-데이터-로컬-전용-계약)
+
+## ADR-014 — 회원·반복 루틴·Calendar 쓰기 증분
+
+- **상태:** 2026-11-01 사용자가 세 기능의 실제 병렬 구현을 요청했다. 기존 main/전화 인계 브랜치와 분리한 기능 브랜치에서 구현하며 실제 Google 동의·원본 변경·공개 배포는 별도다.
+- **회원:** 기존 Google 클라이언트/redirect와 공식 ID token 검증을 재사용해 가입·로그인, sub 기반 회원, 해시 세션과 로그아웃을 구현한다. 앱 인증과 Calendar/Gmail 연결 권한은 분리하고 preview 자료를 새 회원에게 자동 귀속하지 않는다.
+- **루틴:** 요일·현지시각·IANA 시간대 규칙과 최대 31일의 수동 회차 생성을 채택한다. 기존 생성 회차를 보존하고 수정/비활성은 이후 미생성 회차에 적용한다. 기존 일정 command/checkin·충돌 검증을 재사용한다.
+- **동기화:** 선택 캘린더·선택 개인 이벤트의 수동 양방향 동기화를 구현한다. 삭제는 opt-in과 삭제 이력/ETag 검증을 모두 요구하고 공유 일정 승인 경계를 유지한다. 자동 webhook과 무기한 반복/전체 Calendar 일반화는 포함하지 않는다.
+- **저장:** PostgreSQL을 유지하고 보조 테이블을 추가한다. `atomicWithClient`로 일정과 회차/매핑을 같은 트랜잭션에 묶는다. 외부 쓰기 결과 불명은 재전송 없이 검토로 남긴다. 삭제 이력 필드 추가 후 구 strict decoder로의 코드 단독 롤백은 금지한다.
+- **근거/계약:** [사용 방법·한계](MEMBER_ROUTINE_CALENDAR.md), [Google OIDC](https://developers.google.com/identity/openid-connect/openid-connect), [Calendar sync](https://developers.google.com/workspace/calendar/api/guides/sync), [조건부 쓰기](https://developers.google.com/workspace/calendar/api/guides/version-resources).

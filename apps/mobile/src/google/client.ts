@@ -1,6 +1,6 @@
 import { ApiError, type ApiClient } from '../api/http';
 
-export type GoogleConnectionKind = 'calendar' | 'gmail_send' | 'gmail_read';
+export type GoogleConnectionKind = 'calendar' | 'calendar_write' | 'gmail_send' | 'gmail_read';
 export type ConnectionStatus = { status: 'available' | 'not_configured'; account: string | null };
 export interface GoogleStart { authorizationUrl: string; completionSecret: string }
 
@@ -10,6 +10,7 @@ function trustedAuthorizationUrl(value: unknown, kind: GoogleConnectionKind): va
     const url = new URL(value);
     const scopeByKind: Record<GoogleConnectionKind, string[]> = {
       calendar: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events.readonly', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'],
+      calendar_write: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'],
       gmail_send: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.send'],
       gmail_read: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly'],
     };
@@ -29,13 +30,13 @@ function trustedAuthorizationUrl(value: unknown, kind: GoogleConnectionKind): va
 export function createGoogleClient(api: ApiClient) {
   return {
     async status(kind: GoogleConnectionKind): Promise<ConnectionStatus> {
-      const path = kind === 'calendar' ? '/v1/calendar-connection' : kind === 'gmail_send' ? '/v1/email-connection' : '/v1/email-reply-connection';
+      const path = kind === 'calendar' ? '/v1/calendar-connection' : kind === 'calendar_write' ? '/v1/calendar-write-connection' : kind === 'gmail_send' ? '/v1/email-connection' : '/v1/email-reply-connection';
       const data = await api.get<unknown>(path);
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ApiError('invalid_response', '연결 상태를 확인할 수 없습니다.');
       const result = data as Record<string, unknown>;
-      const account = kind === 'calendar' ? result.accountLabel : result.senderAddress;
+      const account = kind === 'calendar' || kind === 'calendar_write' ? result.accountLabel : result.senderAddress;
       if ((result.status !== 'available' && result.status !== 'not_configured') || !(account === null || typeof account === 'string') ||
-          (result.status === 'available' && kind !== 'calendar' && (typeof account !== 'string' || !account.trim()))) {
+          (result.status === 'available' && kind !== 'calendar' && kind !== 'calendar_write' && (typeof account !== 'string' || !account.trim()))) {
         throw new ApiError('invalid_response', '연결 상태를 확인할 수 없습니다.');
       }
       return { status: result.status, account: account as string | null };

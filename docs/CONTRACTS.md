@@ -301,3 +301,25 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 - 운동은 `{source,id,startAt,endAt,kind}`다. 출처+ID로 중복을 제거하고 충돌·불완전·잘림을 표시한다. `summarizeHealth`는 선택 시간대의 오늘 포함 7일로 자르고 겹치는 기록 구간을 한 번만 더한다. `exerciseMinutes`는 일시정지 포함 기록 구간 시간이며 활동 시간 보증이 아니다.
 - `HealthSummary`는 출처·조회시각·상태·선택·날짜별 값·기록·`signals`·`stale`을 갖는다. 신호 `{kind,value,sampleDays,source,calculatedAt,expiresAt}`는 완전한 결과에서만 생성하고 마지막 조회부터 5분 뒤 만료한다. 장기 선호/건강 판단을 생성하지 않는다.
 - 결과는 화면 메모리에만 보관한다. 선택/시간대 변경 시 이전 결과를 폐기하며 연결해제·앱 프로세스 종료 시 지운다. 화면만 숨긴 동안은 메모리에 유지하고 복귀 시 만료를 확인한다. OS 권한 철회와 앱 연결해제는 별개다. 서버/AI 활용을 원하는 후속 단계에서는 별도 전송·동의·삭제 계약부터 합의한다.
+
+## 16. Google 회원 인증
+
+`POST /v1/auth/google/start {}`는 공개 경로이며 `{authorizationUrl,completionSecret}`을 반환한다. 기존 `/v1/google/oauth/callback`에서 `member_` state만 회원 흐름으로 전달한다. ID token 서명·aud/iss/exp·nonce·sub·email_verified와 PKCE/state를 검증한다. `POST /v1/auth/google/complete {completionSecret,confirmationCode}`는 `{sessionToken,expiresAt,member:{id,email,displayName}}`을 반환한다. 두 앱 확인 값은 43자 base64url, 10분 이내 일회용이다. 토큰 원문은 앱 메모리에만 두고 서버는 해시/7일 만료/취소 상태를 보관한다.
+
+Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'logged_out'}`이다. 기존 preview/개발 세션은 별도 resolver로 유지하고 회원 오류가 유효 preview 인증을 대신 취소하지 않는다. 모든 응답은 기존 `{requestId,data}`/error 봉투, TLS·no-store·IP 제한을 따른다. 앱 인증은 Google 외부 서비스 권한 동의가 아니다.
+
+## 17. 반복 루틴과 회차
+
+`Routine={id,revision,title,weekdays:number[],timezone,startDate,localTime,durationMinutes,active}`. weekdays는 월1~일7, 시작일은 YYYY-MM-DD, 현지시각 HH:mm, 소요시간 1~1440분이다. `GET /v1/routines` → `{routines}`; `POST /v1/routines {requestId,title,weekdays,timezone,startDate,localTime,durationMinutes}` → `{routine}`; `PATCH /v1/routines/:id {requestId,expectedRevision,...수정값}` → `{routine}`. mutation은 Idempotency-Key를 요구한다.
+
+`POST /v1/routines/materialize {requestId,fromDate,toDate}`는 양끝 포함 최대31일의 활성 규칙을 기존 개인 고정 task 회차로 생성하고 `{createdCount,existingCount,conflicts:[{routineId,date,code:'schedule_conflict'|'invalid_local_time'}],scheduleRevision}`을 반환한다. 기본 UI 범위는 선택일 하루다. 이미 생성/삭제한 회차는 재생성하지 않으며 existingCount는 이전 생성 이력이다. 규칙 변경/비활성은 기존 회차를 바꾸지 않는다. 사용자·루틴·날짜 unique와 일정/sourceRef/멱등 기록은 같은 DB transaction이다. 회차 완료는 기존 checkin을 사용한다.
+
+## 18. Calendar 원본 쓰기와 수동 양방향 동기화
+
+§14 OAuth kind에 `calendar_write`를 추가한다. 별도 `calendar-write-connection.json`, `calendar.events`+calendarlist readonly/openid/email 권한을 쓰며 기존 readonly 자격은 보존한다. `GET /v1/calendar-write-connection` → `{status:'available'|'not_configured',accountLabel:string|null}`은 본인 연결만 표시한다.
+
+`GET /v1/calendar-sync` → `{connections}`; `GET /v1/calendar-sync/calendars` → `{calendars:[{id,summary,accessRole}]}`. `POST /v1/calendar-sync/connect {requestId,calendarId,allowDeletes?:boolean,exportItemIds?:string[]}` → `{connection}`이며 최대100개의 직접 선택한 개인 이벤트만 신규 export한다. 삭제 동의는 기본 false다. `POST /v1/calendar-sync/:id/run {requestId,expectedRevision}` → `{connection,imported,exported,deleted,conflicts:[{reason,itemId?,eventId?}],unsupportedCount}`. 같은 버전의 선택 연결만 동기화한다. `POST /v1/calendar-sync/:id/disconnect {requestId,expectedRevision}` → `{disconnected:true}`는 원본/내부 일정을 삭제하지 않는다. mutation은 멱등키를 요구하고 성공/오류 봉투는 동일하다.
+
+증분 token/410 전체 조회, ETag/If-Match, 계정/원본 바인딩을 검증한다. 양쪽 변경·공유 약속·미지원 형식은 충돌/지원불가로 남긴다. 삭제 전파는 동의 및 baseline 다음 revision의 개인 일정 tombstone 증거가 있어야 한다. 서버 사용자 state의 optional `tombstones`는 구 문서에서 빈 Map으로 읽으며 일정 삭제와 원자 저장한다.
+
+`GET /v1/calendar-sync/operations/:requestId` → `{operation:{state:'running'|'completed'|'uncertain',result?:SyncResult}}`는 본인 작업만 조회하고 외부 쓰기를 하지 않는다. 완료 result를 확인한 경우에만 유실 응답을 성공으로 복구한다. 결과 불명/중단 상태는 자동 해제·재전송하지 않는다. Calendar ID는 이메일 형식일 수 있으며 토큰·내부 fingerprint는 반환하지 않는다. 전체 의미/제한과 DB 업그레이드 경계는 [사용 안내](MEMBER_ROUTINE_CALENDAR.md)를 따른다.

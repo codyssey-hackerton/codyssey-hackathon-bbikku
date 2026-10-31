@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useFonts } from 'expo-font';
@@ -26,7 +26,11 @@ import GoogleConnectionPanel from './src/google/GoogleConnectionPanel';
 import HealthPanel from './src/health/HealthPanel';
 import DayScreen from './src/screens/DayScreen';
 import { createScheduleClient } from './src/schedule/client';
-import { civilDate, formatCivilDate } from './src/schedule/dates';
+import { civilDate, formatCivilDate, startOfDay } from './src/schedule/dates';
+import AuthPanel from './src/auth/AuthPanel';
+import { createAuthClient, type LoginResult, type Member } from './src/auth/client';
+import RoutinesPanel from './src/routines/RoutinesPanel';
+import CalendarSyncPanel from './src/calendar-sync/CalendarSyncPanel';
 
 type Tab = 'chat' | 'calendar' | 'day';
 const tabs: { id: Tab; label: string }[] = [
@@ -53,7 +57,9 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 
 function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: string }) {
   const [tab, setTab] = useState<Tab>('chat');
-  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection'>('main');
+  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'routines' | 'calendarSync'>('main');
+  const [routinesOpened, setRoutinesOpened] = useState(false);
+  const [calendarSyncOpened, setCalendarSyncOpened] = useState(false);
   const [reviewOpened, setReviewOpened] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [coordinationTarget, setCoordinationTarget] = useState<(CoordinationTarget & { title: string }) | undefined>();
@@ -78,8 +84,14 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
       {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="전화 외부 연결" onPress={() => setPanel('phoneConnection')} style={styles.importButton}>
         <Text style={styles.settingsToggleText}>전화 외부 연결</Text>
       </Pressable>}
+      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="루틴" onPress={() => { setRoutinesOpened(true); setPanel('routines'); }} style={styles.importButton}>
+        <Text style={styles.settingsToggleText}>루틴</Text>
+      </Pressable>}
       {panel === 'main' && (tab === 'calendar' || tab === 'day') && <Pressable accessibilityRole="button" accessibilityLabel="캘린더 일정 가져오기" onPress={() => setPanel('calendarImport')} style={styles.importButton}>
         <Text style={styles.settingsToggleText}>캘린더 일정 가져오기</Text>
+      </Pressable>}
+      {panel === 'main' && (tab === 'calendar' || tab === 'day') && <Pressable accessibilityRole="button" accessibilityLabel="Google 캘린더 동기화" onPress={() => { setCalendarSyncOpened(true); setPanel('calendarSync'); }} style={styles.importButton}>
+        <Text style={styles.settingsToggleText}>Google 캘린더 동기화</Text>
       </Pressable>}
       <Scene visible={chatVisible}>
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
@@ -105,6 +117,9 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
       {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
+      {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
+      {routinesOpened && <Scene visible={panel === 'routines'}><RoutinesPanel api={api} timezone={timezone} selectedDate={(() => { const date = civilDate(selectedDate, timezone); return `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`; })()}
+        onBack={() => setPanel('main')} onDay={value => { const [year, month, day] = value.split('-').map(Number); setSelectedDate(startOfDay({ year: year!, month: month!, day: day! }, timezone)); setPanel('main'); setTab('day'); }} onScheduleChanged={refresh} /></Scene>}
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
     </View>
@@ -120,6 +135,11 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
 function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const [baseUrl, setBaseUrl] = useState(defaultApiUrl);
   const [sessionToken, setSessionToken] = useState('');
+  const [member, setMember] = useState<Member | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [logoutState, setLogoutState] = useState<'idle' | 'pending' | 'unknown'>('idle');
+  const logoutOwner = useRef<object>({});
+  const logoutLock = useRef(false);
   const [urlDraft, setUrlDraft] = useState(defaultApiUrl);
   const [tokenDraft, setTokenDraft] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
@@ -135,7 +155,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   function toggleSettings() {
     if (!showSettings) {
       setUrlDraft(baseUrl);
-      setTokenDraft(sessionToken);
+      setTokenDraft(member ? '' : sessionToken);
       setTokenEdited(false);
       setSettingsError(null);
     }
@@ -149,7 +169,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       return;
     }
     const serverChanged = nextUrl !== normalizeApiBaseUrl(baseUrl);
-    const nextToken = tokenDraft.trim();
+    const nextToken = member && !tokenEdited ? sessionToken : tokenDraft.trim();
     const connectionChanged = serverChanged || nextToken !== sessionToken;
     if (connectionChanged && operationGuard.hasUnresolved()) {
       setSettingsError('처리 중이거나 결과를 확인하지 못한 요청이 있습니다. 해당 화면에서 같은 요청의 결과를 먼저 확인해 주세요. 앱을 종료하면 이 재시도 정보는 사라집니다.');
@@ -164,6 +184,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
     if (connectionChanged) {
       setBaseUrl(nextUrl);
       setSessionToken(nextToken);
+      setMember(null); setHealthMounted(false); setHealthOpen(false); setLogoutState('idle');
       // Remount every screen and discard all previous-user UI state.
       setConnectionRevision((revision) => revision + 1);
     }
@@ -171,6 +192,32 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
     setTokenEdited(false);
     setSettingsError(null);
     setShowSettings(false);
+  }
+
+  function signedIn(result: LoginResult) {
+    if (operationGuard.hasUnresolved()) return false;
+    setSessionToken(result.sessionToken); setMember(result.member); setTokenDraft(''); setTokenEdited(false);
+    setConnectionRevision(revision => revision + 1); setHealthMounted(false); setHealthOpen(false);
+    setShowSettings(false); setAuthOpen(false); setLogoutState('idle'); return true;
+  }
+
+  function clearLocalSession() {
+    if (operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+    setSessionToken(''); setMember(null); setTokenDraft(''); setTokenEdited(false);
+    setConnectionRevision(revision => revision + 1); setHealthMounted(false); setHealthOpen(false); setLogoutState('idle');
+  }
+
+  async function logout() {
+    if (logoutLock.current || operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+    logoutLock.current = true; setSettingsError(null); setLogoutState('pending');
+    operationGuard.update(logoutOwner.current, { status: 'pending' });
+    try {
+      await createAuthClient(baseUrl).logout(api);
+      operationGuard.clear(logoutOwner.current);
+      setSessionToken(''); setMember(null); setTokenDraft(''); setTokenEdited(false);
+      setConnectionRevision(revision => revision + 1); setHealthMounted(false); setHealthOpen(false); setLogoutState('idle');
+    } catch { setLogoutState('unknown'); }
+    finally { logoutLock.current = false; operationGuard.clear(logoutOwner.current); }
   }
 
   return (
@@ -191,6 +238,12 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       </View>
       {showSettings && (
         <View style={styles.settings}>
+          {member ? <><Text style={styles.settingLabel}>로그인: {member.displayName || member.email}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="로그아웃" disabled={logoutState === 'pending'} onPress={() => void logout()} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>로그아웃</Text></Pressable>
+            {logoutState === 'unknown' && <><Text accessibilityRole="alert" style={styles.error}>로그아웃 결과를 확인하지 못했습니다. 서버 세션 폐기 여부는 확인되지 않았습니다.</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="로컬 세션 지우기" onPress={clearLocalSession} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>이 기기의 세션만 지우기</Text></Pressable></>}</> :
+            <><Pressable accessibilityRole="button" accessibilityLabel="Google 로그인 또는 가입" onPress={() => { if (operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; } setShowSettings(false); setAuthOpen(true); }} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>Google 로그인 또는 가입</Text></Pressable>
+              <Text style={styles.hint}>로그인하면 기존 미리보기 계정의 데이터가 자동으로 이전되지 않습니다.</Text></>}
           <Pressable accessibilityRole="button" accessibilityLabel="연결" accessibilityState={{ expanded: showConnections }}
             onPress={() => setShowConnections((value) => !value)} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>연결</Text></Pressable>
           {showConnections && <Pressable accessibilityRole="button" accessibilityLabel="건강 데이터" onPress={() => {
@@ -205,8 +258,9 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Pressable accessibilityRole="button" onPress={applySettings} style={styles.apply}><Text style={styles.applyText}>설정 적용</Text></Pressable>
         </View>
       )}
-      <Scene visible={!healthOpen}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} /></Scene>
-      {healthMounted && <Scene visible={healthOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen} onBack={() => setHealthOpen(false)} /></Scene>}
+      <Scene visible={!healthOpen && !authOpen}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} /></Scene>
+      {healthMounted && <Scene visible={healthOpen && !authOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen && !authOpen} onBack={() => setHealthOpen(false)} /></Scene>}
+      {authOpen && <AuthPanel baseUrl={baseUrl} onBack={() => setAuthOpen(false)} onSignedIn={signedIn} />}
     </SafeAreaView>
   );
 }

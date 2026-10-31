@@ -14,6 +14,7 @@
 
 ## 문서
 
+- [회원·루틴·Calendar 쓰기](docs/MEMBER_ROUTINE_CALENDAR.md): Google 가입/로그인, 반복 회차, 선택 캘린더 수동 양방향 동기화와 사용 조건.
 - [워치 건강 데이터 연결](docs/WEARABLE_INTEGRATION.md): 최근 7일 걸음·운동의 선택적 기기 내 읽기, 개발 빌드·권한·실기기 미검증 범위.
 - [실행 Agent 프롬프트](docs/AGENT_PROMPT.md): 팀원 원문을 현재 계약/실제 기능에 맞게 반영한 한국어 정본.
 

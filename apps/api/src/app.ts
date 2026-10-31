@@ -9,6 +9,12 @@ import { PlanningAgentRunner } from './agent-runner.ts';
 import { createExternalTools } from './external-tools.ts';
 import { createExternalAccountTools } from './external-account-tools.ts';
 import type { SessionResolver } from './auth.ts';
+import type { MemberAuth } from './member-auth.ts';
+import { registerMemberAuthRoutes } from './member-auth-routes.ts';
+import type { RoutineService } from './routine-service.ts';
+import { registerRoutineRoutes } from './routine-routes.ts';
+import type { CalendarSyncService } from './calendar-sync.ts';
+import { registerCalendarSyncRoutes } from './calendar-sync-routes.ts';
 import type { createGoogleOAuth } from './google-oauth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
 import { MODEL_ID, REASONING_EFFORT } from './model.ts';
@@ -99,11 +105,11 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
-    origin: options.webOrigins, methods: ['GET', 'POST'],
+    origin: options.webOrigins, methods: ['GET', 'POST', 'PATCH'],
     allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'], maxAge: 600,
   });
   const authenticated = new WeakMap<FastifyRequest, string>();
@@ -273,14 +279,41 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   app.addHook('preHandler', async request => {
     if (request.routeOptions.url === '/health') return;
     if (request.method === 'GET' && request.routeOptions.url === '/v1/google/oauth/callback') return;
+    if (request.method === 'POST' && ['/v1/auth/google/start', '/v1/auth/google/complete'].includes(request.routeOptions.url ?? '')) return;
     // Only provider callbacks bypass session auth; each verifies its signature and bound call.
     if (request.method === 'POST' && ['/v1/voice/twilio/:token', '/v1/voice/clawops/:token'].includes(request.routeOptions.url ?? '')) return;
     const authorization = request.headers.authorization;
     const match = typeof authorization === 'string' ? /^Bearer ([^\s]+)$/i.exec(authorization) : null;
-    const session = match && options.sessions ? await options.sessions.resolve(match[1]) : null;
+    let memberUnavailable = false;
+    let session: Awaited<ReturnType<SessionResolver['resolve']>> = null;
+    if (match) {
+      try { session = await options.memberAuth?.resolve(match[1]) ?? null; }
+      catch { memberUnavailable = true; }
+      if (!session) session = await options.sessions?.resolve(match[1]) ?? null;
+    }
+    if (!session && memberUnavailable) throw new ApiError(503, 'provider_unavailable', '회원 인증 저장소에 연결할 수 없습니다.', true);
     if (!session || !session.userId) throw new ApiError(401, 'unauthenticated', '인증이 필요합니다.');
     authenticated.set(request, session.userId);
   });
+
+  const memberGuard = options.memberAuth ? registerMemberAuthRoutes(app, options.memberAuth,
+    { allowLocalInsecure: options.memberAllowLocalInsecure }) : undefined;
+  if (!options.memberAuth) {
+    const unavailable = () => { throw new ApiError(503, 'not_configured', '회원 인증 저장소가 준비되지 않았습니다.'); };
+    app.post('/v1/auth/google/start', unavailable);
+    app.post('/v1/auth/google/complete', unavailable);
+    app.get('/v1/auth/me', unavailable);
+    app.post('/v1/auth/logout', unavailable);
+  }
+  registerRoutineRoutes(app, { service: options.routineService, resolveUser: request => authenticated.get(request) });
+  if (options.calendarSync) registerCalendarSyncRoutes(app, { service: options.calendarSync, resolveUser: request => authenticated.get(request)!, idempotency });
+  else {
+    const unavailable = () => { throw new ApiError(503, 'not_configured', '캘린더 동기화 저장소가 준비되지 않았습니다.'); };
+    app.get('/v1/calendar-sync', unavailable);
+    app.get('/v1/calendar-sync/calendars', unavailable);
+    app.get('/v1/calendar-sync/operations/:requestId', unavailable);
+    for (const path of ['/v1/calendar-sync/connect', '/v1/calendar-sync/:id/run', '/v1/calendar-sync/:id/disconnect']) app.post(path, unavailable);
+  }
 
   app.after(() => {
   void app.register(async provider => {
@@ -336,8 +369,14 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   });
   app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listCalendars() }));
   app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listEvents(parse(calendarQuery, request.query)) }));
+  app.get('/v1/calendar-write-connection', async request => {
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.calendarWriteConnection;
+    return { requestId: request.id, data: { status: connection?.userId === userId ? 'available' : 'not_configured',
+      accountLabel: connection?.userId === userId ? connection.accountLabel : null } };
+  });
   app.post('/v1/google/oauth/start', async (request, reply) => {
-    const body = parse(z.object({ kind: z.enum(['calendar', 'gmail_send', 'gmail_read']) }).strict(), request.body);
+    const body = parse(z.object({ kind: z.enum(['calendar', 'calendar_write', 'gmail_send', 'gmail_read']) }).strict(), request.body);
     let result: Awaited<ReturnType<NonNullable<typeof options.googleOAuth>['start']>>;
     try { result = await options.googleOAuth?.start(authenticated.get(request)!, body.kind); }
     catch { throw new ApiError(503, 'not_configured', 'Google 연결이 설정되지 않았습니다.'); }
@@ -345,9 +384,14 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     reply.header('Cache-Control', 'no-store');
     return { requestId: request.id, data: result };
   });
-  app.get('/v1/google/oauth/callback', async (request, reply) => {
-    const query = z.object({ state: z.string().regex(/^[A-Za-z0-9_-]{43}$/), code: z.string().max(2048).optional() }).safeParse(request.query);
-    const confirmationCode = query.success ? await options.googleOAuth?.callback(query.data.state, query.data.code ?? '') : undefined;
+  app.get('/v1/google/oauth/callback', { onRequest: async (request, reply) => {
+    const query = request.query as Record<string, unknown> | undefined;
+    if (options.memberAuth?.ownsState(query?.state)) return memberGuard?.(request, reply);
+  } }, async (request, reply) => {
+    const query = z.object({ state: z.string().regex(/^(?:member_)?[A-Za-z0-9_-]{43}$/), code: z.string().max(2048).optional() }).safeParse(request.query);
+    const confirmationCode = !query.success ? undefined : options.memberAuth?.ownsState(query.data.state)
+      ? await options.memberAuth.callback(query.data.state, query.data.code ?? '')
+      : await options.googleOAuth?.callback(query.data.state, query.data.code ?? '');
     return reply.code(confirmationCode ? 200 : 400).header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer')
       .header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'").type('text/plain; charset=utf-8')
       .send(confirmationCode ? `앱으로 돌아가 아래 연결 확인 코드를 입력해 주세요.\n\n${confirmationCode}` : 'Google 연결을 완료하지 못했습니다. 앱에서 다시 시도해 주세요.');

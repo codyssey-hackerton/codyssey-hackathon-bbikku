@@ -23,6 +23,7 @@ export class ApiError extends Error {
 export interface ApiClient {
   get<T>(path: string): Promise<T>;
   post<T>(path: string, body: object, options: { idempotencyKey: string; timeoutMs?: number }): Promise<T>;
+  patch?<T>(path: string, body: object, options: { idempotencyKey: string; timeoutMs?: number }): Promise<T>;
 }
 
 interface ApiClientOptions {
@@ -41,7 +42,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const fetcher = options.fetcher ?? fetch;
   const defaultTimeoutMs = options.timeoutMs ?? 20_000;
 
-  async function request<T>(method: 'GET' | 'POST', path: string, body?: object, idempotencyKey?: string, timeoutOverrideMs?: number): Promise<T> {
+  async function request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: object, idempotencyKey?: string, timeoutOverrideMs?: number): Promise<T> {
     const token = options.getSessionToken().trim();
     if (!token) throw new ApiError('unauthenticated', '개발 세션 토큰을 입력해 주세요.');
     if (baseUrl === null || !path.startsWith('/')) {
@@ -103,5 +104,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     get: <T>(path: string) => request<T>('GET', path),
     post: <T>(path: string, body: object, { idempotencyKey, timeoutMs }: { idempotencyKey: string; timeoutMs?: number }) =>
       request<T>('POST', path, body, idempotencyKey, timeoutMs),
+    patch: <T>(path: string, body: object, { idempotencyKey, timeoutMs }: { idempotencyKey: string; timeoutMs?: number }) =>
+      request<T>('PATCH', path, body, idempotencyKey, timeoutMs),
   };
 }

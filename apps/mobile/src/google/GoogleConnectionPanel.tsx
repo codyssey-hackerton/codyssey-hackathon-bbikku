@@ -8,6 +8,7 @@ import { createGoogleClient, type ConnectionStatus, type GoogleConnectionKind } 
 
 const connections: { kind: GoogleConnectionKind; title: string; description: string }[] = [
   { kind: 'calendar', title: 'Google 캘린더 읽기', description: '캘린더를 조회하고 선택한 일정을 가져올 수 있습니다.' },
+  { kind: 'calendar_write', title: 'Google 캘린더 동기화', description: '양방향 동기화에 필요한 별도 읽기·쓰기 권한입니다. 연결만으로 동기화하지 않습니다.' },
   { kind: 'gmail_send', title: 'Gmail 발송', description: '승인한 연락을 발송할 수 있습니다. 계정 연결만으로 메일을 보내지 않습니다.' },
   { kind: 'gmail_read', title: 'Gmail 회신 읽기', description: '처음 개인 계정을 연결할 때는 Gmail 발송을 먼저 연결한 뒤 회신 읽기를 연결해 주세요. 같은 Google 계정을 사용해야 합니다.' },
 ];
@@ -28,7 +29,7 @@ function Button({ label, onPress, disabled = false }: { label: string; onPress: 
 
 export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient; onBack: () => void }) {
   const client = useMemo(() => createGoogleClient(api), [api]);
-  const [statuses, setStatuses] = useState<Record<GoogleConnectionKind, Load>>({ calendar: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
+  const [statuses, setStatuses] = useState<Record<GoogleConnectionKind, Load>>({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
   const [attempt, setAttempt] = useState(0);
   const [start, setStart] = useState<Start>({ status: 'idle' });
   const [opened, setOpened] = useState(false);
@@ -40,7 +41,7 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
   const startGeneration = useRef(0);
   useEffect(() => {
     const current = ++generation.current;
-    setStatuses({ calendar: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
+    setStatuses({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
     for (const { kind } of connections) client.status(kind).then((data) => {
       if (generation.current === current) setStatuses((previous) => ({ ...previous, [kind]: { status: 'success', data } }));
     }, (error: unknown) => {

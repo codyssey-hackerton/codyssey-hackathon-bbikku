@@ -137,3 +137,7 @@ Terra는 음성 입출력을 직접 지원하지 않으므로 일정 판단용 `
 ## 8. 선택적 건강 데이터 — 기기 내 읽기
 
 2026-11-01 증분은 `HealthPanel → HealthAdapter(HealthKit/Health Connect) → 공통 7일 집계 → 화면 메모리` 경로다. 사용자가 항목을 선택하고 연결/재조회할 때만 읽는다. 최근 걸음 수와 운동 기록을 표시하며 서버·DB·메인 Agent·외부 연락으로 전달하지 않는다. 따라서 기존 S LLM·Tool·검증·승인 구조에 건강 입력 권한을 추가하지 않는다. Expo Go/웹은 미지원 안내를 표시하고 실제 건강 연결은 네이티브 개발 빌드에서 확인한다. [ADR-013](ADR.md#adr-013--워치-건강-데이터의-선택적-로컬-읽기) · [로컬 계약](CONTRACTS.md#15-건강-데이터-로컬-전용-계약) · [설치/검증](WEARABLE_INTEGRATION.md)
+
+## 9. 회원·루틴·Calendar 쓰기 증분
+
+2026-11-01 후속 구현은 Google 검증 sub→회원/해시 세션→기존 SessionResolver 경로를 추가한다. 루틴 규칙·수동 회차 생성은 기존 PlanningService.command/checkin에 연결하고, Calendar 쓰기·선택 동기화는 별도 동의한 제공자 포트로만 실행한다. 메인 S LLM에는 발송/쓰기 Tool을 추가하지 않는다. PostgreSQL 보조 테이블과 사용자 일정은 `atomicWithClient`의 같은 client/transaction으로 묶으며 외부 HTTP의 원자성을 주장하지 않는다. 기존 preview·읽기 전용 연결·공동 약속 승인 경계를 유지한다. [ADR-014](ADR.md#adr-014--회원반복-루틴calendar-쓰기-증분) · [계약 §16~18](CONTRACTS.md#16-google-회원-인증) · [사용 방법/한계](MEMBER_ROUTINE_CALENDAR.md)
