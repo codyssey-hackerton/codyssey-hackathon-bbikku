@@ -225,6 +225,17 @@ test('back listener follows visibility while a pending operation stays mounted',
   assert.equal(backHandler, undefined);
 });
 
+test('웹 준비 화면은 하드웨어 뒤로가기 리스너를 등록하지 않는다', async t => {
+  const { Panel } = await components;
+  const native = (globalThis as any).__preparationHarness.native;
+  const originalOs = native.Platform.OS, originalBack = native.BackHandler;
+  native.Platform.OS = 'web'; native.BackHandler = { addEventListener() { throw new Error('unexpected web listener'); } };
+  t.after(() => { native.Platform.OS = originalOs; native.BackHandler = originalBack; });
+  let closed = 0;
+  const view = harness.renderer(Panel, { target, expectedScheduleRevision: 9, timezone: 'Asia/Seoul', api: { get: async () => ({ facts: [], contextRevision: 1 }), post: async () => ({}) }, onClose: () => { closed++; }, onProposalCreated() {} });
+  t.after(() => view.unmount()); await view.settle(); press(view, '뒤로'); assert.equal(closed, 1);
+});
+
 test('question and failure are displayed without claiming a created proposal', async t => {
   const { Panel } = await components;
   for (const result of [{ kind: 'question', message: '추가 정보가 필요해요', missingFields: ['x'] }, { kind: 'failure', message: '생성할 수 없어요', code: 'conflict', retryable: false }]) {

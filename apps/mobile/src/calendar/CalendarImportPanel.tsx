@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Text, TextInput } from '../ui/typography';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
@@ -73,11 +73,11 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
 
   useEffect(() => {
     alive.current = true;
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+    const subscription = Platform.OS === 'web' ? null : BackHandler.addEventListener('hardwareBackPress', () => {
       if (!navigationLockRef.current && !prepareLock.current && !operationGuard.hasUnresolved()) backRef.current();
       return true;
     });
-    return () => { alive.current = false; generation.current += 1; subscription.remove(); };
+    return () => { alive.current = false; generation.current += 1; subscription?.remove(); };
   }, []);
 
   function clearEvents() { setEvents(null); setSelected(new Set()); setError(null); }
