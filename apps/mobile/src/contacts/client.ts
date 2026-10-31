@@ -35,8 +35,13 @@ export type ContactDraftInput = Pick<ContactRequest, 'recipientRef' | 'channel' 
 export interface ContactDecisionInput { id: string; contactRevision: number; decision: 'accept' | 'reject' }
 export interface ContactSendInput { id: string; contactRevision: number; expectedSenderAddress: string }
 export interface ContactCallInput { id: string; contactRevision: number; expectedSenderNumber: string }
-export interface PhoneConnectionInput { accountSid: string; authToken: string; fromNumber: string }
-export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null };
+export type PhoneProvider = 'twilio' | 'clawops';
+export type PhoneConnectionInput = { accountSid: string; authToken: string; fromNumber: string } |
+  { provider: 'clawops'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string };
+export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null; provider?: PhoneProvider };
+export function matchesPhoneProvider(connection: PhoneConnection, provider: PhoneProvider): boolean {
+  return provider === 'twilio' ? connection.provider === undefined || connection.provider === 'twilio' : connection.provider === 'clawops';
+}
 export type EmailConnection = { status: 'available'; senderAddress: string } | { status: 'not_configured'; senderAddress: string | null };
 export interface ContactResponse {
   id: string; contactRequestId: string; providerEventId: string; receivedAt: string;
@@ -144,11 +149,13 @@ function resultsFrom(data: unknown, id: string): ContactResults {
 function phoneConnectionFrom(data: unknown): PhoneConnection {
   if (!isRecord(data) || (data.status !== 'available' && data.status !== 'not_configured') ||
       !(data.senderNumber === null || typeof data.senderNumber === 'string') ||
+      !(data.provider === undefined || data.provider === 'twilio' || data.provider === 'clawops') ||
       !(data.lastRequestId === undefined || data.lastRequestId === null || isId(data.lastRequestId)) ||
       (data.status === 'available' && (typeof data.senderNumber !== 'string' || !/^\+[1-9]\d{1,14}$/.test(data.senderNumber)))) throw invalidResponse();
   const receipt = data.lastRequestId === undefined ? {} : { lastRequestId: data.lastRequestId as string | null };
-  if (data.status === 'available') return { status: data.status, senderNumber: data.senderNumber as string, ...receipt };
-  return { status: data.status, senderNumber: data.senderNumber as string | null, ...receipt };
+  const provider = data.provider === undefined ? {} : { provider: data.provider as PhoneProvider };
+  if (data.status === 'available') return { status: data.status, senderNumber: data.senderNumber as string, ...receipt, ...provider };
+  return { status: data.status, senderNumber: data.senderNumber as string | null, ...receipt, ...provider };
 }
 
 function dispatched(contact: ContactRequest, id: string, contactRevision: number, channel: ContactRequest['channel']): ContactRequest {
@@ -215,8 +222,10 @@ export function createContactClient(api: ApiClient): ContactClient {
     },
     async connectPhone({ input, requestId, idempotencyKey }) {
       const result = phoneConnectionFrom(await api.post<unknown>('/v1/phone-connection',
-        { requestId, accountSid: input.accountSid, authToken: input.authToken, fromNumber: input.fromNumber }, { idempotencyKey }));
-      if (result.lastRequestId !== undefined && result.lastRequestId !== requestId) throw invalidResponse();
+        { requestId, ...input }, { idempotencyKey }));
+      if (('provider' in input && result.lastRequestId !== requestId) ||
+          (result.lastRequestId !== undefined && result.lastRequestId !== requestId)) throw invalidResponse();
+      if (!matchesPhoneProvider(result, 'provider' in input ? input.provider : 'twilio')) throw invalidResponse();
       return result;
     },
     async createRecipient({ input, requestId, idempotencyKey }) {

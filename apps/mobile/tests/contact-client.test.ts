@@ -233,3 +233,22 @@ test('phone connection and call use the requested contract and validate response
   }
   await assert.rejects(createContactClient(stub({ contactRequest: sent })).call(op({ id: contactId, contactRevision: 1, expectedSenderNumber: '+15550000001' })), isInvalidResponse);
 });
+
+test('ClawOps connection sends its own credential shape and requires the matching provider', async () => {
+  const input = { provider: 'clawops' as const, accountId: 'account', apiKey: 'key', signingSecret: 'signing', fromNumber: '+15550000001' };
+  const calls: any[] = [];
+  const api: ApiClient = { get: async <T>() => ({} as T), post: async <T>(path, body, options) => {
+    calls.push({ path, body, options }); return { status: 'available', provider: 'clawops', senderNumber: input.fromNumber, lastRequestId: 'request-1' } as T;
+  } };
+  assert.equal((await createContactClient(api).connectPhone(op(input))).provider, 'clawops');
+  assert.deepEqual(calls[0].body, { requestId: 'request-1', ...input });
+  for (const provider of [undefined, 'twilio', 'unknown']) {
+    await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: input.fromNumber, ...(provider ? { provider } : {}) })).connectPhone(op(input)), isInvalidResponse);
+  }
+  for (const lastRequestId of [undefined, null, 'other-request']) {
+    await assert.rejects(createContactClient(stub({ status: 'available', provider: 'clawops', senderNumber: input.fromNumber,
+      ...(lastRequestId === undefined ? {} : { lastRequestId }) })).connectPhone(op(input)), isInvalidResponse);
+  }
+  await assert.rejects(createContactClient(stub({ status: 'available', provider: 'clawops', senderNumber: input.fromNumber }))
+    .connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: input.fromNumber })), isInvalidResponse);
+});

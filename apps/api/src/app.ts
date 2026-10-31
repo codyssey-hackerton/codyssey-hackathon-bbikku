@@ -71,7 +71,11 @@ const weatherBody = z.object({ destination: travelPoint, appointmentAt: timestam
 const subwayBody = z.object({ stationName: z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f/\\?#]/.test(value) && value !== '.' && value !== '..') }).strict();
 const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
-const phoneConnectBody = z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict();
+const phoneConnectBody = z.union([
+  z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict(),
+  z.object({ requestId: identifier, provider: z.literal('clawops'), accountId: identifier,
+    apiKey: z.string().min(1).max(1024), signingSecret: z.string().min(1).max(1024), fromNumber: phoneNumber }).strict(),
+]);
 const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
 function requestId(request: FastifyRequest): string {
@@ -91,7 +95,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -106,14 +110,23 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   const contacts = new ContactService(store, planning, options.clock);
   const contactResponses = new ContactResponseService(store, planning, options.clock);
   let voiceTokens: VoiceTokens | undefined; let voiceWebhook: VoiceWebhook | undefined;
-  if (store.durable && options.phoneConnections && options.voice && typeof options.voice.model?.classify === 'function') {
+  if (store.durable && options.phoneConnections && options.voice && (!options.voice.model || typeof options.voice.model.classify === 'function')) {
     try {
       voiceTokens = new VoiceTokens(options.voice.publicBaseUrl, options.voice.sessionKey);
       voiceWebhook = new VoiceWebhook({ store, planning, connections: options.phoneConnections, responseService: contactResponses,
         model: options.voice.model, publicBaseUrl: options.voice.publicBaseUrl, sessionKey: options.voice.sessionKey, clock: options.clock });
     } catch { voiceTokens = undefined; voiceWebhook = undefined; }
   }
-  const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens) : undefined;
+  const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens,
+    typeof options.voice?.model?.classify === 'function') : undefined;
+  const phoneProvider = async (userId: string): Promise<'twilio' | 'clawops' | null> => {
+    if (!voiceWebhook || !voiceTokens) return null;
+    const connection = await options.phoneConnections?.status(userId);
+    if (connection?.status !== 'available') return null;
+    if (connection.provider === 'clawops') return 'clawops';
+    return typeof options.voice?.model?.classify === 'function' ? 'twilio' : null;
+  };
+  const phoneReady = async (userId: string) => (await phoneProvider(userId)) !== null;
   const googleFor = async (userId: string) => {
     const current = await options.googleOAuth?.connections(userId) ?? {};
     return { gmailContact: current.gmailContact ?? (!current.blocked?.gmailContact && options.gmailContact?.userId === userId ? options.gmailContact : undefined),
@@ -133,7 +146,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     calendar: feature(google.calendarConnection?.userId === userId),
     email: feature(gmailAvailable(store, google.gmailContact, userId)),
     emailReplies: feature(!!await gmailRepliesFor(userId)),
-    phone: feature(!!voiceWebhook && !!voiceTokens && (await options.phoneConnections?.status(userId))?.status === 'available'),
+    phone: feature(await phoneReady(userId)),
     places: feature(!!options.places && options.placesConfigured === true),
     weather: feature(!!options.weather), subway: feature(!!options.subway && options.subwayConfigured === true),
     travelTime: { ...feature(!!options.travel && options.travelConfigured === true), modes: ['walk', 'transit', 'car'] as Array<'walk' | 'transit' | 'car'>,
@@ -251,8 +264,8 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   app.addHook('preHandler', async request => {
     if (request.routeOptions.url === '/health') return;
     if (request.method === 'GET' && request.routeOptions.url === '/v1/google/oauth/callback') return;
-    // This single provider route authenticates with Twilio's signature and bound call SID.
-    if (request.method === 'POST' && request.routeOptions.url === '/v1/voice/twilio/:token') return;
+    // Only provider callbacks bypass session auth; each verifies its signature and bound call.
+    if (request.method === 'POST' && ['/v1/voice/twilio/:token', '/v1/voice/clawops/:token'].includes(request.routeOptions.url ?? '')) return;
     const authorization = request.headers.authorization;
     const match = typeof authorization === 'string' ? /^Bearer ([^\s]+)$/i.exec(authorization) : null;
     const session = match && options.sessions ? await options.sessions.resolve(match[1]) : null;
@@ -272,16 +285,16 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
       }
       return params;
     });
-    provider.post('/v1/voice/twilio/:token', async (request, reply) => {
+    for (const voiceProvider of ['twilio', 'clawops'] as const) provider.post(`/v1/voice/${voiceProvider}/:token`, async (request, reply) => {
       if (!voiceWebhook) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
       const { token } = parse(z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }).strict(), request.params);
-      const signature = request.headers['x-twilio-signature'];
+      const signature = request.headers[voiceProvider === 'twilio' ? 'x-twilio-signature' : 'x-signature'];
       const contentType = request.headers['content-type'];
       const rawUrl = request.raw.url ?? ''; const queryIndex = rawUrl.indexOf('?');
-      const result = await voiceWebhook.handle({ token, rawQuery: queryIndex < 0 ? '' : rawUrl.slice(queryIndex),
+      const result = await voiceWebhook.handle({ provider: voiceProvider, token, rawQuery: queryIndex < 0 ? '' : rawUrl.slice(queryIndex),
         contentType: typeof contentType === 'string' ? contentType : '', signature: typeof signature === 'string' ? signature : '',
         params: request.body as Record<string, string | string[]> });
-      return reply.code(result.status).type('text/xml').send(result.twiml);
+      return reply.code(result.status).type(voiceProvider === 'clawops' ? 'application/xml' : 'text/xml').send(result.twiml);
     });
   });
   app.get('/health', async request => ({ requestId: request.id, data: { status: 'ok' } }));
@@ -290,7 +303,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     data: {
       storage: { mode: planning.store.mode, durable: planning.store.durable },
       model: { id: MODEL_ID, reasoningEffort: REASONING_EFFORT, status: modelStatus },
-      integrations: { calendar: (await googleFor(authenticated.get(request)!)).calendarConnection ? 'available' : 'not_configured', email: gmailAvailable(store, (await googleFor(authenticated.get(request)!)).gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: options.travel && options.travelConfigured === true ? 'available' : 'not_configured' },
+      integrations: { calendar: (await googleFor(authenticated.get(request)!)).calendarConnection ? 'available' : 'not_configured', email: gmailAvailable(store, (await googleFor(authenticated.get(request)!)).gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: await phoneReady(authenticated.get(request)!) ? 'available' : 'not_configured', travel: options.travel && options.travelConfigured === true ? 'available' : 'not_configured' },
       scheduler: { status: options.schedulerStatus?.() ?? 'not_configured' },
     },
   }));
@@ -429,8 +442,9 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     const { id } = parse(z.object({ id: identifier }).strict(), request.params); const body = parse(phoneCallBody, request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
-    if (!phoneDispatch || !voiceWebhook || !voiceTokens) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
-    const result = await phoneDispatch.call(authenticated.get(request)!, id, body, key);
+    const currentProvider = await phoneProvider(authenticated.get(request)!);
+    if (!phoneDispatch || !currentProvider) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
+    const result = await phoneDispatch.call(authenticated.get(request)!, id, body, key, currentProvider);
     return reply.code(result.status).send(result.body);
   });
 

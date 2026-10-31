@@ -9,9 +9,10 @@ import type { Proposal, ProposalClient } from '../proposals/client';
 import { ActionButton } from '../ui/ActionButton';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
-import { createContactClient } from './client';
+import { createContactClient, matchesPhoneProvider } from './client';
+import { PhoneConnectionForm } from './PhoneConnectionPanel';
 import { proposalDraft } from './draft';
-import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, RecipientInput } from './client';
+import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, PhoneConnectionInput, PhoneProvider, RecipientInput } from './client';
 
 type Load<T> = { status: 'loading' } | { status: 'error' } | { status: 'success'; data: T };
 type Props = {
@@ -163,14 +164,12 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   const [previewLoad, setPreviewLoad] = useState<{ key: string; result: Load<Proposal[]> }>({ key: '', result: { status: 'loading' } });
   const preview = previewLoad.key === previewKey ? previewLoad.result : { status: 'loading' as const };
   const [connection, setConnection] = useState<Load<EmailConnection | PhoneConnection>>({ status: 'loading' });
-  const [accountSid, setAccountSid] = useState('');
-  const [authToken, setAuthToken] = useState('');
-  const [fromNumber, setFromNumber] = useState('');
   const [setup, setSetup] = useState<'idle' | 'pending' | 'uncertain' | 'error'>('idle');
   const setupOwner = useRef<object>({});
   const setupLock = useRef(false);
   const setupNumber = useRef('');
   const setupRequestId = useRef('');
+  const setupProvider = useRef<PhoneProvider>('clawops');
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; operationGuard.clear(setupOwner.current); }; }, []);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
@@ -237,7 +236,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     (contact.channel === 'phone' ? client.phoneConnection() : client.emailConnection()).then((data) => { if (active) {
       setConnection({ status: 'success', data }); setSenderNeedsReview(false);
       if (setupLock.current && data.status === 'available' && 'senderNumber' in data && data.senderNumber === setupNumber.current &&
-          data.lastRequestId === setupRequestId.current) {
+          data.lastRequestId === setupRequestId.current && matchesPhoneProvider(data, setupProvider.current)) {
         setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current); setSetup('idle');
       }
     } },
@@ -245,19 +244,19 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     return () => { active = false; };
   }, [client, contact.channel, connectionAttempt, readOnly]);
 
-  async function connectPhone() {
-    if (setupLock.current || !accountSid.trim() || !authToken.trim() || !/^\+[1-9]\d{1,14}$/.test(fromNumber.trim())) return;
+  async function connectPhone(input: PhoneConnectionInput) {
+    if (setupLock.current) return;
     setupLock.current = true;
-    const input = { accountSid: accountSid.trim(), authToken: authToken.trim(), fromNumber: fromNumber.trim() };
     setupNumber.current = input.fromNumber;
-    setAccountSid(''); setAuthToken(''); setFromNumber(''); setSetup('pending');
+    setupProvider.current = 'provider' in input ? input.provider : 'twilio';
+    setSetup('pending');
     operationGuard.update(setupOwner.current, { status: 'pending' });
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setupRequestId.current = `request-${id}`;
     try {
       const data = await client.connectPhone({ input, requestId: setupRequestId.current, idempotencyKey: `operation-${id}` });
       if (!mounted.current) return;
-      if (data.status !== 'available' || data.senderNumber !== setupNumber.current) throw new ApiError('invalid_response', '발신 번호를 확인할 수 없습니다.');
+      if (data.status !== 'available' || data.senderNumber !== setupNumber.current || !matchesPhoneProvider(data, setupProvider.current)) throw new ApiError('invalid_response', '발신 번호를 확인할 수 없습니다.');
       setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current);
       setConnection({ status: 'success', data }); setSenderNeedsReview(false); setSetup('idle');
     } catch (error) {
@@ -355,13 +354,10 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       {connection.status === 'loading' && <Loading>발신 계정 설정을 확인하는 중입니다.</Loading>}
       {connection.status === 'error' && <ErrorNotice />}
       {connection.status === 'success' && (connection.data.status === 'available'
-        ? <Text style={styles.text}>{contact.channel === 'phone' ? '발신 번호' : '발신 계정'}: {'senderNumber' in connection.data ? connection.data.senderNumber : connection.data.senderAddress}</Text>
+        ? <Text style={styles.text}>{contact.channel === 'phone' ? '발신 번호' : '발신 계정'}: {'senderNumber' in connection.data ? connection.data.senderNumber : connection.data.senderAddress}{'senderNumber' in connection.data ? ` · 제공자: ${connection.data.provider === 'clawops' ? 'ClawOps' : 'Twilio'}` : ''}</Text>
         : <Text style={styles.notice}>{contact.channel === 'phone' ? '발신 전화번호가 설정되지 않았습니다.' : '발신 Gmail 계정이 설정되지 않았습니다. 개발 환경의 계정 연결 설정을 완료한 뒤 다시 확인해 주세요.'}</Text>)}
       {contact.channel === 'phone' && connection.status === 'success' && connection.data.status === 'not_configured' && setup !== 'uncertain' && <>
-        <TextInput accessibilityLabel="전화 계정 SID" placeholder="계정 SID" value={accountSid} onChangeText={setAccountSid} editable={!locked} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} />
-        <TextInput accessibilityLabel="전화 인증 토큰" placeholder="인증 토큰" value={authToken} onChangeText={setAuthToken} editable={!locked} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} />
-        <TextInput accessibilityLabel="발신 전화번호" placeholder="발신 번호 (E.164)" value={fromNumber} onChangeText={setFromNumber} editable={!locked} keyboardType="phone-pad" style={styles.input} />
-        <Button label="전화 연결 설정" onPress={connectPhone} disabled={locked || !accountSid.trim() || !authToken.trim() || !/^\+[1-9]\d{1,14}$/.test(fromNumber.trim())} />
+        <PhoneConnectionForm disabled={locked} onSubmit={(input) => void connectPhone(input)} />
       </>}
       {setup === 'pending' && <Loading>전화 연결 설정을 확인하는 중입니다.</Loading>}
       {setup === 'error' && <Text style={styles.error}>전화 연결 설정에 실패했습니다. 값을 다시 입력해 주세요.</Text>}

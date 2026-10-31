@@ -64,8 +64,8 @@ const projectKey = process.env.PIKKU_OPENAI_API_KEY;
 const model = projectKey?.trim() ? createResponsesModel(projectKey) : undefined;
 const voiceBaseUrl = process.env.PIKKU_VOICE_PUBLIC_BASE_URL?.trim();
 const voiceSessionKey = process.env.PIKKU_VOICE_SESSION_KEY?.trim();
-const voice = voiceBaseUrl && voiceSessionKey && projectKey?.trim()
-  ? { publicBaseUrl: voiceBaseUrl, sessionKey: voiceSessionKey, model: createVoiceResponsesModel(projectKey) } : undefined;
+const voice = voiceBaseUrl && voiceSessionKey
+  ? { publicBaseUrl: voiceBaseUrl, sessionKey: voiceSessionKey, ...(projectKey?.trim() ? { model: createVoiceResponsesModel(projectKey) } : {}) } : undefined;
 const connectionString = process.env.PIKKU_DATABASE_URL?.trim();
 const schedulerEnabled = process.env.PIKKU_SCHEDULER_ENABLED === 'true';
 if (schedulerEnabled && !connectionString) throw new Error('PIKKU_DATABASE_URL is required when the scheduler is enabled');

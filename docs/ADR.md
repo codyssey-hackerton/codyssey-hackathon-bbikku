@@ -107,3 +107,10 @@
 - **제약:** 무료 날씨 이용/출처 조건을 지킨다. 서울 HTTPS는 현재 환경 timeout으로 미검증이며 명시 HTTP 실키 연결만 성공했다. 키·역명 평문 상류 위험을 기록하고 자동 다운그레이드는 금지한다.
 - **공개 계정:** 시연용 서버 Google 연결은 정확히 한 등록 멤버에만 바인딩하며 나머지 멤버에게 공유하지 않는다. 정식 사용자별 OAuth 가입은 후속 과제다.
 - **배포:** contactResponses/voiceSessions JSONB를 공유하는 두 API/예약 프로세스를 함께 새 버전으로 전환한다. 일관된 사전 DB 백업과 격리 복원 검증을 거치며, 새 필드 저장 뒤 이전 코드만 재기동하는 롤백은 금지한다.
+
+## ADR-011 — ClawOps 전화 제공자 전환
+
+- **결정:** 2026-11-01 사용자 요청으로 신규 전화 연결의 기본 제공자를 ClawOps로 바꾼다. 기존 Twilio 설정·경로를 보존하고 불변 연락 승인·최신성·영속 실행 기록·중복 차단은 재사용한다. 키가 설정됐다는 이유로 발신하거나 모든 사용자에게 같은 계정을 공유하지 않는다.
+- **최소 경로:** 기존 전화 상태기계와 호환되는 VoiceML HTTP/XML을 사용한다. 계정 소유 번호 조회, 사용자별 비밀 저장, 승인된 대안 안내·키패드 선택·최종 재확인, 원본 콜백 HMAC-SHA256 검증과 통화/연락 결합을 구현한다. 제공자 API 접수와 상대 수락을 구분한다.
+- **이유/제한:** [VoiceML 공식 문서](https://platform.claw-ops.com/docs/build/voiceml)의 Gather는 DTMF만 지원한다. 따라서 Twilio의 speech 속성을 그대로 이식하지 않는다. [서명키](https://platform.claw-ops.com/docs/webhooks/signature-verification)는 API 키와 별도로 준비한다. 설정·모의 테스트·실제 발신 및 일정 반영 검증은 각각 기록한다.
+- **후속:** 자연스러운 양방향 음성은 [Managed Agent의 통화별 CallContext](https://docs.claw-ops.com/api-reference/claw-ops-api/calls/create-call) 또는 Voice Agent SDK로 별도 구현해야 한다. 현재 증분에는 없다. Managed Agent와 VoiceML Url은 한 발신에서 동시에 지정할 수 없으며, 전사·LLM 판단이나 임의 숫자 이벤트만으로 자동 수락·일정 반영을 허용하지 않는다. 이 선택은 메인 S LLM이나 모델을 교체하지 않는다.
