@@ -48,13 +48,15 @@ function createHarness() {
   };
   react.useLayoutEffect = react.useEffect;
   const backListeners = new Set<() => boolean>();
+  const openedLinks: string[] = [];
   const native = {
     Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
     BackHandler: { addEventListener: (_event: string, listener: () => boolean) => { backListeners.add(listener); return { remove: () => backListeners.delete(listener) }; } },
+    Linking: { openURL: async (url: string) => { openedLinks.push(url); } },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
-  const host: any = { react, native, jsx, fragment, backListeners, marker: 0, fontState: [true, null] };
+  const host: any = { react, native, jsx, fragment, backListeners, openedLinks, marker: 0, fontState: [true, null] };
   (globalThis as any).__appIntegrationHarness = host;
 
   function renderer(Component: any, initialProps: any = {}) {
@@ -172,7 +174,7 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; });
+test.afterEach(() => { globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
 
 test('preloaded proposals refresh when chat creates a proposal without resetting the workspace', async () => {
   const { App } = await components;
@@ -189,6 +191,22 @@ test('preloaded proposals refresh when chat creates a proposal without resetting
   assert.equal(chat(view).props.marker, marker);
   chat(view).props.onOpenProposals(); view.flush();
   assert.match(textOf(view.tree), /새로운 제안/);
+  view.unmount();
+});
+
+test('제안의 준비시간 관계는 모델이 제안한 값과 연결된 변경 ID로 표시한다', async () => {
+  const { App } = await components;
+  const item = proposal('시간 관계 제안');
+  const withTiming = { ...item, changeSet: { ...item.changeSet, timingConstraints: [{ appointment: { kind: 'existing', id: 'event-1', expectedRevision: 2 },
+    preparationMinutes: 15, travelMinutes: 0, bufferMinutes: null, segments: { preparation: 'c1', travel: null, buffer: null } }] } };
+  globalThis.fetch = async (url) => new URL(String(url)).pathname === '/v1/proposals/p1'
+    ? Response.json({ requestId: 'r', data: { proposal: withTiming } }) : response([withTiming]);
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
+  chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 시간 관계 제안, 확인 대기, 상세 보기'); await view.settle();
+  assert.match(textOf(view.tree), /제안된 준비·이동 관계/); assert.match(textOf(view.tree), /기준 약속: event-1/);
+  assert.match(textOf(view.tree), /준비 15분 · 이동 0분 · 여유 미확인/); assert.match(textOf(view.tree), /연결된 변경 ID: 준비 c1 · 이동 없음 · 여유 없음/);
+  assert.match(textOf(view.tree), /사용자 확인 여부를 별도로 확인/);
   view.unmount();
 });
 
@@ -244,6 +262,71 @@ test('a different account on the same API remounts state and ignores old-user li
   await view.settle();
   assert.doesNotMatch(textOf(view.tree), /이전 사용자 제안/);
   assert.match(textOf(view.tree), /새 사용자 제안/);
+  view.unmount();
+});
+
+test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사용자 상태를 화면에 노출하지 않는다', async () => {
+  const { App } = await components; const requests: any[] = [];
+  const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code',
+    state: 's'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback',
+    scope: 'openid email https://www.googleapis.com/auth/gmail.send' })}`;
+  const completionSecret = 'q'.repeat(43), confirmationCode = 'z'.repeat(43);
+  const releaseOld: ((response: Response) => void)[] = [];
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname; const auth = (init?.headers as Record<string, string>).Authorization;
+    requests.push({ path, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/calendar-connection' && auth === 'Bearer old-user') return new Promise<Response>((resolve) => { releaseOld.push(resolve); });
+    if (path === '/v1/calendar-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', accountLabel: null } });
+    if (path === '/v1/email-connection' || path === '/v1/email-reply-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', senderAddress: null } });
+    if (path === '/v1/google/oauth/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret } });
+    if (path === '/v1/google/oauth/complete') return Response.json({ requestId: 'r', data: { status: 'connected' } });
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'old-user'); press(view, '설정 적용'); await view.settle();
+  press(view, 'Google 연결'); await view.settle();
+  press(view, 'Gmail 발송 연결 시작'); await view.settle();
+  assert.equal((globalThis as any).__appIntegrationHarness.openedLinks.length, 0);
+  assert.doesNotMatch(textOf(view.tree), /ssssssssss|qqqqqqqqqq|accounts\.google\.com/);
+  assert.deepEqual(requests.find((item) => item.path === '/v1/google/oauth/start').body, { kind: 'gmail_send' });
+  press(view, 'Google 동의 화면 열기'); await view.settle();
+  assert.deepEqual((globalThis as any).__appIntegrationHarness.openedLinks, [authorizationUrl]);
+  assert.match(textOf(view.tree), /다른 사람에게 전달하지 마세요/);
+  assert.equal(input(view, 'Google 연결 확인 코드').props.secureTextEntry, true);
+  enter(view, 'Google 연결 확인 코드', confirmationCode); press(view, 'Google 연결 확인'); await view.settle();
+  assert.deepEqual(requests.find((item) => item.path === '/v1/google/oauth/complete').body, { completionSecret, confirmationCode });
+  assert.equal(requests.filter((item) => item.path === '/v1/google/oauth/complete').length, 1);
+  assert.doesNotMatch(textOf(view.tree), /qqqqqqqqqq|zzzzzzzzzz/);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'new-user'); press(view, '설정 적용'); await view.settle();
+  press(view, 'Google 연결'); await view.settle();
+  for (const resolve of releaseOld) resolve(Response.json({ requestId: 'r', data: { status: 'available', accountLabel: '이전 계정' } })); await view.settle();
+  assert.doesNotMatch(textOf(view.tree), /이전 계정|ssssssssss/);
+  assert.equal(nodes(view.tree).some((item) => item.type === 'Pressable' && textOf(item.children) === 'Google 동의 화면 열기'), false);
+  view.unmount();
+});
+
+test('Google 연결 확인 응답 유실은 자동 재시도하지 않고 새 연결을 안내한다', async () => {
+  const { App } = await components; let completions = 0;
+  const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code',
+    state: 's'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback',
+    scope: 'openid email https://www.googleapis.com/auth/gmail.send' })}`;
+  globalThis.fetch = async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/calendar-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', accountLabel: null } });
+    if (path === '/v1/email-connection' || path === '/v1/email-reply-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', senderAddress: null } });
+    if (path === '/v1/google/oauth/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
+    if (path === '/v1/google/oauth/complete') { completions++; throw new Error('connection lost'); }
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test-user'); press(view, '설정 적용'); await view.settle();
+  press(view, 'Google 연결'); await view.settle(); press(view, 'Gmail 발송 연결 시작'); await view.settle();
+  enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); press(view, 'Google 연결 확인'); await view.settle();
+  assert.equal(completions, 1); assert.match(textOf(view.tree), /연결 결과를 확인하지 못했습니다/);
+  assert.equal(nodes(view.tree).some((item) => item.type === 'TextInput' && item.props.accessibilityLabel === 'Google 연결 확인 코드'), false);
+  press(view, '연결 상태 다시 확인'); await view.settle(); assert.equal(completions, 1);
   view.unmount();
 });
 
@@ -506,6 +589,8 @@ test('proposal detail opens an editable revision draft with all changes and with
   const { App } = await components;
   const original = proposal('원본 제안');
   original.changeSet.changes.push({ ...original.changeSet.changes[0], changeId: 'c2', after: { ...original.changeSet.changes[0].after, title: '두 번째 일정' } });
+  (original.changeSet as any).timingConstraints = [{ appointment: { kind: 'existing', id: 'event-1', expectedRevision: 2 },
+    preparationMinutes: 15, travelMinutes: 0, bufferMinutes: null, segments: { preparation: 'c1', travel: null, buffer: null } }];
   const writes: string[] = [];
   globalThis.fetch = async (url, init) => {
     if (init?.method === 'POST') writes.push(String(url));
@@ -522,6 +607,7 @@ test('proposal detail opens an editable revision draft with all changes and with
   assert.match(request.text, /제안 ID: p1 · 버전: 1/);
   assert.match(request.text, /"changeId": "c1"/);
   assert.match(request.text, /"changeId": "c2"/);
+  assert.match(request.text, /"timingConstraints"/); assert.match(request.text, /"preparation": "c1"/);
   assert.match(request.text, /별도 검토와 승인/);
   assert.deepEqual(writes, []);
   view.unmount();

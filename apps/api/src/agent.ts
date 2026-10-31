@@ -4,7 +4,7 @@ import { z } from 'zod';
 const Decision = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('answer'), text: z.string().min(1) }),
   z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
-  z.object({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.object({ changes: z.array(z.unknown()) }), evidenceRefs: z.array(z.string()) }),
+  z.object({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.object({ changes: z.array(z.unknown()), timingConstraints: z.array(z.unknown()).optional() }), evidenceRefs: z.array(z.string()) }),
   z.object({ kind: z.literal('tool_call'), name: z.string(), input: z.unknown(), providerTrace: z.unknown().optional() }),
 ]);
 export type AgentDecision = z.infer<typeof Decision>;

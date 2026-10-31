@@ -18,7 +18,7 @@ test('prompt preserves the decision contract and current safety boundaries', () 
     'ScheduleFields', 'expectedRevision', 'evidenceRefs', 'coordinationTarget',
     '지연이 일정에 영향이 없으면', '기한이 지났으면', '원래 날짜 범위',
     'context.capabilities', '실제 제공자 호출 성공이나 모델의 도구 호출 권한이 아니다',
-    '준비·이동과 약속 사이의 연결이나 실제 경로를 검증하지 않는다',
+    '명시된 timingConstraints', '명시하지 않은 관계나 실제 경로·이동시간은 검증하지 않는다',
     '실제 Gmail 회신은 unclear', '사용자의 명시적 확인',
     'triggerEvent', 'targetDate', '트리거 자체는 일정 변경이나 연락 승인이 아니다',
     '수정·부분 선택', '새 후보를 검증하고 다시 확인받는다', '거절 이유는 선택 사항',

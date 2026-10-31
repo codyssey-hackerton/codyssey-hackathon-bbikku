@@ -40,6 +40,10 @@ export async function createPreparationProposal(planning: PlanningService, userI
       timeSlot: { startsAt: segment.startsAt, endsAt: segment.endsAt, timezone: value.timezone }, durationMinutes: segment.duration,
       deadline: appointmentStart, flexibility: 'flexible', involvement: 'personal', completion: 'pending' },
   }));
-  return planning.saveProposal(baseline, { kind: 'proposal', changeSet: { changes }, evidenceRefs: [target.id],
+  return planning.saveProposal(baseline, { kind: 'proposal', changeSet: { changes, timingConstraints: [{
+    appointment: { kind: 'existing', id: target.id, expectedRevision: target.revision },
+    preparationMinutes: value.preparationMinutes, travelMinutes: value.travelMinutes, bufferMinutes: value.bufferMinutes,
+    segments: { preparation: value.preparationMinutes > 0 ? 'preparation' : null, travel: value.travelMinutes > 0 ? 'travel' : null, buffer: value.bufferMinutes > 0 ? 'buffer' : null },
+  }] }, evidenceRefs: [target.id],
     reason: `사용자 입력: 준비 ${value.preparationMinutes}분, 이동 ${value.travelMinutes}분, 도착 여유 ${value.bufferMinutes}분. 계산: 준비 ${timing.preparationStartAt}, 출발 ${timing.departureAt}, 도착 ${arrival.departureAt}, 일정 시작 ${appointmentStart}.` });
 }

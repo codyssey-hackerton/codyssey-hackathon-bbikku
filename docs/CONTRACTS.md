@@ -23,7 +23,7 @@
 | `ContextSnapshot` | `now`, `timezone`, `scheduleRevision`, `contextRevision`, `items: ScheduleItem[]`, `facts: MemoryFact[]`, `missingFields: string[]` | 필요한 범위만 조회. 만료된 사실은 유효한 맥락에서 제외. |
 | `ValidationResult` | `valid: boolean`, `conflicts: {targetIds: string[], reason: string, timeSlot?: TimeSlot}[]`, `missingFields: string[]`, `protectedTargets: string[]`, `checkedScheduleRevision`, `checkedContextRevision`, `checkedAt` | 부족 정보/충돌/보호 대상이 있으면 valid=false. |
 
-`ChangeSet = {changes: Change[]}`. Change는 다음 중 하나다. 빈 변경 묶음은 허용하지 않는다. 서로 의존하는 묶음은 전체 적용 또는 전체 거절한다.
+`ChangeSet = {changes: Change[], timingConstraints?: TimingConstraint[]}`. Change는 다음 중 하나다. 빈 변경 묶음은 허용하지 않는다. 서로 의존하는 묶음은 전체 적용 또는 전체 거절한다.
 
 ```ts
 type Change =
@@ -33,6 +33,10 @@ type Change =
 ```
 
 update는 사용자에게 보여준 전체 편집 필드를 교체한다. `before`, ID, 출처, 실제 버전은 서버가 조회/부여한다. 클라이언트가 보낸 과거 값은 검증 근거가 아니다. 같은 대상을 한 묶음에서 여러 번 수정하지 않는다.
+
+`TimingConstraint`는 `{appointment: {kind: 'existing', id, expectedRevision} | {kind: 'change', changeId}, preparationMinutes: number/null, travelMinutes: number/null, bufferMinutes: number/null, segments: {preparation: string/null, travel: string/null, buffer: string/null}}`다. 약속은 기존 항목의 ID·버전 또는 같은 변경 묶음의 약속 변경을 참조한다. 각 소요가 0이면 해당 segment는 null이며, 양수 구간은 같은 제안의 create/update task를 changeId로 참조하고 역산한 시작·종료·소요와 정확히 일치해야 한다. 같은 관계 또는 다른 관계 사이의 중복·충돌과 불일치는 거절한다. null 소요는 `missingFields`로 표시해 질문하며 0으로 추정하지 않는다. 저장·승인·연락 반영 시 같은 서버 검증을 적용한다.
+
+이 제약은 제안에 명시된 관계만 검증한다. 소요 숫자는 모델이 제안한 입력일 수 있으므로 사용자 확인 사실이나 실제 경로의 검증 결과로 표현하지 않는다. 제약이 없는 암묵적 관계 전체의 보장도 아니다. 선택 필드가 저장된 데이터는 구버전 strict decoder와 호환되지 않을 수 있으므로 같은 DB의 API·예약 프로세스를 구·신 버전으로 혼용하거나 검토 없이 구버전 코드만 롤백하지 않는다.
 
 `Proposal` 필수 필드: `id`, `revision`, `mode: personal/coordination`, `baseScheduleRevision`, `baseContextRevision`, `changeSet`, `beforeItems: ScheduleItem[]`, `reason`, `evidenceRefs: string[]`, `validation`, `createdAt`, `expiresAt: string/null`, `status: pending/awaiting_contact/applied/rejected/stale/expired/failed`. 대안마다 별도의 Proposal ID를 쓴다. 공동 약속의 시간 변경·취소가 들어가면 coordination이다. v1 연락 조정은 공동 event 한 건만 다룬다. shared task의 시간 변경·삭제·personal 전환은 지원 전이므로 거절하고, 제목 같은 비조정 변경만 해당 권한 범위에서 허용한다. `coordinationTarget: {id, expectedRevision}/null`을 Proposal에 보관하며 personal은 null이다.
 
@@ -251,4 +255,12 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 ## 13. 공개 시연 Google 연결 소유자
 
-신뢰된 서버 설정 `PIKKU_GOOGLE_CONNECTION_USER_ID`와 명시적 절대 자격 디렉터리로 기존 Google 발송·회신·Calendar 포트를 하나의 등록된 preview 멤버에만 연결한다. 소유자는 목록에서 정확히 한 번 존재해야 하며 잘못된 지정은 시작 실패로 처리한다. 다른 멤버는 연결 상태 not_configured 및 접근 거절을 받는다. 개발 인증의 기본 local-developer 동작은 유지한다. 이 설정은 정식 다중 사용자 OAuth 가입 기능이 아니며 개인 연결을 팀 전체에 공유하지 않는다. 기존 `/v1/capabilities` 응답 구조는 유지한다.
+신뢰된 서버 설정 `PIKKU_GOOGLE_CONNECTION_USER_ID`와 명시적 절대 자격 디렉터리로 기존 Google 발송·회신·Calendar 포트를 하나의 등록된 preview 멤버에만 연결한다. 소유자는 목록에서 정확히 한 번 존재해야 하며 잘못된 지정은 시작 실패로 처리한다. 다른 멤버에게 기존 소유자의 연결을 공유하지 않으며, 별도의 사용자별 연결은 §14를 따른다. 개발 인증의 기본 local-developer 동작은 유지한다. 이 설정은 정식 다중 사용자 OAuth 가입 기능이 아니다. 기존 `/v1/capabilities` 응답 구조는 유지한다.
+
+## 14. 사용자별 Google OAuth — 통합 중인 계약
+
+인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'gmail_send' | 'gmail_read'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
+
+사용자가 원래 앱에 확인 코드를 입력하면 인증된 `POST /v1/google/oauth/complete`에 `{completionSecret, confirmationCode}`를 보내고 성공 시 `{requestId, data: {status: 'connected'}}`를 받는다. 두 값은 43자 base64url이며 시작부터 10분 안에 같은 사용자에게서 함께 확인돼야 한다. 만료·불일치·재사용은 일반 400 오류다. 완료 요청은 한 번만 시도한다. 응답을 잃으면 자동 재시도하지 않고 연결 상태를 새로 조회하며, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 이미 있었다면 상태가 연결됨이어도 새 계정으로 변경됐는지는 확인할 수 없다. 취소·화면 이탈·계정 전환 시 앱의 비밀값을 지운다. 재시작 시 진행 중인 상태는 사라진다.
+
+계정·권한 확인 후 사용자별 0700 디렉터리에 자격 파일을 0600으로 저장한다. 진행 중인 OAuth 상태는 단일 프로세스 메모리에 있으며 다중 인스턴스에서 공유되지 않는다. Gmail 회신 계정은 같은 사용자의 발송 계정과 일치해야 한다. 인증코드·access/refresh token은 앱 응답에 반환하지 않으며, OAuth 동의는 메일 발송 승인이 아니다. 이 흐름은 기존 앱 사용자의 외부 Google 연결이며 회원가입이나 Google 계정으로 앱에 로그인하는 기능이 아니다. 실제 Google 동의·공개 배포 검증은 별도로 기록한다.

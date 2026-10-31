@@ -70,6 +70,17 @@ test('생성·수정·삭제의 전체 전후 필드와 검증 정보를 읽는�
   assert.deepEqual(await client.get(full.id), full);
 });
 
+test('준비시간 관계의 확정된 구조를 보존하고 잘못된 구조를 거절한다', async () => {
+  const timing = { appointment: { kind: 'existing', id: before.id, expectedRevision: 4 }, preparationMinutes: 15, travelMinutes: 0, bufferMinutes: null, segments: { preparation: 'change-1', travel: null, buffer: null } };
+  const withTiming = { ...proposal, changeSet: { ...proposal.changeSet, timingConstraints: [timing] } };
+  assert.deepEqual(await setup([ok({ proposal: withTiming })]).client.get(proposal.id), withTiming);
+  for (const invalid of [{ ...timing, segments: null }, { ...timing, segments: { preparation: '', travel: null, buffer: null } },
+    { ...timing, preparationMinutes: -1 }, { ...timing, appointment: { kind: 'unknown' } }, { ...timing, travelMinutes: '0' }]) {
+    const value = { ...proposal, changeSet: { ...proposal.changeSet, timingConstraints: [invalid] } };
+    await assert.rejects(setup([ok({ proposal: value })]).client.get(proposal.id), caught => caught.code === 'invalid_response');
+  }
+});
+
 test('불완전한 전후·검증·상태 또는 잘못된 상세 ID를 거절한다', async () => {
   const invalid = [
     { ...proposal, beforeItems: [] },

@@ -36,7 +36,17 @@ const change = z.discriminatedUnion('operation', [
   z.object({ changeId: identifier, operation: z.literal('update'), targetId: identifier, expectedRevision: revision, after: fields }).strict(),
   z.object({ changeId: identifier, operation: z.literal('delete'), targetId: identifier, expectedRevision: revision }).strict(),
 ]);
-export const changeSet = z.object({ changes: z.array(change).min(1).max(100) }).strict();
+const timingConstraint = z.object({
+  appointment: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('existing'), id: identifier, expectedRevision: revision }).strict(),
+    z.object({ kind: z.literal('change'), changeId: identifier }).strict(),
+  ]),
+  preparationMinutes: z.number().finite().nonnegative().nullable(),
+  travelMinutes: z.number().finite().nonnegative().nullable(),
+  bufferMinutes: z.number().finite().nonnegative().nullable(),
+  segments: z.object({ preparation: identifier.nullable(), travel: identifier.nullable(), buffer: identifier.nullable() }).strict(),
+}).strict();
+export const changeSet = z.object({ changes: z.array(change).min(1).max(100), timingConstraints: z.array(timingConstraint).max(100).optional() }).strict();
 export const commandBody = z.object({ requestId: identifier, expectedScheduleRevision: z.number().int().min(0), changeSet }).strict();
 export const checkinBody = z.object({ requestId: identifier, expectedRevision: revision, completion: z.enum(['completed', 'incomplete', 'unknown']) }).strict();
 export const memoryBody = z.object({
