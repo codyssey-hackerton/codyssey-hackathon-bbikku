@@ -136,3 +136,29 @@ test('selected Google contact only fills a number; sending still needs separate 
  press(view, '전화 내용 확인'); await view.settle(); assert.equal(writes.length, 1); assert.equal(writes[0].path, '/v1/schedule-calls');
  assert.match(text(view.tree), /선택한 상대: 친구/); assert.ok(nodes(view.tree).some(n => n.props?.accessibilityLabel === '승인하고 전화'));
 });
+test('search failure permits manual input and explicit selection of one of multiple numbers never dispatches', async t => {
+ const writes = []; let searches = 0;
+ const api = { async get() { searches++; if (searches === 1) throw new ApiError('provider_unavailable', 'internal', true, 503);
+   return { contacts: [{ id: 'contact-0', displayName: '친구', phoneNumbers: [
+     { label: '휴대폰', number: '010-1111-2222' }, { label: '직장', number: '010-9876-5432' },
+   ] }], truncated: false }; },
+  async post(path, body) { writes.push({ path, body }); return { call: { ...base, toNumber: body.toNumber } }; } };
+ const view = setup(api); t.after(view.close);
+ press(view, '연락처에서 선택'); press(view, 'Google 연락처'); input(view, '연락처 이름 검색', '친구'); press(view, '이름 검색'); await view.settle();
+ assert.match(text(view.tree), /검색하지 못했습니다/); assert.doesNotMatch(text(view.tree), /internal/);
+ press(view, '연락처 선택 취소'); input(view, '받는 전화번호', '01012345678'); assert.equal(writes.length, 0);
+ press(view, '전화 내용 확인'); await view.settle(); assert.equal(writes.length, 1);
+ assert.equal(writes[0].body.toNumber, '+821012345678'); assert.ok(!writes.some(write => write.path.endsWith('/approve')));
+ view.close();
+ const selectedView = setup(api); t.after(selectedView.close);
+ press(selectedView, '연락처에서 선택'); press(selectedView, 'Google 연락처'); input(selectedView, '연락처 이름 검색', '친구'); press(selectedView, '이름 검색'); await selectedView.settle();
+ assert.ok(nodes(selectedView.tree).some(n => n.props?.accessibilityLabel === '친구 · 휴대폰 · 010-1111-2222'));
+ assert.ok(nodes(selectedView.tree).some(n => n.props?.accessibilityLabel === '친구 · 직장 · 010-9876-5432'));
+ assert.equal(input(selectedView, '받는 전화번호'), ''); assert.equal(writes.length, 1);
+ press(selectedView, '친구 · 직장 · 010-9876-5432'); assert.equal(input(selectedView, '받는 전화번호'), '+821098765432'); assert.equal(writes.length, 1);
+ press(selectedView, '전화 내용 확인'); await selectedView.settle();
+ assert.equal(writes.length, 2); assert.equal(writes[1].path, '/v1/schedule-calls'); assert.equal(writes[1].body.toNumber, '+821098765432');
+ assert.match(text(selectedView.tree), /선택한 상대: 친구/); assert.match(text(selectedView.tree), /받는 번호: \+821098765432/);
+ assert.ok(nodes(selectedView.tree).some(n => n.props?.accessibilityLabel === '승인하고 전화'));
+ assert.ok(!writes.some(write => write.path.endsWith('/approve')));
+});
