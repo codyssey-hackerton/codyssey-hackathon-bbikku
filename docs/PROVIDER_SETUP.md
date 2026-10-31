@@ -137,7 +137,7 @@ Gather/Say 턴 대화는 승인된 시간 대안 선택에 한정한다. 선택�
 
 ## 4. Open-Meteo·서울 지하철 — 2026-10-31 추가
 
-Open-Meteo는 키 없이 목적지 좌표·약속 시각을 전달해 시간별 예보를 읽는다. `Asia/Seoul`, 섭씨·mm·km/h를 사용한다. 무료 API는 비상업적 용도이며 일 10,000회 미만·시간 5,000회·분 600회 한도와 CC BY 4.0 출처 표시 조건을 확인했다. 화면에서 Open-Meteo/라이선스를 연결한다. 앱 캐시는 한도 준수 보조이며 여러 프로세스를 합친 전역 quota 보장은 없다. 상업적 사용 전 별도 플랜/조건 확인이 필요하다. [예보 공식 문서](https://open-meteo.com/en/docs) · [이용 조건](https://open-meteo.com/en/terms) · [라이선스](https://open-meteo.com/en/licence)
+Open-Meteo는 키 없이 목적지 좌표와 서울 기준 날짜(start_date/end_date)를 상류에 전달해 시간별 예보를 읽고, 약속 시각에 해당하는 예보는 삐꾸 서버에서 선택한다. `Asia/Seoul`, 섭씨·mm·km/h를 사용한다. 무료 API는 비상업적 용도이며 일 10,000회 미만·시간 5,000회·분 600회 한도와 CC BY 4.0 출처 표시 조건을 확인했다. 화면에서 Open-Meteo/라이선스를 연결한다. 앱 캐시는 한도 준수 보조이며 여러 프로세스를 합친 전역 quota 보장은 없다. 상업적 사용 전 별도 플랜/조건 확인이 필요하다. [예보 공식 문서](https://open-meteo.com/en/docs) · [이용 조건](https://open-meteo.com/en/terms) · [라이선스](https://open-meteo.com/en/licence)
 
 서울 OA-12764 realtimeStationArrival은 서버 비밀 `SEOUL_SUBWAY_API_KEY`를 사용한다. `SEOUL_SUBWAY_TRANSPORT` 미지정은 https, 명시 http/https 외 값은 not_configured다. 공식 예제는 HTTP이며 이 환경의 HTTPS 공개 sample은 timeout, HTTP sample과 실키 어댑터는 성공했다. HTTPS 미지원으로 확정하지 않는다. 이번 연결은 **명시 http**로 검증했다. 이 상류 구간의 키·역명은 암호화되지 않으며 도청·변조 위험이 있다. 앱→삐꾸 공개 API의 HTTPS와 구분한다. 자동 다운그레이드/redirect는 없다. [서울 공식 API](https://data.seoul.go.kr/dataList/openApiView.do?infId=OA-12764&srvType=A)
 

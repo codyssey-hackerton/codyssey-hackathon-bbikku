@@ -243,7 +243,7 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 ### 서울 지하철
 
-`POST /v1/subway/arrivals` 입력 `{stationName}`. 성공 data는 `{provider:'seoul',stationName,fetchedAt,arrivals:[{lineId,direction,destination,arrivalSeconds,message,detailMessage,observedAt,stale,staleInMs}]}`다. INFO-200은 정상 빈 배열이다. observedAt은 서울 원본 recptnDt를 한국시간으로 해석한 UTC ISO, fetchedAt은 상류 응답을 읽은 시각이다. arrivalSeconds는 `max(0, 원본 barvlDt - floor((반환시각-recptnDt)/1000))`이며 매 반환에 재계산한다. staleInMs는 생성시각 기준 120초까지 남은 값(0..120000), stale은 `staleInMs===0`이다. 캐시 적중은 fetchedAt을 바꾸지 않는다. 클라이언트는 응답 지연/단조시계 경과를 차감하고 15초 표시 유효기간 및 앱 비활성화·입력 변경을 처리한다. 자동 polling은 없다.
+`POST /v1/subway/arrivals` 입력 `{stationName}`. 성공 data는 `{provider:'seoul',stationName,fetchedAt,arrivals:[{lineId,direction,destination,arrivalSeconds,message,detailMessage,observedAt,stale,staleInMs}]}`다. INFO-200은 정상 빈 배열이다. observedAt은 서울 원본 recptnDt를 한국시간으로 해석한 UTC ISO, fetchedAt은 상류 응답을 읽은 시각이다. arrivalSeconds는 `max(0, 원본 barvlDt - max(0, floor((반환시각-recptnDt)/1000)))`이며 매 반환에 재계산한다. staleInMs는 생성시각 기준 120초까지 남은 값(0..120000), stale은 `staleInMs===0`이다. 캐시 적중은 fetchedAt을 바꾸지 않는다. 클라이언트는 응답 지연/단조시계 경과를 차감하고 15초 표시 유효기간 및 앱 비활성화·입력 변경을 처리한다. 자동 polling은 없다.
 
 15초 메모리 캐시·동시 중복 합치기, 분당 20회/일 900회 호출 제한, 5초 timeout, 원본 선두 100행까지만 조회한다. 한도와 캐시는 프로세스 로컬이며 재시작 후 유지되거나 여러 인스턴스 간 공유되지 않는다. 오류는 400 invalid_request, 503 not_configured/unavailable, 504 timeout, 502 invalid_response, 429 rate_limited다. 이 정보는 현재 역의 열차 도착 안내이며 사용자의 전체 이동시간·환승·약속 시각 예측이 아니다.
 

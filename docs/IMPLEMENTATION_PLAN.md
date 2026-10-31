@@ -2,6 +2,15 @@
 
 2026-10-31 · 00 MAIN. 기준: PRD §2 / ADR v1 / CONTRACTS v1. 문서 PR #1은 병합됐으며 이 계획은 그 기준의 개발·검증 진행을 기록한다. 아키텍처를 다시 선택하지 않는다.
 
+## 공개 배포 완료 — 2026-10-31
+
+- **Git:** [PR #5](https://github.com/codyssey-hackerton/codyssey-hackathon-bbikku/pull/5) main 병합 완료. 소스 `d043d81b610a94193dea14e9a1ba20c00f98be96`, 병합 `79514971bed86880f652b937764f8874e9fc101c`, tree `83b3a9caef158e1bc03ebdd4442b66dd8da24aa3`. 이후 이 기록의 문구 수정은 배포 소스 변경과 구분한다.
+- **공개 웹:** https://pikku-bbikku-web-preview.vercel.app — Vercel production `dpl_4MfzwckZDEd2PaGmFnokJnW5pHYn`. 웹·새 JS bundle HTTP200, CORS preflight204. 기존 quick tunnel 주소는 유지했지만 영구 고정 주소를 보장하지 않는다.
+- **API/DB:** 공개·VPN 두 API와 내장 예약기를 함께 중지한 시점의 PostgreSQL 백업을 생성하고 별도 임시 DB 복원으로 schema_version1·기존 사용자 상태 4행·pg-boss46을 확인했다. 두 API 모두 위 소스 커밋으로 전환했고 active/health200, 기존 터널 active를 확인했다. 원본 DB를 복원하거나 기존 사용자 일정을 변경하지 않았다. 새 필드 저장 후 이전 코드만 롤백하는 방식은 금지한다.
+- **계정:** 기존 팀원 접근 코드 5개와 ID를 보존하고 Google 연결 전용 참여자 한 명을 추가했다. 해당 사용자의 Calendar/Gmail/회신 상태 available, Calendar 실제 목록3개 HTTP200. 다른 기존 참여자는 세 연결 모두 not_configured이고 Calendar 읽기는503으로 거절됐다. 비밀값과 접근 코드는 서버 private 파일 및 사용자 로컬 private 파일에만 두며 저장소·웹 bundle에는 넣지 않았다.
+- **실제 공개 smoke:** 감사 채팅 HTTP200, 카카오 검색15건, 날씨 HTTP200, 서울 지하철17건, scheduler available 및 자동 검토 설정 조회 HTTP200. 기존 사용자 데이터 변경과 새 외부 메일 발송 없이 확인했다. 로컬 격리 검증에서 완료한 실제 회신 반영/Calendar import를 공개 사용자 DB에 반복 실행하지 않았다.
+- **남은 한계:** 실제 브라우저의 전체 상호작용과 실물 iOS/Android 검사는 미실행이다. 서울 상류는 명시 HTTP이므로 키·역명 전송이 암호화되지 않는다. Twilio 실통화 보류와 아래 미구현 범위는 그대로다. 657개 검사·플랫폼 export는 로컬 검증이며 GitHub CI 결과가 아니다.
+
 ## 날씨·지하철·실제 회신 검증 — 2026-10-31 최신 상태
 
 아래는 현재 통합 작업 트리의 최종 확인이며 이어지는 과거 단계 기록보다 우선한다. 01 날씨/인증 API, 02 서울 도착 어댑터, 03 참고 패널, 04 공개 Google 소유자/배포, 05 독립 검수, 06 전체 검사/Git으로 나눴다. 공통 응답·TTL 계약은 CONTRACTS §12~13에 반영했다.
@@ -9,7 +18,7 @@
 - **구현:** 장소·사용자 선택 교통수단·현재 이동시간, 약속 장소의 시간별 날씨, 역명 기반 현재 지하철 도착 조회. 출처/누락/오래된 정보와 만료 상태를 표시하며 일정이나 이동시간을 자동 변경하지 않는다. 단조시계·응답 지연·입력 변경·앱 비활성화 보호를 포함한다.
 - **실제 외부 검증:** 날씨 및 지하철 인증 API HTTP200. 서울은 명시 HTTP 상류만 성공했고 HTTPS는 미검증이며 평문 구간 위험을 PROVIDER_SETUP에 기록했다. 실제 Gmail 답장 조회→사용자가 승인한 허용 대안 확인→격리 가상 약속 변경 HTTP200/applied, 반복 승인에서 저장 결과와 revision2 유지. 만료된 최초 제안은 변경 차단. 실제 Google 테스트 일정 1건 가져오기 HTTP200, 반복 import 동일 결과, 최종 격리 일정 2건/revision3. 외부 원본 수정은 하지 않았으며 승인으로 생성한 테스트 일정은 남아 있다.
 - **자동 검사:** 코드 동결 후 새 격리 PostgreSQL에서 **657/657 통과, skip 0**(API383·mobile230·domain44), 전체 workspace typecheck 및 web/iOS/Android export 통과. 비밀 자격 없는 테스트 환경을 사용했다. GitHub CI가 없어 로컬 검증 결과로 기록한다. 05 독립 원문 검수에서 범위 내 추가 중대 결함 없음.
-- **공개 전환:** 사용자 승인 범위로 06 Git 커밋·push·main 병합과 04 공개 배포를 진행한다. 두 API가 같은 DB를 쓰므로 함께 중지·백업 후 같은 버전으로 전환한다. 별도 DB 백업 복원 사전 검증 완료. 실제 전환·공개 URL smoke 결과는 완료 후 아래 배포 기록에 추가한다.
+- **공개 전환:** 06 커밋·push·PR #5 main 병합 및 04 공개 배포 완료. 같은 DB를 쓰는 두 API를 함께 중지·백업 후 같은 버전으로 전환했다. 정확한 버전·계정 경계·실제 smoke는 위 공개 배포 기록을 따른다.
 - **남은 범위:** 실물 iOS/Android UI 검증, 정식 사용자별 Google OAuth, 일반 AI 전체 준비/이동 제약, 실제 상황별 추천 품질 평가. Twilio 실통화는 사용자 요청으로 보류. 반복 루틴·자동 위치 연락·푸시·외부 캘린더 쓰기/연속 동기화는 완료 범위가 아니다.
 
 ## 팀원 프롬프트·외부 연결 보완 — 2026-10-31 이전 증분
