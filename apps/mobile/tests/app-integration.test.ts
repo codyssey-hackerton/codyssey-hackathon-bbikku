@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 // Render the real app/ProposalPanel with native views and unrelated screens replaced by local test doubles.
 function createHarness() {
   let current: any;
+  const views = new Set<any>();
   const fragment = Symbol('fragment');
   const same = (a: any[], b: any[]) => a && b && a.length === b.length && a.every((x, i) => Object.is(x, b[i]));
   const jsx = (type: any, props: any, key?: any) => ({ type, props: props ?? {}, key });
@@ -50,17 +51,23 @@ function createHarness() {
   const backListeners = new Set<() => boolean>();
   const openedLinks: string[] = [];
   const native = {
-    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
+    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View', Image: 'Image',
+    Modal: ({ visible = true, children }: any) => visible ? children : null,
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
+    AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
+    AccessibilityInfo: { isReduceMotionEnabled: async () => true, addEventListener: () => ({ remove() {} }) },
+    PanResponder: { create: () => ({ panHandlers: {} }) },
     BackHandler: { addEventListener: (_event: string, listener: () => boolean) => { backListeners.add(listener); return { remove: () => backListeners.delete(listener) }; } },
     Linking: { openURL: async (url: string) => { openedLinks.push(url); } },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
-  const host: any = { react, native, jsx, fragment, backListeners, openedLinks, marker: 0, fontState: [true, null] };
+  const host: any = { react, native, jsx, fragment, backListeners, openedLinks, marker: 0, fontState: [true, null],
+    profile: { scope: 'test', load: { status: 'success', value: null, contextRevision: 0 }, mutation: { state: { status: 'idle' }, canRetry: true }, refresh() {}, save() { return true; }, skip() { return true; } } };
   (globalThis as any).__appIntegrationHarness = host;
 
   function renderer(Component: any, initialProps: any = {}) {
     const view: any = { props: initialProps, dirty: true, effects: [], instances: new Map(), tree: null };
+    views.add(view);
     function render(node: any, path: string, seen: Set<string>): any {
       if (node === null || node === undefined || typeof node === 'boolean') return null;
       if (typeof node === 'string' || typeof node === 'number') return node;
@@ -94,11 +101,11 @@ function createHarness() {
       if (view.dirty) throw new Error('render did not settle');
     };
     view.settle = async () => { for (let i = 0; i < 5; i += 1) { await new Promise((done) => setImmediate(done)); view.flush(); } };
-    view.unmount = () => { for (const instance of view.instances.values()) { instance.alive = false; for (const hook of instance.hooks) hook?.cleanup?.(); } view.instances.clear(); };
+    view.unmount = () => { for (const instance of view.instances.values()) { instance.alive = false; for (const hook of instance.hooks) hook?.cleanup?.(); } view.instances.clear(); views.delete(view); };
     view.flush();
     return view;
   }
-  return { renderer };
+  return { renderer, cleanup: () => { for (const view of views) view.unmount(); } };
 }
 
 const harness = createHarness();
@@ -108,31 +115,35 @@ const components = build({
     import { useMutation } from '../src/api/useMutation'; import { jsx } from 'react/jsx-runtime';
     export function MutationTester({ run }) { const action = useMutation(run); return jsx('MutationTester', action); }`,
     resolveDir: testDir, loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty' },
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty', '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
+    builder.onResolve({ filter: /^\.\/usePlanningProfile$/ }, () => ({ path: 'profile-hook', namespace: 'app-native' }));
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ }, (args) => ({ path: args.path, namespace: 'app-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-native' }, ({ path }) => ({
-      contents: path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+      contents: path === 'profile-hook' ? 'exports.usePlanningProfile=()=>globalThis.__appIntegrationHarness.profile' :
+        path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
         path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
         path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"; exports.FontReadyContext={Provider:({children})=>children}' :
         path === 'expo-font' ? 'exports.useFonts=()=>globalThis.__appIntegrationHarness.fontState' :
         path === 'react' ? 'module.exports = globalThis.__appIntegrationHarness.react' :
         path === 'react-native' ? 'module.exports = globalThis.__appIntegrationHarness.native' :
-        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider = ({children}) => children; exports.SafeAreaView = "View"' :
+        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider = ({children}) => children; exports.SafeAreaView = "View"; exports.useSafeAreaInsets=()=>({top:0,right:0,bottom:0,left:0})' :
         path === 'expo-status-bar' ? 'exports.StatusBar = "StatusBar"' :
           'exports.jsx = exports.jsxs = globalThis.__appIntegrationHarness.jsx; exports.Fragment = globalThis.__appIntegrationHarness.fragment', loader: 'js',
     }));
-    builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen)$/ }, (args) => ({ path: args.path, namespace: 'app-screen' }));
+    builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen|screens\/HomeScreen)$/ }, (args) => ({ path: args.path, namespace: 'app-screen' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-screen' }, ({ path }) => ({
       contents: path.endsWith('ChatScreen')
         ? 'const R=require("react"), {jsx}=require("react/jsx-runtime"); module.exports=function ChatScreen(props){const [marker]=R.useState(()=>++globalThis.__appIntegrationHarness.marker);return jsx("ChatScreen",{...props,marker})}'
+        : path.endsWith('HomeScreen')
+        ? 'const {jsx}=require("react/jsx-runtime"); module.exports=function HomeScreen(props){return jsx("HomeScreen",{...props,children:jsx("Pressable",{accessibilityLabel:"설정 열기",onPress:props.onOpenSettings})})}'
         : `const {jsx}=require('react/jsx-runtime'); module.exports=function Stub(props){return jsx(${JSON.stringify(path.split('/').pop())},props)}`,
       loader: 'js',
     }));
   } }],
 }).then((bundled) => {
   const compiled: any = { exports: {} };
-  new Function('module', 'exports', bundled.outputFiles[0].text)(compiled, compiled.exports);
+  new Function('module', 'exports', '__DEV__', bundled.outputFiles[0].text)(compiled, compiled.exports, true);
   return { App: compiled.exports.default, operationGuard: compiled.exports.operationGuard, MutationTester: compiled.exports.MutationTester };
 });
 
@@ -150,6 +161,7 @@ function visibleNodes(root: any): any[] {
 }
 function visiblePress(view: any, label: string) {
   const found = visibleNodes(view.tree).find(item => item.type === 'Pressable' && (item.props.accessibilityLabel === label || textOf(item.children) === label));
+  if (!found && label === '개발 연결 설정') { openSettingsOption(view, '계정·앱 설정'); return; }
   assert.ok(found, `missing visible ${label}`); assert.notEqual(found.props.disabled, true); found.props.onPress(); view.flush();
 }
 function textOf(root: any): string {
@@ -163,7 +175,18 @@ function node(view: any, type: string, predicate: (node: any) => boolean = () =>
 }
 function input(view: any, label: string) { return node(view, 'TextInput', (item) => item.props.accessibilityLabel === label); }
 function enter(view: any, label: string, value: string) { input(view, label).props.onChangeText(value); view.flush(); }
+function openConnections(view: any) {
+  if (visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '계정·앱 설정')) return;
+  if (!visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '홈')) visiblePress(view, '뒤로');
+  if (!visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '설정 열기')) visiblePress(view, '홈');
+  visiblePress(view, '설정 열기');
+  visiblePress(view, '계정');
+}
+function openSettingsOption(view: any, label: string) { openConnections(view); visiblePress(view, label); }
 function press(view: any, label: string) {
+  if (label === '개발 연결 설정' && !nodes(view.tree).some(item => item.props?.accessibilityLabel === label)) {
+    openSettingsOption(view, '계정·앱 설정'); return;
+  }
   const button = node(view, 'Pressable', (item) => (item.props.accessibilityLabel === label || textOf(item.children) === label));
   assert.notEqual(button.props.disabled, true, `${label} disabled`);
   button.props.onPress(); view.flush();
@@ -184,7 +207,101 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
+test.afterEach(() => { harness.cleanup(); globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
+
+test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 요청으로 이동한다', async () => {
+  const { App } = await components;
+  globalThis.fetch = async () => response([]);
+  const view = harness.renderer(App);
+  assert.match(textOf(view.tree), /당신의 하루를/);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'HomeScreen'));
+  for (const label of ['홈', '캘린더', 'AI 비서', '추가', '루틴']) {
+    assert.ok(visibleNodes(view.tree).some(item => item.type === 'Pressable' && item.props.accessibilityLabel === label), label);
+  }
+  visiblePress(view, '추가');
+  assert.match(textOf(view.tree), /무엇을 추가할까요/);
+  for (const label of ['삐꾸에게 부탁하기', '일정 추가', '할 일 추가', '루틴 추가']) {
+    assert.ok(visibleNodes(view.tree).some(item => item.type === 'Pressable' && (item.props.accessibilityLabel === label || textOf(item.children) === label)), label);
+  }
+  visiblePress(view, '삐꾸에게 부탁하기');
+  assert.equal(chat(view).props.entryContext.kind, 'create');
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
+});
+
+test('폼 AI 초안 왕복에서 원래 날짜와 입력을 보존하고 새 요청을 구분한다', async () => {
+  const { App } = await components; let writes = 0;
+  globalThis.fetch = async (raw, init) => {
+    if (init?.method && init.method !== 'GET') { writes++; throw new Error('unexpected synthetic write'); }
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/schedule') return apiResponse({ items: [], scheduleRevision: 0 });
+    if (path === '/v1/proposals') return response([]);
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, '캘린더');
+  const first = new Date('2027-01-11T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(first); view.flush();
+  visiblePress(view, '추가'); visiblePress(view, '일정 추가'); await view.settle();
+  const originalDate = input(view, '시작 날짜').props.value;
+  assert.ok(originalDate); enter(view, '제목', '직접 작성');
+  visiblePress(view, 'AI로 작성하기');
+  const firstContext = chat(view).props.entryContext;
+  assert.equal(firstContext.kind, 'form'); assert.equal(firstContext.draft.fields.title, '직접 작성');
+  visiblePress(view, '캘린더'); visiblePress(view, '월간 캘린더로');
+  node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-01-20T12:00:00Z')); view.flush();
+  visiblePress(view, 'AI 비서');
+  chat(view).props.onApplyDraft({ kind: 'event', fields: { title: 'AI 제안' } }); view.flush(); await view.settle();
+  assert.equal(input(view, '시작 날짜').props.value, originalDate);
+  assert.equal(input(view, '제목').props.value, '직접 작성');
+  assert.match(textOf(view.tree), /AI 초안 확인/); visiblePress(view, '제안 값 적용');
+  assert.equal(input(view, '제목').props.value, 'AI 제안');
+  visiblePress(view, 'AI로 작성하기');
+  const secondContext = chat(view).props.entryContext;
+  assert.equal(secondContext.kind, 'form'); assert.notEqual(secondContext.key, firstContext.key);
+  assert.equal(secondContext.draft.fields.title, 'AI 제안');
+  chat(view).props.onApplyDraft({ kind: 'event', fields: { title: '두 번째 제안' } }); view.flush();
+  visiblePress(view, '기존 값 유지'); assert.equal(input(view, '제목').props.value, 'AI 제안');
+  assert.equal(input(view, '시작 날짜').props.value, originalDate); assert.equal(writes, 0);
+});
+
+test('미확정 요청 중 추가 폼을 작성하고 확인 화면을 오가며 저장은 해결 후에만 한다', async () => {
+  const { App, operationGuard } = await components;
+  const owner = {}; const writes: any[] = [];
+  globalThis.fetch = async (raw, init) => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/schedule') return apiResponse({ items: [], scheduleRevision: 0 });
+    if (path === '/v1/schedule/commands') { writes.push(JSON.parse(String(init?.body))); return apiResponse({ outcome: 'applied', items: [], deletedIds: [], scheduleRevision: 1 }); }
+    return response([]);
+  };
+  const view = harness.renderer(App);
+  try {
+    press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+    visiblePress(view, '추가'); visiblePress(view, '삐꾸에게 부탁하기');
+    const existingContext = chat(view).props.entryContext; assert.equal(existingContext.kind, 'create');
+    visiblePress(view, '캘린더'); node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-01-11T12:00:00Z')); view.flush();
+    operationGuard.update(owner, { status: 'pending' });
+    node(view, 'DayScreen').props.createRequest(); view.flush(); visiblePress(view, '할 일 추가'); await view.settle();
+    assert.match(textOf(view.tree), /초안은 작성할 수 있습니다/);
+    enter(view, '제목', '보존할 초안'); enter(view, '소요시간 (분)', '30');
+    visiblePress(view, '저장'); assert.equal(writes.length, 0);
+    assert.match(textOf(view.tree), /요청을 시작한 화면에서 확인한 뒤 저장/);
+    operationGuard.update(owner, { status: 'error', error: new Error('timeout'), uncertain: true });
+    visiblePress(view, '저장'); assert.equal(writes.length, 0);
+    const marker = chat(view).props.marker; const oldContext = chat(view).props.entryContext;
+    visiblePress(view, 'AI로 작성하기'); assert.equal(chat(view).props.entryContext, oldContext);
+    assert.equal(input(view, '제목').props.value, '보존할 초안');
+    visiblePress(view, 'AI 비서 열기'); assert.equal(chat(view).props.marker, marker);
+    visiblePress(view, '추가'); visiblePress(view, '삐꾸에게 부탁하기');
+    assert.equal(chat(view).props.entryContext, existingContext);
+    visiblePress(view, '추가'); visiblePress(view, '일정 추가'); await view.settle();
+    assert.equal(input(view, '제목').props.value, '보존할 초안');
+    assert.equal(input(view, '소요시간 (분)').props.value, '30');
+    operationGuard.update(owner, { status: 'success', result: null });
+    visiblePress(view, '저장'); await view.settle();
+    assert.equal(writes.length, 1); assert.equal(writes[0].changeSet.changes[0].after.title, '보존할 초안');
+  } finally { operationGuard.clear(owner); view.unmount(); }
+});
 
 test('preloaded proposals refresh when chat creates a proposal without resetting the workspace', async () => {
   const { App } = await components;
@@ -204,7 +321,7 @@ test('preloaded proposals refresh when chat creates a proposal without resetting
   view.unmount();
 });
 
-test('제안의 준비시간 관계는 모델이 제안한 값과 연결된 변경 ID로 표시한다', async () => {
+test('제안의 준비시간 관계는 연결된 일정과 확인 필요 여부로 표시한다', async () => {
   const { App } = await components;
   const item = proposal('시간 관계 제안');
   const withTiming = { ...item, changeSet: { ...item.changeSet, timingConstraints: [{ appointment: { kind: 'existing', id: 'event-1', expectedRevision: 2 },
@@ -214,8 +331,9 @@ test('제안의 준비시간 관계는 모델이 제안한 값과 연결된 변�
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
   chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 시간 관계 제안, 확인 대기, 상세 보기'); await view.settle();
-  assert.match(textOf(view.tree), /제안된 준비·이동 관계/); assert.match(textOf(view.tree), /기준 약속: event-1/);
-  assert.match(textOf(view.tree), /준비 15분 · 이동 0분 · 여유 미확인/); assert.match(textOf(view.tree), /연결된 변경 ID: 준비 c1 · 이동 없음 · 여유 없음/);
+  assert.match(textOf(view.tree), /준비와 이동/); assert.match(textOf(view.tree), /관련 약속 확인 필요/);
+  assert.match(textOf(view.tree), /준비 15분 · 이동 0분 · 여유 미확인/); assert.match(textOf(view.tree), /준비 일정: 일정/);
+  assert.match(textOf(view.tree), /이동 일정: 별도 일정 없음/); assert.doesNotMatch(textOf(view.tree), /기준 약속: event-1|연결된 변경 ID/);
   assert.match(textOf(view.tree), /사용자 확인 여부를 별도로 확인/);
   view.unmount();
 });
@@ -295,7 +413,7 @@ test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'old-user'); press(view, '설정 적용'); await view.settle();
-  press(view, 'Google 연결'); await view.settle();
+  openSettingsOption(view, 'Google 연결'); await view.settle();
   press(view, 'Gmail 발송 연결 시작'); await view.settle();
   assert.equal((globalThis as any).__appIntegrationHarness.openedLinks.length, 0);
   assert.doesNotMatch(textOf(view.tree), /ssssssssss|qqqqqqqqqq|accounts\.google\.com/);
@@ -309,7 +427,7 @@ test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사
   assert.equal(requests.filter((item) => item.path === '/v1/google/oauth/complete').length, 1);
   assert.doesNotMatch(textOf(view.tree), /qqqqqqqqqq|zzzzzzzzzz/);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'new-user'); press(view, '설정 적용'); await view.settle();
-  press(view, 'Google 연결'); await view.settle();
+  openSettingsOption(view, 'Google 연결'); await view.settle();
   for (const resolve of releaseOld) resolve(Response.json({ requestId: 'r', data: { status: 'available', accountLabel: '이전 계정' } })); await view.settle();
   assert.doesNotMatch(textOf(view.tree), /이전 계정|ssssssssss/);
   assert.equal(nodes(view.tree).some((item) => item.type === 'Pressable' && textOf(item.children) === 'Google 동의 화면 열기'), false);
@@ -332,7 +450,7 @@ test('Google 연결 확인 응답 유실은 자동 재시도하지 않고 새 �
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test-user'); press(view, '설정 적용'); await view.settle();
-  press(view, 'Google 연결'); await view.settle(); press(view, 'Gmail 발송 연결 시작'); await view.settle();
+  openSettingsOption(view, 'Google 연결'); await view.settle(); press(view, 'Gmail 발송 연결 시작'); await view.settle();
   enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); press(view, 'Google 연결 확인'); await view.settle();
   assert.equal(completions, 1); assert.match(textOf(view.tree), /연결 결과를 확인하지 못했습니다/);
   assert.equal(nodes(view.tree).some((item) => item.type === 'TextInput' && item.props.accessibilityLabel === 'Google 연결 확인 코드'), false);
@@ -629,8 +747,9 @@ test('calendar import mounts only while open and removes its hardware back handl
   const host = (globalThis as any).__appIntegrationHarness;
   const view = harness.renderer(App);
   assert.equal(host.backListeners.size, 0);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
   press(view, '캘린더');
-  press(view, '캘린더 일정 가져오기');
+  openSettingsOption(view, '캘린더 일정 가져오기');
   assert.equal(host.backListeners.size, 1);
   assert.match(textOf(view.tree), /선택한 기간의 일정을 직접 조회/);
   const owner = {};
@@ -669,6 +788,7 @@ test('설정의 연결 메뉴에서 건강 화면을 열고 돌아와도 네트�
   const { App } = await components; let requests = 0;
   globalThis.fetch = async () => { requests += 1; return response([]); };
   const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용');
   await view.settle(); const before = requests;
   press(view, '개발 연결 설정'); press(view, '연결'); press(view, '건강 데이터');
   await view.settle();
@@ -700,6 +820,9 @@ test('Google 계정 로그인은 기존 세션 없이 인증하고 사용자 교
   operationGuard.clear(owner); press(view, 'Google 로그인 또는 가입');
   press(view, 'Google 로그인 시작'); await view.settle(); press(view, 'Google 로그인 화면 열기'); await view.settle();
   enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
+  assert.match(textOf(view.tree), /PERSONALIZE · 1 \/ 3/);
+  press(view, '다음'); assert.match(textOf(view.tree), /PERSONALIZE · 2 \/ 3/);
+  press(view, '이전'); press(view, '이전');
   assert.notEqual(chat(view).props.marker, before);
   for (const request of calls.filter(item => item.path.startsWith('/v1/auth/google/'))) {
     assert.equal((request.headers as Record<string, string>).Authorization, undefined); assert.equal(request.credentials, 'omit');
@@ -736,7 +859,7 @@ test('루틴 생성과 요일 수정 및 회차 생성은 계약을 따르고 �
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev'); press(view, '설정 적용'); await view.settle();
-  press(view, '루틴'); await view.settle(); assert.match(textOf(view.tree), /이미 생성한 회차는 미래 일정까지 그대로 유지/);
+  press(view, '루틴'); await view.settle(); assert.match(textOf(view.tree), /이미 생성한 회차는 미래 일정까지 그대로 유지/); press(view, '전체 루틴');
   enter(view, '루틴 이름', '운동'); press(view, '월요일'); enter(view, '루틴 시작일', '2026-11-01'); press(view, '루틴 등록'); await view.settle();
   assert.deepEqual(writes[0].body.weekdays, [1]); assert.ok((writes[0].headers as Record<string, string>)['Idempotency-Key']);
   press(view, '운동 편집'); press(view, '화요일'); press(view, '루틴 변경 저장'); await view.settle();
@@ -794,7 +917,7 @@ test('동기화는 쓰기 권한 캘린더와 명시 선택한 일정만 연결�
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
-  press(view, '캘린더'); press(view, 'Google 캘린더 동기화'); await view.settle();
+  press(view, '캘린더'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.equal(calls.some(item => item.path === '/v1/calendar/calendars'), false);
   const deleteBox = node(view, 'Pressable', item => item.props.accessibilityLabel === '양방향 삭제 전파 동의');
   assert.equal(deleteBox.props.accessibilityState.checked, false);
@@ -827,7 +950,7 @@ test('Google 캘린더 쓰기는 별도의 OAuth 권한과 연결 상태를 사�
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
-  press(view, 'Google 연결'); await view.settle(); press(view, 'Google 캘린더 동기화 연결 시작'); await view.settle();
+  openSettingsOption(view, 'Google 연결'); await view.settle(); press(view, 'Google 캘린더 동기화 연결 시작'); await view.settle();
   assert.deepEqual(calls.find(item => item.path === '/v1/google/oauth/start').body, { kind: 'calendar_write' });
   assert.ok(calls.some(item => item.path === '/v1/calendar-write-connection'));
   press(view, 'Google 동의 화면 열기'); await view.settle();
@@ -852,7 +975,7 @@ test('동기화 응답 유실 후 저장된 결과만 조회하고 완료 시 �
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
-  press(view, '캘린더'); press(view, 'Google 캘린더 동기화'); await view.settle();
+  press(view, '캘린더'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   press(view, 'cal 동기화 실행'); await view.settle();
   assert.match(textOf(view.tree), /처리 결과를 확인하지 못했습니다/);
   assert.equal(nodes(view.tree).some(item => item.props?.accessibilityLabel === '같은 동기화 요청 재시도'), false);
@@ -866,7 +989,7 @@ test('동기화 응답 유실 후 저장된 결과만 조회하고 완료 시 �
   assert.doesNotMatch(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/); view.unmount();
 });
 
-test('인증 화면에서 건강 화면으로 이동하면 인증 초안을 지우고 기존 세션을 보존한다', async () => {
+test('인증을 취소한 뒤 건강 화면으로 이동해도 기존 세션을 보존한다', async () => {
   const { App } = await components; let resolveStart!: (response: Response) => void;
   globalThis.fetch = async raw => {
     const path = new URL(String(raw)).pathname;
@@ -878,10 +1001,12 @@ test('인증 화면에서 건강 화면으로 이동하면 인증 초안을 지�
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'preview'); visiblePress(view, '설정 적용'); await view.settle();
   const previousMarker = chat(view).props.marker;
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
+  resolveStart(memberAuthFixture()); await view.settle(); visiblePress(view, '뒤로');
   visiblePress(view, '개발 연결 설정'); visiblePress(view, '연결'); visiblePress(view, '건강 데이터'); await view.settle();
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '걸음 수 선택'), true);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 시작'), false);
-  resolveStart(Response.json({ requestId: 'r', data: { authorizationUrl: 'invalid', completionSecret: 'q'.repeat(43) } })); await view.settle();
   visiblePress(view, '나중에'); assert.equal(chat(view).props.marker, previousMarker);
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입');
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
@@ -902,8 +1027,8 @@ test('로그인 완료 처리 중에는 건강 화면 전환을 차단한다', a
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
   enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
-  visiblePress(view, '개발 연결 설정'); visiblePress(view, '연결'); visiblePress(view, '건강 데이터');
-  assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '걸음 수 선택'), false);
   resolveComplete(Response.json({ requestId: 'r', data: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z', member: { id: 'member:1', email: 'a@example.test', displayName: 'A' } } }));
   await view.settle(); view.unmount();
@@ -919,7 +1044,7 @@ test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하�
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '뒤로'); visiblePress(view, '캘린더');
+  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); visiblePress(view, '뒤로'); visiblePress(view, '캘린더');
   const calendar = node(view, 'CalendarScreen'); const timezone = calendar.props.timezone;
   const localDate = (date: Date) => {
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(part => [part.type, part.value]));
@@ -946,10 +1071,10 @@ test('루틴 회차 요청이 불명일 때 화면 재진입과 날짜 변경이
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '루틴'); await view.settle(); enter(view, '루틴 이름', '보존할 초안');
+  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); enter(view, '루틴 이름', '보존할 초안');
   const original = input(view, '루틴 시작일').props.value;
   visiblePress(view, '회차 생성'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
-  visiblePress(view, '뒤로'); visiblePress(view, '캘린더'); node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-03-10T12:00:00Z')); view.flush();
+  visiblePress(view, '캘린더'); node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-03-10T12:00:00Z')); view.flush();
   visiblePress(view, '루틴'); await view.settle();
   assert.equal(input(view, '루틴 이름').props.value, '보존할 초안'); assert.equal(input(view, '루틴 시작일').props.value, original);
   assert.match(textOf(view.tree), /결과를 확인하지 못했습니다/); assert.equal(writes.length, 1);
@@ -982,7 +1107,7 @@ test('기존 동기화 연결에 선택 일정을 추가하고 응답 유실 재
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '캘린더'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  visiblePress(view, '캘린더'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.match(textOf(view.tree), /내가 주최한 기존 공동 약속은 승인된 연락과 응답/);
   assert.match(textOf(view.tree), /새 공동 약속 내보내기, 삭제, 다른 사람 주최, Google에서 변경된 공동 약속이나 확인되지 않은 변경은 검토 대상/);
   visiblePress(view, '캘린더 내 달력');
@@ -991,7 +1116,7 @@ test('기존 동기화 연결에 선택 일정을 추가하고 응답 유실 재
   assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '선택한 일정 추가')?.props.disabled, true);
   visiblePress(view, '내보낼 일정 새 일정'); visiblePress(view, '선택한 일정 추가'); await view.settle();
   assert.equal(operationGuard.hasUnresolved(), true); assert.equal(writes.length, 1);
-  visiblePress(view, '뒤로'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  visiblePress(view, '뒤로'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.ok(listReads >= 2); assert.equal(operationGuard.hasUnresolved(), true);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '같은 동기화 요청 재시도'), true);
   visiblePress(view, '같은 동기화 요청 재시도'); await view.settle();
@@ -1022,12 +1147,12 @@ test('동기화 쓰기 권한 연결 후 화면에 다시 들어오면 목록을
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '캘린더'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  visiblePress(view, '캘린더'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.match(textOf(view.tree), /캘린더 목록을 확인하지 못했습니다/); assert.equal(calendarReads, 1);
-  visiblePress(view, '뒤로'); visiblePress(view, 'Google 연결'); await view.settle();
+  visiblePress(view, '뒤로'); openSettingsOption(view, 'Google 연결'); await view.settle();
   visiblePress(view, 'Google 캘린더 동기화 연결 시작'); await view.settle();
   enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 연결 확인'); await view.settle();
-  visiblePress(view, '뒤로'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  visiblePress(view, '뒤로'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.equal(calendarReads, 2); assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '캘린더 새로 연결된 달력')); view.unmount();
 });
 
@@ -1037,7 +1162,7 @@ function memberAuthFixture(secret = 'q'.repeat(43)) {
   return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: secret } });
 }
 
-test('인증 준비 후 API 서버가 바뀌면 이전 확인 코드를 지우고 새 서버에서 다시 시작한다', async t => {
+test('인증 준비 중에는 연결 전환이 숨겨지고 명시적 취소 후에만 새 서버를 사용한다', async t => {
   const { App } = await components; const requests: { origin: string; path: string }[] = [];
   globalThis.fetch = async raw => {
     const url = new URL(String(raw)); requests.push({ origin: url.origin, path: url.pathname });
@@ -1045,19 +1170,19 @@ test('인증 준비 후 API 서버가 바뀌면 이전 확인 코드를 지우�
     throw new Error('unexpected synthetic request');
   };
   const view = harness.renderer(App); t.after(() => view.unmount());
-  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
   enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43));
-  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용'); await view.settle();
-  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
-  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === 'Google 로그인 시작')?.props.disabled, false);
-  assert.doesNotMatch(textOf(view.tree), /zzzzzzzzzz|qqqqqqqqqq/);
-  visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'API 서버 주소'), false);
+  visiblePress(view, '뒤로');
+  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
+  visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
   assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
   assert.equal(requests.filter(item => item.path === '/v1/auth/google/start').at(-1)?.origin, 'https://new.example.test');
   assert.equal(requests.some(item => item.path === '/v1/auth/google/complete'), false);
 });
 
-test('인증 시작 요청 중 API 변경은 기존 응답을 버리고 새 화면에서 시작할 수 있다', async t => {
+test('인증 시작 요청 중에는 전환과 취소가 막히고 응답 후 취소할 수 있다', async t => {
   const { App } = await components; let resolveOld!: (value: Response) => void; let starts = 0;
   globalThis.fetch = async raw => {
     const url = new URL(String(raw));
@@ -1069,15 +1194,14 @@ test('인증 시작 요청 중 API 변경은 기존 응답을 버리고 새 화�
     throw new Error('unexpected synthetic request');
   };
   const view = harness.renderer(App); t.after(() => view.unmount());
-  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용'); await view.settle();
-  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === 'Google 로그인 시작')?.props.disabled, false);
-  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, false);
+  visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
   resolveOld(memberAuthFixture()); await view.settle();
-  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
-  assert.doesNotMatch(textOf(view.tree), /로그인 화면을 준비하고 있습니다/);
-  visiblePress(view, 'Google 로그인 시작'); await view.settle(); assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
-  assert.equal(starts, 2);
+  visiblePress(view, '뒤로'); visiblePress(view, '개발 연결 설정');
+  enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
+  visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  assert.equal(input(view, 'Google 로그인 확인 코드').props.value, ''); assert.equal(starts, 2);
 });
 
 test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 원래 요청을 보존한다', async t => {
@@ -1092,12 +1216,13 @@ test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 �
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
   enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
   assert.equal(operationGuard.hasUnresolved(), true);
-  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
-  assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
   assert.match(textOf(view.tree), /로그인 결과를 확인하고 있습니다/);
   assert.equal(requests.filter(item => item.path === '/v1/auth/google/complete').length, 1);
   resolveComplete(Response.json({ requestId: 'r', data: { sessionToken: 'synthetic-session', expiresAt: '2035-01-01T00:00:00Z', member: { id: 'member:synthetic', email: 'test@example.test', displayName: '테스트' } } }));
   await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
+  assert.match(textOf(view.tree), /PERSONALIZE/); visiblePress(view, '이전');
   visiblePress(view, '개발 연결 설정'); assert.match(textOf(view.tree), /로그인: 테스트/);
   assert.notEqual(input(view, 'API 서버 주소').props.value, 'https://new.example.test');
 });

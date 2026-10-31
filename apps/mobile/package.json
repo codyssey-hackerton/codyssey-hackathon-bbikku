@@ -12,7 +12,7 @@
     "export:ios": "expo export --platform ios --output-dir dist/ios",
     "export:android": "expo export --platform android --output-dir dist/android",
     "export": "npm run export:ios && npm run export:android",
-    "test": "tsx --test tests/*.test.ts src/schedule/*.test.mjs src/proposals/*.test.mjs src/memory/*.test.mjs",
+    "test": "tsx --test tests/*.test.ts src/*/*.test.mjs src/*/*.test.cts",
     "web": "expo start --web",
     "export:web": "expo export --platform web --output-dir dist/web"
   },

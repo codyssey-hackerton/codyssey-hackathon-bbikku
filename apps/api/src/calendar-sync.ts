@@ -324,6 +324,7 @@ export class CalendarSyncService {
             const item = s.items.get(mapping.itemId);
             if (!item || item.revision !== mapping.itemRevision || !assess(userId, s, { changeId: randomUUID(), operation: 'delete', targetId: item.id, expectedRevision: item.revision })) return;
             s.items.delete(item.id);
+            s.statusUndo?.delete(item.id);
             (s.tombstones ??= new Map()).set(item.id, { itemId: item.id, deletedRevision: item.revision + 1,
               priorInvolvement: item.involvement, deletedAt: new Date().toISOString() });
             s.scheduleRevision++; current.mappings = current.mappings.filter(m => m.eventId !== mapping.eventId); applied = true;

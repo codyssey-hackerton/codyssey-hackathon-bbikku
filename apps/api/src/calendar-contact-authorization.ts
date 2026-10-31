@@ -69,13 +69,16 @@ export function findCalendarContactAuthorization(input: { state: UserPlanningSta
             !timestamp.safeParse(change.after.timeSlot.startsAt).success || !timestamp.safeParse(change.after.timeSlot.endsAt).success ||
             compareInstants(beforeItem.timeSlot.startsAt, beforeItem.timeSlot.endsAt) >= 0 || compareInstants(change.after.timeSlot.startsAt, change.after.timeSlot.endsAt) >= 0 ||
             (compareInstants(beforeItem.timeSlot.startsAt, change.after.timeSlot.startsAt) === 0 && compareInstants(beforeItem.timeSlot.endsAt, change.after.timeSlot.endsAt) === 0)) continue;
-        const { id: _id, revision: _revision, sourceRefs: _sourceRefs, timeSlot: _beforeTime, ...beforeFields } = beforeItem;
-        const { timeSlot: _afterTime, ...afterFields } = change.after;
+        const { id: _id, revision: _revision, sourceRefs: _sourceRefs, timeSlot: _beforeTime, ...beforeFields } =
+          { ...beforeItem, category: beforeItem.category ?? null, attendance: beforeItem.attendance ?? null };
+        const { id: _afterId, revision: _afterRevision, sourceRefs: _afterRefs, timeSlot: _afterTime, ...afterFields } =
+          { ...beforeItem, ...change.after, category: change.after.category === undefined ? beforeItem.category ?? null : change.after.category,
+            attendance: change.after.attendance === undefined ? beforeItem.attendance ?? null : change.after.attendance };
         if (!isDeepStrictEqual(beforeFields, afterFields)) continue;
         const matchingRefs = beforeItem.sourceRefs.filter(ref => ref.provider === 'google_calendar' && ref.accountRef === source.accountRef &&
           ref.calendarId === source.calendarId && ref.externalEventId === source.externalEventId);
         if (matchingRefs.length !== 1 || matchingRefs[0]!.sourceVersion !== source.sourceVersion) continue;
-        const afterItem: ScheduleItem = { ...change.after, id: beforeItem.id, revision: beforeItem.revision + 1, sourceRefs: beforeItem.sourceRefs };
+        const afterItem: ScheduleItem = { ...beforeItem, ...change.after, id: beforeItem.id, revision: beforeItem.revision + 1, sourceRefs: beforeItem.sourceRefs };
         if (!isDeepStrictEqual(item, afterItem)) continue;
         proofs.push({ beforeItem, afterItem, proposalId: proposal.id, contactRequestId: contact.id });
       }

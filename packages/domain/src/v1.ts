@@ -137,6 +137,9 @@ function parseFields(
   if (value.flexibility !== undefined && value.flexibility !== "fixed" && value.flexibility !== "flexible") invalid("flexibility");
   if (value.involvement !== undefined && value.involvement !== "personal" && value.involvement !== "shared") invalid("involvement");
   if (value.completion !== undefined && !["pending", "completed", "incomplete", "unknown"].includes(value.completion as string)) invalid("completion");
+  if (value.category != null && value.category !== "personal" && value.category !== "work") invalid("category");
+  if (value.attendance != null && !["attended", "absent", "unknown"].includes(value.attendance as string)) invalid("attendance");
+  if (value.kind === "task" && value.attendance != null) invalid("attendance");
 
   let interval: Interval | null = null;
   if (value.timeSlot === null && value.kind === "event") {
@@ -188,7 +191,9 @@ function sameFields(before: ScheduleFields, beforeInterval: Interval | null, aft
   return before.kind === after.fields.kind && before.title === after.fields.title &&
     sameInterval(beforeInterval, after.interval) && before.timeSlot?.timezone === after.fields.timeSlot?.timezone &&
     before.durationMinutes === after.fields.durationMinutes && sameDeadline && before.flexibility === after.fields.flexibility &&
-    before.involvement === after.fields.involvement && before.completion === after.fields.completion;
+    before.involvement === after.fields.involvement && before.completion === after.fields.completion &&
+    (before.category ?? null) === (after.fields.category === undefined ? before.category ?? null : after.fields.category) &&
+    (before.attendance ?? null) === (after.fields.attendance === undefined ? before.attendance ?? null : after.fields.attendance);
 }
 
 function coordinationChange(before: ScheduleItem, beforeInterval: Interval | null, change: Change, after: ParsedFields | null): boolean {
@@ -205,7 +210,9 @@ function coordinationAlternativeKeepsOtherFields(before: ScheduleItem, change: C
   const next = after.fields;
   return next.kind === before.kind && next.title === before.title && next.durationMinutes === before.durationMinutes &&
     next.deadline === before.deadline && next.flexibility === before.flexibility &&
-    next.involvement === before.involvement && next.completion === before.completion;
+    next.involvement === before.involvement && next.completion === before.completion &&
+    (next.category === undefined || (next.category ?? null) === (before.category ?? null)) &&
+    (next.attendance === undefined || (next.attendance ?? null) === (before.attendance ?? null));
 }
 
 // Explicit relationships only: the server must never infer a link from a task title.
@@ -387,6 +394,9 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
         continue;
       }
       if (change.operation === "update" && after) {
+        if (after.fields.kind === "task" && after.fields.attendance === undefined && target.item.attendance != null) {
+          validation.conflicts.push({ targetIds: [target.item.id], reason: `invalid_field:${path}.after.attendance` });
+        }
         placementChanged = !sameInterval(target.interval, after.interval) ||
           target.item.timeSlot?.timezone !== after.fields.timeSlot?.timezone;
         if (!sameFields(target.item, target.interval, after)) effectiveChange = true;

@@ -122,7 +122,7 @@ export function createRoutineService({ pool, planning, store, clock = () => new 
               const revision = (await store.read(userId)).scheduleRevision;
               const result = await planning.command(userId, { expectedScheduleRevision: revision, changeSet: { changes: [{ changeId: randomUUID(), operation: 'create',
                 after: { kind: 'task', title: routine.title, timeSlot: { startsAt, endsAt, timezone: routine.timezone }, durationMinutes: routine.durationMinutes,
-                  deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending' } }] } });
+                  deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending', category: routine.category ?? null } }] } });
               const item = result.items[0]; if (!item || result.items.length !== 1) throw new Error('Invalid routine occurrence');
               await store.transaction(userId, state => {
                 const stored = state.items.get(item.id); if (!stored) throw new Error('Missing routine occurrence');

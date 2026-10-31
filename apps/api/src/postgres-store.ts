@@ -19,6 +19,10 @@ const stored = z.object({
   format: z.literal(1), scheduleRevision: z.number().int().nonnegative(), contextRevision: z.number().int().nonnegative(),
   items: pairs, tombstones: z.array(z.tuple([z.string(), z.object({ itemId: z.string(), deletedRevision: z.number().int().positive(),
     priorInvolvement: z.enum(['personal', 'shared']), deletedAt: timestamp }).strict()])).optional(),
+  statusUndo: z.array(z.tuple([z.string(), z.object({
+    completion: z.object({ previous: z.enum(['pending', 'completed', 'incomplete', 'unknown']), current: z.enum(['pending', 'completed', 'incomplete', 'unknown']) }).strict().optional(),
+    attendance: z.object({ previous: z.enum(['attended', 'absent', 'unknown']).nullable(), current: z.enum(['attended', 'absent', 'unknown']).nullable() }).strict().optional(),
+  }).strict()])).optional(),
   facts: pairs, proposals: pairs, proposalFacts: pairs, approvals: z.array(z.unknown()),
   recipients: pairs.optional(), contactRequests: pairs.optional(), contactDraftSnapshots: pairs.optional(), contactApprovals: z.array(z.unknown()).optional(),
   contactResponses: pairs.optional(), voiceSessions: pairs.optional(),
@@ -28,6 +32,7 @@ const stored = z.object({
 function encode(state: UserPlanningState): string {
   return JSON.stringify({ format: 1, scheduleRevision: state.scheduleRevision, contextRevision: state.contextRevision,
     items: [...state.items], ...(state.tombstones?.size ? { tombstones: [...state.tombstones] } : {}),
+    ...(state.statusUndo?.size ? { statusUndo: [...state.statusUndo] } : {}),
     facts: [...state.facts], proposals: [...state.proposals], proposalFacts: [...state.proposalFacts], approvals: state.approvals,
     ...(state.recipients.size ? { recipients: [...state.recipients] } : {}),
     ...(state.contactRequests.size ? { contactRequests: [...state.contactRequests] } : {}),
@@ -41,7 +46,7 @@ function encode(state: UserPlanningState): string {
 function decode(value: unknown): UserPlanningState {
   const data = stored.parse(value);
   return { scheduleRevision: data.scheduleRevision, contextRevision: data.contextRevision,
-    items: new Map(data.items), tombstones: new Map(data.tombstones ?? []), facts: new Map(data.facts), proposals: new Map(data.proposals), proposalFacts: new Map(data.proposalFacts), approvals: data.approvals,
+    items: new Map(data.items), tombstones: new Map(data.tombstones ?? []), statusUndo: new Map(data.statusUndo ?? []), facts: new Map(data.facts), proposals: new Map(data.proposals), proposalFacts: new Map(data.proposalFacts), approvals: data.approvals,
     recipients: new Map(data.recipients ?? []), contactRequests: new Map(data.contactRequests ?? []),
     contactDraftSnapshots: new Map(data.contactDraftSnapshots ?? []), contactApprovals: data.contactApprovals ?? [],
     contactResponses: new Map(data.contactResponses ?? []), voiceSessions: new Map(data.voiceSessions ?? []),

@@ -93,7 +93,7 @@ export class RepositoryIdempotency implements IdempotencyPort {
     // Calendar sync owns its durable effect ledger and transactions; an outer transaction would self-lock its final sync-row update.
     const detachedAttempt = readOnlyAttempt || input.operation === 'calendar_sync_run';
     // Only operations whose entire effect is committed with this record may recover a stale claim.
-    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
+    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'schedule_attendance', 'schedule_undo', 'memory_write', 'proposal_decision', 'review_schedule_write',
       'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);
     const claim = await this.store.transaction(input.userId, state => {
       const previous = state.idempotency.get(identity);

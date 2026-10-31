@@ -144,3 +144,12 @@
 - **근거/계약:** [사용 방법·한계](MEMBER_ROUTINE_CALENDAR.md), [Google OIDC](https://developers.google.com/identity/openid-connect/openid-connect), [Calendar sync](https://developers.google.com/workspace/calendar/api/guides/sync), [조건부 쓰기](https://developers.google.com/workspace/calendar/api/guides/version-resources).
 
 2026-11-01 디자인 접합 전 보완: 기존 sync 연결의 추가 내보내기 선택과, 저장된 연락 합의 적용·정확한 원본/현재 일정·주최 계정/Calendar owner를 검증한 기존 공동 약속의 시간 반영을 연결한다. 새 공동 생성/삭제와 미확인 합의는 허용하지 않는다. 실제 PostgreSQL/HTTP 종단에서 발견한 sync 자기 잠금을 피하기 위해 전체 외부 실행을 멱등 실행기의 바깥 트랜잭션으로 감싸지 않고 자체 영속 효과 ledger를 사용한다. lease 만료 자동 재실행 금지는 유지한다. [디자인 기능 연결표](DESIGN_INTEGRATION.md)
+
+## ADR-015 — 디자인 통합의 상태 기록과 AI 입력 초안
+
+- **상태:** 2026-11-01 사용자 요청으로 디자인 통합 계획의 최소 계약을 구현한다. 기존 Expo/RN·단일 S LLM·Schedule Engine·PostgreSQL 구조를 유지한다. 시각·조작은 PR #17 HTML을 기준으로 하고 Draft 자료 PR은 병합하지 않는다.
+- **기록:** event 참석과 task/루틴 수행을 분리한다. 시간 경과는 표시용 파생값이며 참석·완료를 자동 기록하지 않는다. 개인/업무 category는 참여 범위 personal/shared와 별도이며 기존 데이터는 미분류다.
+- **취소:** 사용자별 상태의 직전 값 한 단계를 기존 PostgreSQL 상태에 보존한다. 버전·멱등·원자 처리를 거쳐 복원하고 소진하며, 과거 이력이 없으면 임의 추정하지 않고 `no_undo`로 안내한다. 새 상태 필드를 저장한 뒤에는 구 strict decoder를 쓰는 서버와 혼용하거나 코드만 롤백하지 않는다.
+- **AI:** 같은 채팅의 create/item/form 맥락을 구분한다. 선택 항목은 서버 소유·버전을 확인하고 폼 초안은 비교·명시 적용 후 별도 저장한다. 루틴 규칙도 입력 초안으로 지원하며 기생성 회차 변경 권한으로 해석하지 않는다. 일정 제안의 승인·공동 연락 경계는 그대로 유지한다.
+- **화면:** 홈/캘린더/AI 비서/추가/루틴의 다섯 진입점을 사용한다. 추가는 바텀시트이고 월간·일간은 같은 캘린더 흐름이다. 상태·더보기·상세 시트와 지난 카드 스택을 공통화하며 날짜별 기록은 실제 일정 회차를 재사용한다.
+- **계약/검증:** [CONTRACTS](CONTRACTS.md)와 [디자인 통합 기록](DESIGN_INTEGRATION.md)을 따른다. 합성 검증·웹 미리보기와 실제 모델·계정·기기 검증을 구분한다.

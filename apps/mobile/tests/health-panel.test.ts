@@ -107,7 +107,7 @@ function createHarness() {
 const harness = createHarness();
 const components = build({
   stdin: { contents: `export { default as HealthPanel } from '../src/health/HealthPanel';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/native-adapter|\.\/(Icon|typography)|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ contents:

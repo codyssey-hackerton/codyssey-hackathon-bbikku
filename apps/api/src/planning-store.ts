@@ -8,11 +8,16 @@ export type StoredApproval = { approval: Approval; subject: Proposal };
 export type Conversation = { turns: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; lock?: { token: string; until: string } };
 export type DurableIdempotencyRecord = { fingerprint: string; operationId: string; state: 'running' | 'retryable' | 'completed';
   result?: HttpResult; token?: string; leaseUntil?: string };
+export type StatusUndo = {
+  completion?: { previous: ScheduleItem['completion']; current: ScheduleItem['completion'] };
+  attendance?: { previous: NonNullable<ScheduleItem['attendance']> | null; current: NonNullable<ScheduleItem['attendance']> | null };
+};
 export type UserPlanningState = {
   scheduleRevision: number;
   contextRevision: number;
   items: Map<string, ScheduleItem>;
   tombstones?: Map<string, { itemId: string; deletedRevision: number; priorInvolvement: 'personal' | 'shared'; deletedAt: string }>;
+  statusUndo?: Map<string, StatusUndo>;
   facts: Map<string, MemoryFact>;
   proposals: Map<string, Proposal>;
   proposalFacts: Map<string, string>;

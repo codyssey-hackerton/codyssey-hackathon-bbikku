@@ -16,12 +16,16 @@
 | 타입 | 필수 필드와 선택 필드 | 규칙 |
 |---|---|---|
 | `TimeSlot` | `startsAt: string`, `endsAt: string`, `timezone: string` | 종료 > 시작. |
-| `ScheduleFields` | `kind: event/task`, `title: string`, `timeSlot: TimeSlot/null`, `durationMinutes: number/null`, `deadline: string/null`, `flexibility: fixed/flexible`, `involvement: personal/shared`, `completion: pending/completed/incomplete/unknown` | event는 시간 필수, task는 양수 소요시간 필수. deadline이 있으면 종료가 마감 이내. 미배치 task는 timeSlot=null. 배치 구간은 durationMinutes 이상이어야 한다. 무응답은 incomplete가 아니다. |
+| `ScheduleFields` | `kind: event/task`, `title: string`, `timeSlot: TimeSlot/null`, `durationMinutes: number/null`, `deadline: string/null`, `flexibility: fixed/flexible`, `involvement: personal/shared`, `completion: pending/completed/incomplete/unknown`, `category?: personal/work/null`, `attendance?: attended/absent/unknown/null` | event는 시간 필수, task는 양수 소요시간 필수. deadline이 있으면 종료가 마감 이내. 미배치 task는 timeSlot=null. 배치 구간은 durationMinutes 이상이어야 한다. category는 공유 여부와 별도이며 생략/null은 미분류다. attendance는 event 전용이며 완료 상태와 독립이고 생략/null은 미기록이다. 기존 completion을 참석으로 추정하지 않는다. |
 | `ScheduleItem` | `ScheduleFields` + `id`, `revision`, `sourceRefs: SourceRef[]` | ID/버전/출처는 서버 소유. 완료 항목과 고정 일정은 AI 변경에서 보호. |
 | `SourceRef` | `provider`, `accountRef`, `calendarId`, `externalEventId`, `lastSyncedAt`, `occurrenceKey?`, `sourceVersion?` | 모두 문자열. 계정 참조는 비밀키가 아님. 반복 회차 보존. |
 | `MemoryFact` | `id`, `revision`, `kind: preference/situation/observation/inference`, `key: string`, `value: JSON`, `source: {type: user/provider/derived, ref: string}`, `recordedAt`, `validUntil: string/null` | v1 쓰기는 명시적 preference/situation만. situation은 만료 필수. 미확인 상황을 영구 선호로 승격하지 않음. |
 | `ContextSnapshot` | `now`, `timezone`, `scheduleRevision`, `contextRevision`, `items: ScheduleItem[]`, `facts: MemoryFact[]`, `missingFields: string[]` | 필요한 범위만 조회. 만료된 사실은 유효한 맥락에서 제외. |
 | `ValidationResult` | `valid: boolean`, `conflicts: {targetIds: string[], reason: string, timeSlot?: TimeSlot}[]`, `missingFields: string[]`, `protectedTargets: string[]`, `checkedScheduleRevision`, `checkedContextRevision`, `checkedAt` | 부족 정보/충돌/보호 대상이 있으면 valid=false. |
+
+온보딩·프로필의 계획 선호는 기존 Memory에 사용자별 `kind: preference`, `key: planning_preferences`, `validUntil: null`인 한 fact로 저장한다. 값은 `{version: 1, goals: ('work'|'health'|'life')[], timing: {preparationMinutes: number|null, travelEstimateMinutes: number|null, bufferMinutes: number|null}, preferredPeriod: 'morning'|'afternoon'|'unknown'|null, onboardingStatus: 'completed'|'skipped'}`다. goals는 중복 없는 명시적 선택, 시간은 0~1440 정수이며 null은 미설정이다. 최초 건너뛰기는 빈 goals·null 시간·null 선호시간에 skipped를 기록한다. 기존 값이 있을 때 건너뛰기는 기존 선택을 유지한다. 이 값의 클라이언트 검증과 별개로 공통 Memory API는 일반 JSON을 허용하므로 해당 형태를 서버에서 강제한다고 가정하지 않는다.
+
+계획에 선호가 필요할 때 Agent는 `read_memory`에서 이 키의 사용자 출처 preference와 유효한 버전 1 선택값만 근거로 사용한다. 조회 결과에는 같은 키의 다른 kind도 포함될 수 있다. 미설정·미확인은 추정하지 않으며 `travelEstimateMinutes`는 사용자가 고른 참고값이지 실제 약속 경로 조회 결과가 아니다. 선호 조회·저장은 일정 자동 변경이나 제안 승인이 아니다. 쓰기는 기존 `expectedContextRevision`과 멱등성, 소유 사용자 범위를 따르고 stale 시 기존 값을 다시 조회해 확인한다.
 
 `ChangeSet = {changes: Change[], timingConstraints?: TimingConstraint[]}`. Change는 다음 중 하나다. 빈 변경 묶음은 허용하지 않는다. 서로 의존하는 묶음은 전체 적용 또는 전체 거절한다.
 
@@ -32,7 +36,7 @@ type Change =
   | { changeId: string; operation: 'delete'; targetId: string; expectedRevision: number };
 ```
 
-update는 사용자에게 보여준 전체 편집 필드를 교체한다. `before`, ID, 출처, 실제 버전은 서버가 조회/부여한다. 클라이언트가 보낸 과거 값은 검증 근거가 아니다. 같은 대상을 한 묶음에서 여러 번 수정하지 않는다.
+update는 사용자에게 보여준 전체 편집 필드를 교체한다. 호환성을 위해 `category`와 `attendance`를 생략하면 기존 값을 보존하고, null을 포함해 명시하면 교체한다. 참석 기록이 있는 event를 task로 바꿀 때는 attendance를 명시적으로 null로 지워야 한다. 제안 검증과 승인에도 같은 보존 규칙을 적용한다. `before`, ID, 출처, 실제 버전은 서버가 조회/부여한다. 클라이언트가 보낸 과거 값은 검증 근거가 아니다. 같은 대상을 한 묶음에서 여러 번 수정하지 않는다.
 
 `TimingConstraint`는 `{appointment: {kind: 'existing', id, expectedRevision} | {kind: 'change', changeId}, preparationMinutes: number/null, travelMinutes: number/null, bufferMinutes: number/null, segments: {preparation: string/null, travel: string/null, buffer: string/null}}`다. 약속은 기존 항목의 ID·버전 또는 같은 변경 묶음의 약속 변경을 참조한다. 각 소요가 0이면 해당 segment는 null이며, 양수 구간은 같은 제안의 create/update task를 changeId로 참조하고 역산한 시작·종료·소요와 정확히 일치해야 한다. 같은 관계 또는 다른 관계 사이의 중복·충돌과 불일치는 거절한다. null 소요는 `missingFields`로 표시해 질문하며 0으로 추정하지 않는다. 저장·승인·연락 반영 시 같은 서버 검증을 적용한다.
 
@@ -62,13 +66,17 @@ Agent 입력: 인증된 사용자 범위, `requestId`, `conversationId`, `messag
 
 ```ts
 type AgentResult =
-  | { kind: 'reply'; message: string }
+  | { kind: 'reply'; message: string; draft?: FormDraft }
   | { kind: 'question'; message: string; missingFields: string[] }
   | { kind: 'proposal'; message: string; proposalIds: string[] }
   | { kind: 'failure'; message: string; code: string; retryable: boolean };
 ```
 
 서버가 검증하고 저장한 Proposal만 proposalIds로 반환한다. 검증 실패는 질문/실패로 반환한다. 답변에 변경 완료라고 쓰는 것만으로 실행 완료가 되지 않는다.
+
+채팅의 선택적 `entryContext`는 `{kind:'create'}`, `{kind:'item',id,expectedRevision}`, `{kind:'form',draft:FormDraft}` 중 하나다. `coordinationTarget`과 동시에 보낼 수 없다. item은 인증 사용자의 최신 항목과 버전을 서버에서 확인하고 모델에는 서버가 조회한 값만 제공한다. create는 새 입력 작성, item은 선택한 항목의 질문·변경 검토, form은 현재 입력 초안 지원이다.
+
+`FormDraft = {kind:'event'|'task'|'routine',fields:Record<string,string|string[]>}`이며 서버가 종류별 허용 필드·길이·배열을 검증한다. form 응답은 원래 초안의 필드 범위와 종류를 유지해야 하며 Proposal 저장은 허용하지 않는다. reply의 draft는 미반영 입력 제안으로, 앱에서 원래 폼 세션·종류를 확인하고 사용자에게 기존 값과 비교·적용 선택을 제공한다. 실제 저장은 폼의 별도 저장 동작이다. 루틴 규칙 초안도 같은 흐름이며 기존 회차를 변경하는 승인으로 해석하지 않는다. UI 전환용 context key는 서버 권한 근거가 아니다.
 
 | 읽기/계산 Tool | 입력 | 출력 |
 |---|---|---|
@@ -109,13 +117,15 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 |---|---|---|
 | `GET /health` | 없음, 인증 불필요 | `{status: 'ok'}` (프로세스 생존만 뜻함) |
 | `GET /v1/capabilities` | 인증 | `{storage: {mode: memory/postgres, durable: boolean}, model: {id, reasoningEffort, status}, integrations: {calendar, email, phone, travel}, scheduler: {status}}`; 각 status는 not_configured/available/degraded. available은 실행 경로 사용 가능이며 이번 호출 성공 보장 아님 |
-| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}}` | `{conversationId, result: AgentResult}` |
+| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}, entryContext?: ChatContext}` (두 context 동시 사용 불가) | `{conversationId, result: AgentResult}`; 초안은 §3 참고 |
 | `GET /v1/schedule` | query `from`, `to`, `timezone`, `includeUnscheduled=true/false` (기본 false) | `{items: ScheduleItem[], scheduleRevision}`; 겹치는 구간 조회, true이면 미배치 task도 포함 |
 | `POST /v1/schedule/commands` | `{requestId, expectedScheduleRevision, changeSet}` | `{outcome: 'applied', items: ScheduleItem[], deletedIds: string[], scheduleRevision}` |
 | `GET /v1/proposals` | query `status?`, `cursor?`, `limit?` (기본50, 최대100) | `{proposals: Proposal[], nextCursor: string/null}`; 현재 사용자, createdAt·id 내림차순. 예약 생성안도 같은 목록에서 조회 |
 | `GET /v1/proposals/:id` | ID | `{proposal: Proposal}` |
 | `POST /v1/proposals/:id/decision` | `{requestId, proposalRevision, decision: accept/reject}` | `{outcome: applied/rejected/awaiting_contact, proposal, scheduleRevision}` |
 | `POST /v1/schedule/:id/checkin` | `{requestId, expectedRevision, completion: completed/incomplete/unknown}` | `{item, scheduleRevision}`; 상태만 갱신, 이동 없음 |
+| `POST /v1/schedule/:id/attendance` | `{requestId, expectedRevision, attendance: attended/absent/unknown}` | `{item, scheduleRevision}`; event의 참석만 갱신 |
+| `POST /v1/schedule/:id/undo` | `{requestId, expectedRevision, field: completion/attendance}` | `{item, scheduleRevision}`; 사용자별 해당 상태의 직전 값을 한 번 복원. 이력이 없거나 이미 복원했으면 409 `no_undo` |
 | `GET /v1/memory` | query `at` | `{facts, contextRevision}`; 현재 사용자 유효 사실 |
 | `POST /v1/memory` | `{requestId, expectedContextRevision, kind: preference/situation, key, value, validUntil: string/null}` | `{fact, contextRevision}`; 같은 kind/key는 새 revision으로 대체, 출처는 서버가 user로 기록 |
 | `GET /v1/review-schedule` | 인증 | `{reviewSchedule: ReviewSchedule}` |
@@ -134,7 +144,7 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 
 연락 거절은 발송이나 일정 변경을 허가하지 않는다. 사용자·요청 버전·대기 상태·불변 초안 일치를 확인한 뒤, 대안이 만료되거나 현재 일정·맥락·수신자가 변경되어도 원본 스냅샷을 거절 기록으로 보존하고 종료할 수 있다. accept에는 최신성·만료·수신자·대안 전체 검증을 적용한다.
 
-오류 코드/HTTP: `invalid_request` 400, `unauthenticated` 401, `permission_denied` 403, `not_found` 404, `conflict/stale_proposal/expired_proposal/idempotency_conflict/contact_required` 409, `missing_information` 422, `not_implemented` 501, `not_configured/provider_unavailable` 503. `outcome_unknown`은 외부 실행 결과의 상태이며 무조건 재실행 가능한 오류로 반환하지 않는다. 같은 요청이 실행 중이면 409 `operation_in_progress`와 조회 대상 참조를 반환한다. 제안의 business failure는 AgentResult.failure로, 인증/전송/제공자 전체 실패는 HTTP 오류로 구별한다.
+오류 코드/HTTP: `invalid_request` 400, `unauthenticated` 401, `permission_denied` 403, `not_found` 404, `conflict/stale_proposal/expired_proposal/idempotency_conflict/contact_required/no_undo` 409, `missing_information` 422, `not_implemented` 501, `not_configured/provider_unavailable` 503. `outcome_unknown`은 외부 실행 결과의 상태이며 무조건 재실행 가능한 오류로 반환하지 않는다. 같은 요청이 실행 중이면 409 `operation_in_progress`와 조회 대상 참조를 반환한다. 제안의 business failure는 AgentResult.failure로, 인증/전송/제공자 전체 실패는 HTTP 오류로 구별한다.
 
 ## 5. 저장·승인·Scheduler
 
@@ -310,9 +320,9 @@ Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'l
 
 ## 17. 반복 루틴과 회차
 
-`Routine={id,revision,title,weekdays:number[],timezone,startDate,localTime,durationMinutes,active}`. weekdays는 월1~일7, 시작일은 YYYY-MM-DD, 현지시각 HH:mm, 소요시간 1~1440분이다. `GET /v1/routines` → `{routines}`; `POST /v1/routines {requestId,title,weekdays,timezone,startDate,localTime,durationMinutes}` → `{routine}`; `PATCH /v1/routines/:id {requestId,expectedRevision,...수정값}` → `{routine}`. mutation은 Idempotency-Key를 요구한다.
+`Routine={id,revision,title,weekdays:number[],timezone,startDate,localTime,durationMinutes,active,category?:personal/work/null}`. weekdays는 월1~일7, 시작일은 YYYY-MM-DD, 현지시각 HH:mm, 소요시간 1~1440분이다. `GET /v1/routines` → `{routines}`; `POST /v1/routines {requestId,title,weekdays,timezone,startDate,localTime,durationMinutes,category?}` → `{routine}`; `PATCH /v1/routines/:id {requestId,expectedRevision,...수정값}` → `{routine}`. mutation은 Idempotency-Key를 요구한다.
 
-`POST /v1/routines/materialize {requestId,fromDate,toDate}`는 양끝 포함 최대31일의 활성 규칙을 기존 개인 고정 task 회차로 생성하고 `{createdCount,existingCount,conflicts:[{routineId,date,code:'schedule_conflict'|'invalid_local_time'}],scheduleRevision}`을 반환한다. 기본 UI 범위는 선택일 하루다. 이미 생성/삭제한 회차는 재생성하지 않으며 existingCount는 이전 생성 이력이다. 규칙 변경/비활성은 기존 회차를 바꾸지 않는다. 사용자·루틴·날짜 unique와 일정/sourceRef/멱등 기록은 같은 DB transaction이다. 회차 완료는 기존 checkin을 사용한다.
+`POST /v1/routines/materialize {requestId,fromDate,toDate}`는 양끝 포함 최대31일의 활성 규칙을 기존 개인 고정 task 회차로 생성하고 `{createdCount,existingCount,conflicts:[{routineId,date,code:'schedule_conflict'|'invalid_local_time'}],scheduleRevision}`을 반환한다. 기본 UI 범위는 선택일 하루다. 생성 시점의 category를 회차에 기록하며 규칙의 이후 변경은 기존 회차를 바꾸지 않는다. 이미 생성/삭제한 회차는 재생성하지 않으며 existingCount는 이전 생성 이력이다. 규칙 변경/비활성은 기존 회차를 바꾸지 않는다. 사용자·루틴·날짜 unique와 일정/sourceRef/멱등 기록은 같은 DB transaction이다. 회차 완료는 기존 checkin을 사용한다.
 
 ## 18. Calendar 원본 쓰기와 수동 양방향 동기화
 

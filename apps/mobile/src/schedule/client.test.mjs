@@ -76,3 +76,19 @@ test('an invalid success envelope is rejected by the shared API client', async (
   const { client } = apiWith({ items: [], scheduleRevision: 0 });
   await assert.rejects(client.list(query), (error) => error.code === 'invalid_response');
 });
+
+test('attendance and undo use idempotent requests and validate returned state', async () => {
+  const attended = { ...event, revision: 2, category: 'work', attendance: 'attended' };
+  const first = apiWith({ requestId: 'a', data: { item: attended, scheduleRevision: 2 } });
+  await first.client.attendance({ requestId: 'a', idempotencyKey: 'key-a', input: { id: event.id, expectedRevision: 1, attendance: 'attended' } });
+  assert.equal(new URL(first.calls[0].url).pathname, '/v1/schedule/event-1/attendance');
+  assert.equal(first.calls[0].options.headers['Idempotency-Key'], 'key-a');
+  assert.deepEqual(JSON.parse(first.calls[0].options.body), { requestId: 'a', expectedRevision: 1, attendance: 'attended' });
+  const reverted = apiWith({ requestId: 'u', data: { item: { ...attended, revision: 3, attendance: null }, scheduleRevision: 3 } });
+  await reverted.client.undo({ requestId: 'u', idempotencyKey: 'key-u', input: { id: event.id, expectedRevision: 2, field: 'attendance' } });
+  assert.equal(new URL(reverted.calls[0].url).pathname, '/v1/schedule/event-1/undo');
+  await assert.rejects(first.client.undo({ requestId: 'u', idempotencyKey: 'bad', input: { id: event.id, expectedRevision: 2, field: 'attendance' } }), ScheduleResponseError);
+  for (const bad of [{ ...event, category: 'shared' }, { ...event, attendance: 'pending' }, { ...task, attendance: 'attended' }]) {
+    await assert.rejects(apiWith({ requestId: 'bad', data: { items: [bad], scheduleRevision: 1 } }).client.list(query), ScheduleResponseError);
+  }
+});

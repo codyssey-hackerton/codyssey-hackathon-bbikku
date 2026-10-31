@@ -152,16 +152,18 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
       const exists = async (path: string) => { try { await lstat(path); return true; } catch (error) { return (error as NodeJS.ErrnoException)?.code !== 'ENOENT'; } };
       blocked.gmailContact = await exists(join(dir, filenames.gmail_send));
       blocked.gmailReplyConnection = blocked.gmailContact || await exists(join(dir, filenames.gmail_read));
-      blocked.calendarConnection = await exists(join(dir, filenames.calendar));
-      blocked.calendarWriteConnection = await exists(join(dir, filenames.calendar_write));
+      const calendarReadPath = join(dir, filenames.calendar), calendarWritePath = join(dir, filenames.calendar_write);
+      const hasCalendarRead = await exists(calendarReadPath);
+      blocked.calendarWriteConnection = await exists(calendarWritePath);
+      blocked.calendarConnection = hasCalendarRead || blocked.calendarWriteConnection;
       let gmailContact: Awaited<ReturnType<typeof getGmailConnection>>;
       let gmailReplyConnection: Awaited<ReturnType<typeof getGmailReplyConnection>>;
       let calendarConnection: Awaited<ReturnType<typeof getCalendarConnection>>;
       let calendarWriteConnection: Awaited<ReturnType<typeof getCalendarWriteConnection>>;
       try { gmailContact = await getGmailConnection({ env, credentialPath: join(dir, filenames.gmail_send), userId, fetcher }); } catch { /* independently unavailable */ }
       try { gmailReplyConnection = await getGmailReplyConnection({ env, credentialPath: join(dir, filenames.gmail_read), sendCredentialPath: await sendPath(userId), userId, fetcher }); } catch { /* independently unavailable */ }
-      try { calendarConnection = await getCalendarConnection({ env, credentialPath: join(dir, filenames.calendar), userId, fetcher }); } catch { /* independently unavailable */ }
-      try { calendarWriteConnection = await getCalendarWriteConnection({ env, credentialPath: join(dir, filenames.calendar_write), userId, fetcher }); } catch { /* independently unavailable */ }
+      try { calendarConnection = await getCalendarConnection({ env, credentialPath: hasCalendarRead ? calendarReadPath : calendarWritePath, userId, fetcher }); } catch { /* independently unavailable */ }
+      try { calendarWriteConnection = await getCalendarWriteConnection({ env, credentialPath: calendarWritePath, userId, fetcher }); } catch { /* independently unavailable */ }
       return { gmailContact, gmailReplyConnection, calendarConnection, calendarWriteConnection, blocked };
     } catch { return { blocked }; }
   }

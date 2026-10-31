@@ -43,6 +43,15 @@ const op = (input) => ({ input, requestId: 'request-1', idempotencyKey: 'key-1' 
 const input = (value = proposal, decision = 'accept') => ({ id: value.id, proposalRevision: value.revision, mode: value.mode, decision });
 const result = (value, outcome) => ({ outcome, proposal: { ...value, status: outcome }, scheduleRevision: 8 });
 
+test('분류와 참석 상태를 보존하며 잘못된 값은 제안 응답에서 거절한다', async () => {
+  const categorized = { ...proposal, beforeItems: [{ ...before, category: 'work', attendance: 'attended' }] };
+  assert.equal((await setup([ok({ proposal: categorized })]).client.get(proposal.id)).beforeItems[0].attendance, 'attended');
+  for (const invalid of [{ ...before, category: 'other' }, { ...before, attendance: 'yes' },
+    { ...before, kind: 'task', durationMinutes: 30, attendance: 'attended' }]) {
+    await assert.rejects(setup([ok({ proposal: { ...proposal, beforeItems: [invalid] } })]).client.get(proposal.id), error => error.code === 'invalid_response');
+  }
+});
+
 test('목록 cursor와 상세 ID를 인코딩하고 전체 스냅샷을 보존한다', async () => {
   const cursor = 'next/한?=&';
   const { client, calls } = setup([ok({ proposals: [proposal], nextCursor: cursor }), ok({ proposals: [], nextCursor: null }), ok({ proposal })]);

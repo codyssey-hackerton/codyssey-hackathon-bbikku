@@ -1,12 +1,14 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useFonts } from 'expo-font';
 import { FontReadyContext, Text, TextInput } from './src/ui/typography';
 import { colors } from './src/ui/theme';
-import { TabIcon } from './src/ui/TabIcon';
 import { Icon } from './src/ui/Icon';
 import { GlassSurface } from './src/ui/GlassSurface';
+import { BottomSheet } from './src/ui/BottomSheet';
+import { PikkuCharacter } from './src/ui/PikkuCharacter';
+import { ScreenBackground } from './src/ui/ScreenBackground';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { createApiClient } from './src/api/http';
@@ -15,7 +17,7 @@ import { operationGuard } from './src/api/operationGuard';
 import type { ApiClient } from './src/api/http';
 import ChatScreen, { type RecoveryRequest, type RevisionRequest } from './src/chat/ChatScreen';
 import { createChatClient } from './src/chat/client';
-import type { CoordinationTarget } from './src/chat/client';
+import type { ChatEntryContext, CoordinationTarget, FormDraft } from './src/chat/client';
 import ProposalPanel from './src/proposals/ProposalPanel';
 import MemoryPanel from './src/memory/MemoryPanel';
 import ReviewPanel from './src/review/ReviewPanel';
@@ -25,19 +27,20 @@ import PhoneConnectionPanel from './src/contacts/PhoneConnectionPanel';
 import GoogleConnectionPanel from './src/google/GoogleConnectionPanel';
 import HealthPanel from './src/health/HealthPanel';
 import DayScreen from './src/screens/DayScreen';
+import HomeScreen from './src/screens/HomeScreen';
+import AddItemPanel from './src/add/AddItemPanel';
 import { createScheduleClient } from './src/schedule/client';
+import type { ScheduleItem } from './src/schedule/client';
 import { civilDate, formatCivilDate, startOfDay } from './src/schedule/dates';
 import AuthPanel from './src/auth/AuthPanel';
+import { WelcomeScreen } from './src/auth/WelcomeScreen';
+import { OnboardingPanel, ProfilePanel, usePlanningProfile } from './src/profile';
 import { createAuthClient, type LoginResult, type Member } from './src/auth/client';
 import RoutinesPanel from './src/routines/RoutinesPanel';
 import CalendarSyncPanel from './src/calendar-sync/CalendarSyncPanel';
 
-type Tab = 'chat' | 'calendar' | 'day';
-const tabs: { id: Tab; label: string }[] = [
-  { id: 'chat', label: 'AI 채팅' },
-  { id: 'calendar', label: '캘린더' },
-  { id: 'day', label: '하루 일정' },
-];
+type Tab = 'home' | 'calendar' | 'chat' | 'routines';
+type AddSession = { key: string; kind: FormDraft['kind']; date: Date; item?: ScheduleItem };
 
 // Public Expo variables are embedded in the app. Never place credentials here.
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim() || (Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
@@ -55,9 +58,12 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
   return <View style={[styles.screen, !visible && styles.hidden]} accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>{children}</View>;
 }
 
-function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: string }) {
-  const [tab, setTab] = useState<Tab>('chat');
-  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'routines' | 'calendarSync'>('main');
+function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null }) {
+  const [tab, setTab] = useState<Tab>('home');
+  const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem'>('main');
+  const profile = usePlanningProfile(api);
+  const [onboarding, setOnboarding] = useState<'check' | 'show' | 'hidden'>(member ? 'check' : 'hidden');
+  const [calendarMode, setCalendarMode] = useState<'month' | 'day'>('month');
   const [routinesOpened, setRoutinesOpened] = useState(false);
   const [calendarSyncOpened, setCalendarSyncOpened] = useState(false);
   const [reviewOpened, setReviewOpened] = useState(false);
@@ -65,70 +71,204 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
   const [coordinationTarget, setCoordinationTarget] = useState<(CoordinationTarget & { title: string }) | undefined>();
   const [recoveryRequest, setRecoveryRequest] = useState<RecoveryRequest | undefined>();
   const [revisionRequest, setRevisionRequest] = useState<RevisionRequest | undefined>();
+  const [entryContext, setEntryContext] = useState<ChatEntryContext | undefined>();
+  const [addVisible, setAddVisible] = useState(false);
+  const [addSession, setAddSession] = useState<AddSession | null>(null);
+  const [formRequest, setFormRequest] = useState<{ sessionKey: string; key: string } | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<FormDraft | undefined>();
+  const [navigationError, setNavigationError] = useState('');
+  const [showRequestReview, setShowRequestReview] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [proposalRefreshVersion, setProposalRefreshVersion] = useState(0);
   const refresh = useCallback(() => {
-    setRefreshVersion((version) => version + 1);
-    setProposalRefreshVersion((version) => version + 1);
+    setRefreshVersion(version => version + 1);
+    setProposalRefreshVersion(version => version + 1);
   }, []);
-  const refreshProposals = useCallback(() => setProposalRefreshVersion((version) => version + 1), []);
+  const refreshProposals = useCallback(() => setProposalRefreshVersion(version => version + 1), []);
+  useEffect(() => {
+    if (onboarding === 'check' && profile.load.status === 'success') setOnboarding(profile.load.value ? 'hidden' : 'show');
+  }, [onboarding, profile.load]);
+  useEffect(() => { if (profile.mutation.state.status === 'success') refresh(); }, [profile.mutation.state.status, refresh]);
   const chatClient = useMemo(() => createChatClient(api), [api]);
   const scheduleClient = useMemo(() => createScheduleClient(api), [api]);
   const chatVisible = tab === 'chat' && panel === 'main';
+  const nextKey = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selectedCivil = civilDate(selectedDate, timezone);
+  const selectedDateKey = `${selectedCivil.year}-${String(selectedCivil.month).padStart(2, '0')}-${String(selectedCivil.day).padStart(2, '0')}`;
+
+  function selectDay(value: string) {
+    const [year, month, day] = value.split('-').map(Number);
+    setSelectedDate(startOfDay({ year: year!, month: month!, day: day! }, timezone));
+  }
+
+  function openAdd(kind: FormDraft['kind'], item?: ScheduleItem) {
+    setAddVisible(false);
+    const unresolved = operationGuard.hasUnresolved();
+    setShowRequestReview(unresolved);
+    if (addSession) {
+      setNavigationError(unresolved
+        ? '작성 중인 초안을 열었습니다. 처리 중이거나 결과를 확인하지 못한 요청은 시작한 화면에서 확인해 주세요. 확인 전에는 저장할 수 없습니다.'
+        : '작성 중인 내용을 먼저 저장하거나 닫아 주세요.');
+      setPanel('addItem');
+      return;
+    }
+    setNavigationError(unresolved ? '초안은 작성할 수 있습니다. 저장하기 전에 처리 중이거나 결과를 확인하지 못한 요청을 시작한 화면에서 확인해 주세요.' : '');
+    setPendingDraft(undefined);
+    setAddSession({ key: nextKey(), kind, date: new Date(selectedDate), item });
+    setPanel('addItem');
+  }
+
+  function ask(item?: ScheduleItem) {
+    setAddVisible(false);
+    if (operationGuard.hasUnresolved()) {
+      setNavigationError('기존 요청과 대화 맥락을 유지했습니다. 처리 중이거나 결과를 확인하지 못한 요청을 시작한 화면에서 확인해 주세요.');
+      setShowRequestReview(false); setTab('chat'); setPanel('main');
+      return;
+    }
+    setCoordinationTarget(undefined); setRecoveryRequest(undefined); setRevisionRequest(undefined);
+    setEntryContext(item
+      ? { key: nextKey(), kind: 'item', id: item.id, expectedRevision: item.revision, title: item.title }
+      : { key: nextKey(), kind: 'create' });
+    setTab('chat'); setPanel('main');
+  }
+
+  function recover(item: ScheduleItem) {
+    const dateLabel = formatCivilDate(civilDate(item.timeSlot ? new Date(item.timeSlot.startsAt) : selectedDate, timezone));
+    const key = JSON.stringify([item.id, dateLabel]);
+    setCoordinationTarget(undefined); setRevisionRequest(undefined);
+    setEntryContext({ key, kind: 'item', id: item.id, expectedRevision: item.revision, title: item.title });
+    setRecoveryRequest({ key, title: item.title, dateLabel,
+      text: `${dateLabel}에 확인한 미완료 할 일 “${item.title}”이 아직 필요한지와 기한을 먼저 확인하고 싶어요. 필요하다면 가능한 복구 방법을 함께 살펴봐 주세요. 일정 변경은 제안을 보고 결정할게요.` });
+    setTab('chat'); setPanel('main');
+  }
+
+  function applyDraft(draft: FormDraft) {
+    if (entryContext?.kind === 'form') {
+      if (!addSession || formRequest?.sessionKey !== addSession.key || formRequest.key !== entryContext.key || draft.kind !== addSession.kind) {
+        setNavigationError('작성하던 폼이 바뀌어 초안을 적용할 수 없습니다.');
+        return;
+      }
+    } else if (entryContext?.kind === 'create') {
+      if (addSession) {
+        setNavigationError('작성 중인 폼이 있습니다. 기존 내용을 먼저 저장하거나 닫아 주세요.');
+        return;
+      }
+      setAddSession({ key: nextKey(), kind: draft.kind, date: new Date(selectedDate) });
+    } else return;
+    setPendingDraft(draft); setPanel('addItem');
+  }
+
+  const dayProps = {
+    selectedDate, onSelectDate: setSelectedDate, client: scheduleClient, api, timezone, refreshVersion,
+    onScheduleChanged: refresh,
+    onOpenPreparationProposals: () => { refreshProposals(); setPanel('proposals'); },
+    onCoordinate: (item: ScheduleItem) => {
+      setEntryContext(undefined); setRecoveryRequest(undefined); setRevisionRequest(undefined);
+      setCoordinationTarget({ id: item.id, expectedRevision: item.revision, title: item.title });
+      setTab('chat'); setPanel('main');
+    },
+    onRecovery: recover, onAsk: (item: ScheduleItem) => ask(item),
+    createRequest: () => setAddVisible(true), editRequest: (item: ScheduleItem) => openAdd(item.kind, item),
+  };
+  const connections = [
+    { label: '내 프로필', run: () => setPanel('profile') },
+    { label: 'Google 연결', run: () => setPanel('googleConnection') },
+    { label: '캘린더 일정 가져오기', run: () => setPanel('calendarImport') },
+    { label: 'Google 캘린더 동기화', run: () => { setCalendarSyncOpened(true); setPanel('calendarSync'); } },
+    { label: '전화 외부 연결', run: () => setPanel('phoneConnection') },
+    { label: '내 정보·선호', run: () => setPanel('memory') },
+    { label: '자동 검토 설정', run: () => { setReviewOpened(true); setPanel('review'); } },
+    { label: '계정·앱 설정', run: onOpenSettings },
+  ];
+
+  if (onboarding === 'check') return <View style={styles.connectionMenu}>
+    <Text accessibilityRole="header" style={styles.menuTitle}>나의 삐꾸를 준비하고 있어요</Text>
+    {profile.load.status === 'loading' ? <ActivityIndicator color={colors.primary} /> : <>
+      <Text accessibilityRole="alert" style={styles.error}>개인화 설정을 불러오지 못했습니다. 기존 설정은 변경하지 않았어요.</Text>
+      <Pressable accessibilityRole="button" onPress={profile.refresh} style={styles.connectionRow}><Text>개인화 설정 다시 조회</Text></Pressable>
+      <Pressable accessibilityRole="button" onPress={() => setOnboarding('hidden')} style={styles.connectionRow}><Text>지금은 홈으로</Text></Pressable>
+    </>}
+  </View>;
+  if (onboarding === 'show') return <OnboardingPanel profile={profile} onComplete={() => setOnboarding('hidden')} onBack={() => setOnboarding('hidden')} />;
 
   return <>
+    {navigationError !== '' && <View style={styles.navigationNotice}><Text accessibilityRole="alert" style={[styles.error, styles.noticeText]}>{navigationError}</Text>
+      {showRequestReview && <Pressable accessibilityRole="button" accessibilityLabel="AI 비서 열기" onPress={() => { setTab('chat'); setPanel('main'); setNavigationError(''); setShowRequestReview(false); }} style={styles.noticeClose}><Text>AI 비서 열기</Text></Pressable>}
+      <Pressable accessibilityRole="button" accessibilityLabel="안내 닫기" onPress={() => { setNavigationError(''); setShowRequestReview(false); }} style={styles.noticeClose}><Icon name="close" /></Pressable></View>}
     <View style={styles.screenContainer}>
-      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="Google 연결" onPress={() => setPanel('googleConnection')} style={styles.importButton}>
-        <Text style={styles.settingsToggleText}>Google 연결</Text>
-      </Pressable>}
-      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="전화 외부 연결" onPress={() => setPanel('phoneConnection')} style={styles.importButton}>
-        <Text style={styles.settingsToggleText}>전화 외부 연결</Text>
-      </Pressable>}
-      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="루틴" onPress={() => { setRoutinesOpened(true); setPanel('routines'); }} style={styles.importButton}>
-        <Text style={styles.settingsToggleText}>루틴</Text>
-      </Pressable>}
-      {panel === 'main' && (tab === 'calendar' || tab === 'day') && <Pressable accessibilityRole="button" accessibilityLabel="캘린더 일정 가져오기" onPress={() => setPanel('calendarImport')} style={styles.importButton}>
-        <Text style={styles.settingsToggleText}>캘린더 일정 가져오기</Text>
-      </Pressable>}
-      {panel === 'main' && (tab === 'calendar' || tab === 'day') && <Pressable accessibilityRole="button" accessibilityLabel="Google 캘린더 동기화" onPress={() => { setCalendarSyncOpened(true); setPanel('calendarSync'); }} style={styles.importButton}>
-        <Text style={styles.settingsToggleText}>Google 캘린더 동기화</Text>
-      </Pressable>}
+      <Scene visible={panel === 'main' && tab === 'home'}><HomeScreen {...dayProps} selectedDate={new Date()} visible={panel === 'main' && tab === 'home'}
+        onCalendar={() => { setSelectedDate(new Date()); setTab('calendar'); setCalendarMode('day'); }} onOpenProposals={() => setPanel('proposals')} onOpenSettings={() => setPanel('profile')} /></Scene>
       <Scene visible={chatVisible}>
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
           onOpenProposals={() => setPanel('proposals')} onOpenMemory={() => setPanel('memory')} onOpenReviewSchedule={() => { setReviewOpened(true); setPanel('review'); }} onProposalCreated={refreshProposals}
-          coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest} />
+          coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest}
+          entryContext={entryContext} onClearEntryContext={() => setEntryContext(undefined)} onApplyDraft={applyDraft} />
       </Scene>
-      <Scene visible={panel === 'main' && tab === 'calendar'}><CalendarScreen selectedDate={selectedDate} onSelectDate={setSelectedDate} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
-      <Scene visible={panel === 'main' && tab === 'day'}><DayScreen selectedDate={selectedDate} onSelectDate={setSelectedDate} client={scheduleClient} api={api} onOpenPreparationProposals={() => { refreshProposals(); setPanel('proposals'); }} timezone={timezone} refreshVersion={refreshVersion} onScheduleChanged={refresh} visible={panel === 'main' && tab === 'day'}
-        onCoordinate={(item) => { setCoordinationTarget({ id: item.id, expectedRevision: item.revision, title: item.title }); setTab('chat'); }}
-        onRecovery={(item) => {
-          const dateLabel = formatCivilDate(civilDate(selectedDate, timezone));
-          setRecoveryRequest({ key: JSON.stringify([item.id, dateLabel]), title: item.title, dateLabel,
-            text: `${dateLabel}에 확인한 미완료 할 일 “${item.title}”이 아직 필요한지와 기한을 먼저 확인하고 싶어요. 필요하다면 가능한 복구 방법을 함께 살펴봐 주세요. 일정 변경은 제안을 보고 결정할게요.` });
-          setTab('chat');
-        }} /></Scene>
-      <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={(proposal) => {
+      <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'month'}><CalendarScreen selectedDate={selectedDate}
+        onSelectDate={date => { setSelectedDate(date); setCalendarMode('day'); }} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
+      <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'day'}>
+        <Pressable accessibilityRole="button" accessibilityLabel="월간 캘린더로" onPress={() => setCalendarMode('month')} style={styles.backButton}><Icon name="chevronLeft" /><Text style={styles.settingsToggleText}>월간 캘린더</Text></Pressable>
+        <DayScreen {...dayProps} visible={panel === 'main' && tab === 'calendar' && calendarMode === 'day'} />
+      </Scene>
+      {routinesOpened && <Scene visible={panel === 'main' && tab === 'routines'}><RoutinesPanel api={api} timezone={timezone}
+        visible={panel === 'main' && tab === 'routines'} selectedDate={selectedDateKey}
+        onSelectDate={selectDay} onRecovery={recover} onBack={() => setTab('home')}
+        onDay={value => { selectDay(value); setPanel('main'); setTab('calendar'); setCalendarMode('day'); }} onScheduleChanged={refresh} /></Scene>}
+      <Scene visible={panel === 'connections'}><ScrollView contentContainerStyle={styles.connectionMenu}>
+        <Pressable accessibilityRole="button" accessibilityLabel="연결 및 설정 닫기" onPress={() => setPanel('main')} style={styles.backButton}><Icon name="chevronLeft" /><Text style={styles.settingsToggleText}>돌아가기</Text></Pressable>
+        <Text accessibilityRole="header" style={styles.menuTitle}>연결 및 설정</Text>
+        {connections.map(item => <Pressable key={item.label} accessibilityRole="button" accessibilityLabel={item.label} onPress={item.run} style={styles.connectionRow}><Text style={styles.connectionText}>{item.label}</Text><Icon name="chevronRight" /></Pressable>)}
+        <Text style={styles.attribution}>아이콘: Streamline Core · CC BY 4.0. 크기·색상 변경, 더보기 90도 회전 및 PNG 변환.</Text>
+        <Pressable accessibilityRole="link" accessibilityLabel="Streamline 아이콘 원본" onPress={() => { void Linking.openURL('https://github.com/webalys-hq/streamline-vectors/tree/main/core').catch(() => setNavigationError('아이콘 출처 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>Streamline 원본</Text></Pressable>
+        <Pressable accessibilityRole="link" accessibilityLabel="CC BY 4.0 라이선스" onPress={() => { void Linking.openURL('https://creativecommons.org/licenses/by/4.0/').catch(() => setNavigationError('라이선스 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>CC BY 4.0 라이선스</Text></Pressable>
+      </ScrollView></Scene>
+      <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={proposal => {
         const target = proposal.coordinationTarget;
+        setEntryContext(undefined); setRecoveryRequest(undefined);
         setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
           text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
-          coordinationTarget: target ? { ...target, title: proposal.beforeItems.find((item) => item.id === target.id)?.title ?? target.id } : undefined });
+          coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
         setTab('chat'); setPanel('main');
       }} /></Scene>
       {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
-      {routinesOpened && <Scene visible={panel === 'routines'}><RoutinesPanel api={api} timezone={timezone} visible={panel === 'routines'} selectedDate={(() => { const date = civilDate(selectedDate, timezone); return `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`; })()}
-        onBack={() => setPanel('main')} onDay={value => { const [year, month, day] = value.split('-').map(Number); setSelectedDate(startOfDay({ year: year!, month: month!, day: day! }, timezone)); setPanel('main'); setTab('day'); }} onScheduleChanged={refresh} /></Scene>}
-      <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
+      <Scene visible={panel === 'profile'}><ProfilePanel profile={profile} member={member} onBack={() => setPanel('main')}
+        onOpenGoogle={() => setPanel('googleConnection')} onOpenReview={() => { setReviewOpened(true); setPanel('review'); }}
+        onOpenAccount={() => setPanel('connections')} onOpenMemory={() => setPanel('memory')} /></Scene>
+      <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={() => { refresh(); profile.refresh(); }} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
+      {addSession && <Scene visible={panel === 'addItem'}><AddItemPanel key={addSession.key} api={api} client={scheduleClient} timezone={timezone}
+        selectedDate={addSession.date} kind={addSession.kind} item={addSession.item} pendingDraft={pendingDraft} onDraftHandled={() => setPendingDraft(undefined)}
+        onClose={() => { setAddSession(null); setPendingDraft(undefined); if (entryContext?.key === formRequest?.key) setEntryContext(undefined); setFormRequest(null); setPanel('main'); }} onScheduleChanged={refresh}
+        onAskDraft={draft => {
+          if (operationGuard.hasUnresolved()) {
+            setNavigationError('작성 중인 초안은 유지됩니다. 처리 중이거나 결과를 확인하지 못한 요청을 시작한 화면에서 먼저 확인해 주세요.');
+            setShowRequestReview(true);
+            return;
+          }
+          setCoordinationTarget(undefined); setRecoveryRequest(undefined); setRevisionRequest(undefined);
+          const key = nextKey();
+          setFormRequest({ sessionKey: addSession.key, key });
+          setEntryContext({ key, kind: 'form', draft }); setTab('chat'); setPanel('main');
+        }} /></Scene>}
     </View>
     {panel === 'main' && <View style={styles.tabBar}><GlassSurface><View style={styles.tabs} accessibilityRole="tablist">
-      {tabs.map((item) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={[styles.tab, tab === item.id && styles.activeTab]}>
-        <TabIcon name={item.id} color={tab === item.id ? colors.primary : colors.muted} />
-        <Text style={[styles.tabText, tab === item.id && styles.activeTabText]}>{item.label}</Text>
-      </Pressable>)}
+      {(['home', 'calendar', 'chat', 'add', 'routines'] as const).map(id => {
+        const label = { home: '홈', calendar: '캘린더', chat: 'AI 비서', add: '추가', routines: '루틴' }[id];
+        const selected = id !== 'add' && tab === id;
+        return <Pressable key={id} accessibilityRole={id === 'add' ? 'button' : 'tab'} accessibilityLabel={label} accessibilityState={{ selected }}
+          onPress={() => { if (id === 'add') setAddVisible(true); else { setTab(id); if (id === 'routines') setRoutinesOpened(true); } }} style={[styles.tab, selected && styles.activeTab]}>
+          {id === 'chat' ? <View style={styles.aiTab}><PikkuCharacter size={42} /></View> : <Icon name={id === 'routines' ? 'repeat' : id === 'add' ? 'plus' : id} size={22} color={selected ? colors.primary : colors.muted} />}
+          <Text style={[styles.tabText, selected && styles.activeTabText]}>{label}</Text>
+        </Pressable>;
+      })}
     </View></GlassSurface></View>}
+    <BottomSheet visible={addVisible} title="무엇을 추가할까요?" onClose={() => setAddVisible(false)}>
+      <Pressable accessibilityRole="button" accessibilityLabel="삐꾸에게 부탁하기" onPress={() => ask()} style={styles.askButton}><PikkuCharacter size={42} /><View style={styles.askText}><Text style={styles.askTitle}>삐꾸에게 부탁하기</Text><Text style={styles.hint}>새 일정·할 일·루틴을 함께 만들어요</Text></View><Icon name="arrowRight" color={colors.primary} /></Pressable>
+      {(['event', 'task', 'routine'] as const).map(kind => <Pressable key={kind} accessibilityRole="button" accessibilityLabel={{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]} onPress={() => openAdd(kind)} style={styles.connectionRow}><Icon name={kind === 'event' ? 'calendar' : kind === 'routine' ? 'repeat' : 'day'} /><Text style={styles.connectionText}>{{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]}</Text><Icon name="plus" /></Pressable>)}
+    </BottomSheet>
   </>;
 }
 
@@ -137,6 +277,8 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const [sessionToken, setSessionToken] = useState('');
   const [member, setMember] = useState<Member | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'signup' | 'login'>('login');
+  const [authFlowActive, setAuthFlowActive] = useState(false);
   const [logoutState, setLogoutState] = useState<'idle' | 'pending' | 'unknown'>('idle');
   const logoutOwner = useRef<object>({});
   const logoutLock = useRef(false);
@@ -153,6 +295,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const api = useMemo(() => createApiClient({ baseUrl, getSessionToken: () => sessionToken }), [baseUrl, sessionToken]);
 
   function toggleSettings() {
+    if (authFlowActive) { setSettingsError('로그인을 완료하거나 이전 화면으로 돌아가 취소해 주세요.'); return; }
     if (!showSettings) {
       setUrlDraft(baseUrl);
       setTokenDraft(member ? '' : sessionToken);
@@ -171,7 +314,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
     const serverChanged = nextUrl !== normalizeApiBaseUrl(baseUrl);
     const nextToken = member && !tokenEdited ? sessionToken : tokenDraft.trim();
     const connectionChanged = serverChanged || nextToken !== sessionToken;
-    if (connectionChanged && operationGuard.hasUnresolved()) {
+    if (connectionChanged && (operationGuard.hasUnresolved() || authFlowActive)) {
       setSettingsError('처리 중이거나 결과를 확인하지 못한 요청이 있습니다. 해당 화면에서 같은 요청의 결과를 먼저 확인해 주세요. 앱을 종료하면 이 재시도 정보는 사라집니다.');
       return;
     }
@@ -198,17 +341,17 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
     if (operationGuard.hasUnresolved()) return false;
     setSessionToken(result.sessionToken); setMember(result.member); setTokenDraft(''); setTokenEdited(false);
     setConnectionRevision(revision => revision + 1); setHealthMounted(false); setHealthOpen(false);
-    setShowSettings(false); setAuthOpen(false); setLogoutState('idle'); return true;
+    setShowSettings(false); setAuthOpen(false); setAuthFlowActive(false); setLogoutState('idle'); return true;
   }
 
   function clearLocalSession() {
-    if (operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+    if (operationGuard.hasUnresolved() || authFlowActive) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
     setSessionToken(''); setMember(null); setTokenDraft(''); setTokenEdited(false);
     setConnectionRevision(revision => revision + 1); setHealthMounted(false); setHealthOpen(false); setLogoutState('idle');
   }
 
   async function logout() {
-    if (logoutLock.current || operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+    if (logoutLock.current || operationGuard.hasUnresolved() || authFlowActive) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
     logoutLock.current = true; setSettingsError(null); setLogoutState('pending');
     operationGuard.update(logoutOwner.current, { status: 'pending' });
     try {
@@ -222,11 +365,12 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
 
   return (
     <SafeAreaView style={styles.safeArea}>
+      <ScreenBackground>
       <StatusBar style="dark" />
       {Platform.OS === 'web' && process.env.EXPO_PUBLIC_PREVIEW_ONLY === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 화면 미리보기</Text><Text style={styles.hint}>공유 API와 로그인 연결을 준비 중입니다. 실제 AI 대화와 일정 저장은 연결 완료 후 사용할 수 있습니다.</Text></View>}
       {Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 기능 테스트</Text><Text style={styles.hint}>참여 코드를 입력해 기능을 테스트할 수 있습니다.</Text></View>}
       {fontUnavailable && <Text accessibilityRole="alert" style={styles.fontNotice}>글꼴을 불러오지 못해 기본 글꼴로 표시합니다.</Text>}
-      <View style={styles.topBar}>
+      {(showSettings || healthOpen) && <View style={styles.topBar}>
         <View style={styles.brandGroup}>
           <View style={styles.brandMark} accessible={false}><Text style={styles.brandMarkText}>p</Text></View>
           <Text style={styles.brand} accessibilityRole="header">pikku</Text>
@@ -235,7 +379,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Icon name="settings" size={18} />
           <Text style={styles.settingsToggleText}>설정</Text>
         </Pressable>
-      </View>
+      </View>}
       {showSettings && (
         <View style={styles.settings}>
           {member ? <><Text style={styles.settingLabel}>로그인: {member.displayName || member.email}</Text>
@@ -247,7 +391,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Pressable accessibilityRole="button" accessibilityLabel="연결" accessibilityState={{ expanded: showConnections }}
             onPress={() => setShowConnections((value) => !value)} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>연결</Text></Pressable>
           {showConnections && <Pressable accessibilityRole="button" accessibilityLabel="건강 데이터" onPress={() => {
-            if (authOpen && operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+            if (authOpen && (operationGuard.hasUnresolved() || authFlowActive)) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
             setAuthOpen(false); setHealthMounted(true); setHealthOpen(true); setShowSettings(false);
           }} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>건강 데이터</Text></Pressable>}
           <Text style={styles.settingLabel}>API 서버 주소</Text>
@@ -259,9 +403,13 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Pressable accessibilityRole="button" onPress={applySettings} style={styles.apply}><Text style={styles.applyText}>설정 적용</Text></Pressable>
         </View>
       )}
-      <Scene visible={!healthOpen && !authOpen}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} /></Scene>
+      {!sessionToken && !authOpen && !showSettings && !healthOpen && <WelcomeScreen onStart={() => { setAuthMode('signup'); setAuthOpen(true); }}
+        onLogin={() => { setAuthMode('login'); setAuthOpen(true); }} onDeveloperSettings={toggleSettings} />}
+      {sessionToken !== '' && <Scene visible={!healthOpen && !authOpen && !showSettings}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} onOpenSettings={toggleSettings} member={member} /></Scene>}
       {healthMounted && <Scene visible={healthOpen && !authOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen && !authOpen} onBack={() => setHealthOpen(false)} /></Scene>}
-      {authOpen && <AuthPanel key={baseUrl} baseUrl={baseUrl} onBack={() => setAuthOpen(false)} onSignedIn={signedIn} />}
+      {authOpen && <AuthPanel key={baseUrl} baseUrl={baseUrl} mode={authMode} onFlowActiveChange={setAuthFlowActive}
+        onBack={() => { setAuthOpen(false); setAuthFlowActive(false); }} onSignedIn={signedIn} />}
+      </ScreenBackground>
     </SafeAreaView>
   );
 }
@@ -283,7 +431,19 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, width: '100%', maxWidth: 520, alignSelf: 'center', backgroundColor: colors.background },
-  importButton: { minHeight: 44, justifyContent: 'center', alignSelf: 'flex-end', paddingHorizontal: 20 },
+  navigationNotice: { padding: 12, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, backgroundColor: colors.surface },
+  noticeText: { flex: 1, minWidth: 180 },
+  noticeClose: { minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
+  connectionMenu: { padding: 16, gap: 12, paddingBottom: 36 },
+  menuTitle: { fontSize: 24, fontWeight: '700', color: colors.text, marginVertical: 8 },
+  backButton: { minHeight: 44, flexDirection: 'row', gap: 6, alignItems: 'center', alignSelf: 'flex-start', paddingHorizontal: 12 },
+  connectionRow: { minHeight: 56, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 16, backgroundColor: colors.surface, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  connectionText: { flex: 1, color: colors.text, fontSize: 15, fontWeight: '600' },
+  attribution: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 16 },
+  askButton: { minHeight: 84, borderRadius: 20, padding: 16, backgroundColor: '#E9E9FF', flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 16 },
+  askText: { flex: 1, gap: 6 },
+  askTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
+  aiTab: { width: 48, height: 48, marginTop: -20, borderRadius: 24, backgroundColor: '#E9E6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: colors.surface },
   topBar: { minHeight: 58, paddingHorizontal: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   brandGroup: { flexDirection: 'row', gap: 9, alignItems: 'center' },
   brandMark: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
@@ -296,14 +456,14 @@ const styles = StyleSheet.create({
   input: { minHeight: 48, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: 12, color: colors.text },
   hint: { color: colors.muted, fontSize: 12 },
   error: { color: colors.error },
-  apply: { alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 18, justifyContent: 'center', backgroundColor: colors.primary, borderRadius: 14 },
+  apply: { alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 18, justifyContent: 'center', backgroundColor: colors.primaryPressed, borderRadius: 14 },
   applyText: { color: colors.surface, fontWeight: '600' },
   screenContainer: { flex: 1 },
   screen: { flex: 1 },
   hidden: { display: 'none' },
-  tabBar: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 6, backgroundColor: colors.background },
+  tabBar: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 8 },
   tabs: { flexDirection: 'row', padding: 5 },
-  tab: { flex: 1, minHeight: 58, paddingVertical: 7, gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: 21 },
+  tab: { flex: 1, minHeight: 62, paddingVertical: 8, gap: 5, alignItems: 'center', justifyContent: 'center', borderRadius: 21 },
   activeTab: { backgroundColor: colors.primarySoft },
   tabText: { color: colors.muted, fontSize: 12, fontWeight: '500' },
   activeTabText: { color: colors.primary, fontWeight: '700' },

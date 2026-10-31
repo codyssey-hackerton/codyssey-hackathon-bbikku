@@ -15,12 +15,29 @@ test('editing shows and preserves every field until the user changes it', () => 
   assert.deepEqual(draft, {
     kind: 'event', title: '회의', startsAt: event.timeSlot.startsAt, endsAt: event.timeSlot.endsAt,
     timezone: 'Asia/Seoul', durationMinutes: '60', deadline: event.deadline,
-    flexibility: 'flexible', involvement: 'shared', completion: 'unknown',
+    flexibility: 'flexible', involvement: 'shared', completion: 'unknown', category: '',
   });
   const { id, revision, sourceRefs, ...fields } = event;
   assert.deepEqual(scheduleFields(draft, event), { fields });
   assert.match(scheduleFields({ ...draft, involvement: 'personal' }, event).error, /공동.*개인/);
   assert.equal(scheduleFields({ ...draft, title: '새 제목' }, event).fields.title, '새 제목');
+});
+
+test('category edits preserve attendance and clearing a category is explicit', () => {
+  const item = { ...event, category: 'work', attendance: 'attended' };
+  const draft = scheduleDraft(item, 'UTC');
+  assert.equal(draft.category, 'work');
+  assert.equal(scheduleFields({ ...draft, category: '' }, item).fields.category, null);
+  assert.equal(scheduleFields({ ...draft, title: '다른 제목' }, item).fields.attendance, 'attended');
+  assert.equal(scheduleFields({ ...draft, completion: 'completed' }, item).fields.completion, item.completion);
+  assert.match(scheduleFields({ ...draft, kind: 'task' }, item).error, /참석 기록/);
+  assert.equal(scheduleFields({ ...scheduleDraft(null, 'UTC'), kind: 'task', title: '업무', durationMinutes: '30', category: 'work' }, null).fields.category, 'work');
+});
+
+test('new events start pending regardless of draft completion while task edits remain explicit', () => {
+  const base = { ...scheduleDraft(null, 'UTC'), title: '약속', startsAt: '2026-11-01T00:00:00Z', endsAt: '2026-11-01T01:00:00Z', completion: 'completed' };
+  assert.equal(scheduleFields(base, null).fields.completion, 'pending');
+  assert.equal(scheduleFields({ ...base, kind: 'task', durationMinutes: '60' }, null).fields.completion, 'completed');
 });
 
 test('event and task fields require valid times, positive task duration and deadline order', () => {

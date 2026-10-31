@@ -15,20 +15,20 @@ const clock = () => new Date(fixed);
 const event: ScheduleFields = { kind: 'event', title: '공동 일정', timeSlot: { startsAt: '2026-11-02T15:00+09:00', endsAt: '2026-11-02T16:00+09:00', timezone: 'Asia/Seoul' },
   durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'shared', completion: 'pending' };
 
-async function fixture(channel: 'email' | 'phone' = 'email', apply = true) {
+async function fixture(channel: 'email' | 'phone' = 'email', apply = true, legacyNulls = false) {
   const memory = new MemoryPlanningStore();
   const store: PlanningStore = { mode: memory.mode, durable: true, read: memory.read.bind(memory), transaction: memory.transaction.bind(memory),
     atomic: memory.atomic.bind(memory), transactionTimestamp: memory.transactionTimestamp.bind(memory), listUserIds: memory.listUserIds.bind(memory) };
   const planning = new PlanningService(store, clock); const contacts = new ContactService(store, planning, clock);
   const responses = new ContactResponseService(store, planning, clock);
-  const made = await planning.command(userId, { expectedScheduleRevision: 0, changeSet: { changes: [{ changeId: 'create', operation: 'create', after: event }] } });
+  const made = await planning.command(userId, { expectedScheduleRevision: 0, changeSet: { changes: [{ changeId: 'create', operation: 'create', after: legacyNulls ? event : { ...event, category: 'work', attendance: 'attended' } }] } });
   const id = made.items[0]!.id;
   await store.transaction(userId, state => { state.items.get(id)!.sourceRefs.push({ provider: 'google_calendar', ...source, lastSyncedAt: fixed }); });
   const before = (await store.read(userId)).items.get(id)!;
   const baseline = await planning.capture(userId, 'Asia/Seoul', { id, expectedRevision: before.revision });
   const proposal = await planning.saveProposal(baseline, { kind: 'proposal', reason: '대안', evidenceRefs: [], changeSet: { changes: [{
     changeId: 'move', operation: 'update', targetId: id, expectedRevision: before.revision,
-    after: { ...event, timeSlot: { ...event.timeSlot!, startsAt: '2026-11-03T10:00+09:00', endsAt: '2026-11-03T11:00+09:00' } },
+    after: { ...event, ...(legacyNulls ? { category: null, attendance: null } : {}), timeSlot: { ...event.timeSlot!, startsAt: '2026-11-03T10:00+09:00', endsAt: '2026-11-03T11:00+09:00' } },
   }] } });
   if (proposal.kind !== 'proposal') throw new Error('Synthetic proposal failed');
   const address = channel === 'email' ? 'other@example.test' : '+12025550124';
@@ -54,12 +54,18 @@ test('real contact services: reviewed email and verified phone acceptance prove 
   const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('No external calls'); });
   for (const channel of ['email', 'phone'] as const) {
     const f = await fixture(channel);
+    assert.equal(f.item.category, 'work'); assert.equal(f.item.attendance, 'attended');
     const proof = findCalendarContactAuthorization({ state: f.state, userId, item: f.item, source });
     assert.deepEqual(proof, { beforeItem: f.before, afterItem: f.item, proposalId: f.proposalId, contactRequestId: f.contactId });
     proof!.beforeItem.title = 'mutated returned proof';
     assert.equal(f.state.items.get(f.item.id)?.title, '공동 일정');
   }
   assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('legacy missing category and attendance are equivalent to explicit null for contact authorization', async () => {
+  const f = await fixture('email', true, true);
+  assert.ok(findCalendarContactAuthorization({ state: f.state, userId, item: f.item, source }));
 });
 
 test('unconfirmed or altered history, identity, versions and source mapping fail closed', async () => {

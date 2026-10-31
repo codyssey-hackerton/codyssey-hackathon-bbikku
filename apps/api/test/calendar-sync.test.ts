@@ -145,6 +145,64 @@ test('pull, selected export, update and deletion guard use persistent mappings',
   assert.equal(remoteTombstone?.deletedRevision, 2); assert.equal(remoteTombstone?.priorInvolvement, 'personal');
 });
 
+test('remote edits preserve status undo and remote deletion removes its history', async () => {
+  const f = fixture(); f.events.set('external', event('external', 9));
+  const { connection } = await f.service.connect('alice', { calendarId: 'cal', allowDeletes: true });
+  const first = await f.service.run('alice', connection.id, { requestId: 'status-import', expectedRevision: 1 }) as any;
+  assert.equal(first.imported, 1);
+  const original = [...(await f.planning.read('alice')).items.values()][0]!;
+  const planning = new PlanningService(f.planning);
+  const { id: _id, revision: _revision, sourceRefs: _refs, ...fields } = original;
+  await planning.command('alice', { expectedScheduleRevision: 1, changeSet: { changes: [{ changeId: 'category', operation: 'update', targetId: original.id, expectedRevision: 1, after: { ...fields, category: 'work' } }] } });
+  await planning.attendance('alice', original.id, { expectedRevision: 2, attendance: 'attended' });
+  await planning.checkin('alice', original.id, { expectedRevision: 3, completion: 'completed' });
+  await f.planning.transaction('bob', state => {
+    state.items.set(original.id, item(original.id, 11));
+    state.statusUndo = new Map([[original.id, { completion: { previous: 'pending', current: 'completed' } }]]);
+  });
+  const pushed = await f.service.run('alice', connection.id, { requestId: 'status-push', expectedRevision: 2 }) as any;
+  assert.equal(pushed.exported, 1);
+  const remote = f.events.get('external')!;
+  f.events.set('external', { ...remote, etag: 'remote-edit', title: '원격 변경', timeSlot: slot(10) });
+  const pulled = await f.service.run('alice', connection.id, { requestId: 'status-pull', expectedRevision: 3 }) as any;
+  assert.equal(pulled.imported, 1); assert.deepEqual(pulled.conflicts, []);
+  const after = await f.planning.read('alice'); const updated = after.items.get(original.id)!;
+  assert.equal(updated.revision, 5); assert.equal(updated.title, '원격 변경'); assert.deepEqual(updated.timeSlot, slot(10));
+  assert.equal(updated.category, 'work'); assert.equal(updated.completion, 'completed'); assert.equal(updated.attendance, 'attended');
+  assert.deepEqual(after.statusUndo?.get(original.id), { completion: { previous: 'unknown', current: 'completed' }, attendance: { previous: null, current: 'attended' } });
+  await assert.rejects(planning.undo('alice', original.id, { expectedRevision: 4, field: 'attendance' }), { code: 'conflict' });
+  assert.equal((await planning.undo('alice', original.id, { expectedRevision: 5, field: 'attendance' })).item.attendance, null);
+  const repushed = await f.service.run('alice', connection.id, { requestId: 'status-repush', expectedRevision: 4 }) as any;
+  assert.equal(repushed.exported, 1);
+  f.events.set('external', { ...event('external', 10), status: 'cancelled', etag: null, title: null, timeSlot: null });
+  const deleted = await f.service.run('alice', connection.id, { requestId: 'status-delete', expectedRevision: 5 }) as any;
+  assert.equal(deleted.deleted, 1); assert.deepEqual(deleted.conflicts, []);
+  const final = await f.planning.read('alice');
+  assert.equal(final.items.has(original.id), false); assert.equal(final.statusUndo?.has(original.id), false);
+  assert.ok(final.tombstones?.has(original.id));
+  assert.ok((await f.planning.read('bob')).statusUndo?.has(original.id));
+});
+
+test('remote edit rechecks item revision after a concurrent status change', async () => {
+  const f = fixture(); f.events.set('external', event('external', 9));
+  const { connection } = await f.service.connect('alice', { calendarId: 'cal' });
+  await f.service.run('alice', connection.id, { requestId: 'race-import', expectedRevision: 1 });
+  const original = [...(await f.planning.read('alice')).items.values()][0]!;
+  f.events.set('external', { ...event('external', 10), etag: 'remote-edit', title: '원격 변경' });
+  f.google.listEvents = async () => ({ events: [], nextSyncToken: 'token' });
+  const getEvent = f.google.getEvent.bind(f.google); const planning = new PlanningService(f.planning);
+  f.google.getEvent = async input => {
+    await planning.attendance('alice', original.id, { expectedRevision: 1, attendance: 'attended' });
+    return getEvent(input);
+  };
+  const result = await f.service.run('alice', connection.id, { requestId: 'race-pull', expectedRevision: 2 }) as any;
+  assert.equal(result.imported, 0); assert.equal(result.conflicts[0]?.reason, 'schedule_conflict');
+  const state = await f.planning.read('alice'); const current = state.items.get(original.id)!;
+  assert.equal(current.revision, 2); assert.equal(current.title, 'external'); assert.deepEqual(current.timeSlot, slot(9));
+  assert.equal(current.attendance, 'attended');
+  assert.deepEqual(state.statusUndo?.get(original.id)?.attendance, { previous: null, current: 'attended' });
+});
+
 test('HTTP endpoints enforce schema, idempotency and authenticated user scope', async () => {
   const f = fixture();
   const app = Fastify();
@@ -317,6 +375,9 @@ test('PostgreSQL atomically persists imported items and mappings', { skip: !proc
     assert.deepEqual(await f.service.getOperation('alice', 'run1'), { operation: { state: 'completed', result } });
     const mapping = (await sync.read('alice')).connections[0].mappings.find(value => value.eventId === 'external')!;
     assert.equal((await planning.read('alice')).items.get(mapping.itemId)?.title, 'external');
+    await planning.transaction('alice', state => {
+      state.statusUndo = new Map([[mapping.itemId, { completion: { previous: 'pending', current: 'unknown' } }]]);
+    });
     assert.deepEqual(await sync.read('bob'), { connections: [], operations: [] });
     await assert.rejects(planning.atomicWithClient('alice', async client => {
       await sync.updateWithClient(client, 'alice', async state => {
@@ -337,6 +398,7 @@ test('PostgreSQL atomically persists imported items and mappings', { skip: !proc
     assert.equal(pullDelete.deleted, 1);
     const after = await planning.read('alice');
     assert.equal(after.items.has(mapping.itemId), false); assert.equal(after.tombstones?.get(mapping.itemId)?.deletedRevision, 2);
+    assert.equal(after.statusUndo?.has(mapping.itemId), false);
   } finally {
     await pool.end(); await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end();
   }

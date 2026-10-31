@@ -1,9 +1,11 @@
 import { END, START, StateGraph, StateSchema } from '@langchain/langgraph';
 import { z } from 'zod';
+import { formDraft } from './chat-context.ts';
 
 const Decision = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('answer'), text: z.string().min(1) }),
   z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
+  z.object({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }).strict(),
   z.object({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.object({ changes: z.array(z.unknown()), timingConstraints: z.array(z.unknown()).optional() }), evidenceRefs: z.array(z.string()) }),
   z.object({ kind: z.literal('tool_call'), name: z.string(), input: z.unknown(), providerTrace: z.unknown().optional() }),
 ]);

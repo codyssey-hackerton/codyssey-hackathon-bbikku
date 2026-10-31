@@ -10,6 +10,7 @@ const fields = {
   weekdays: z.array(z.number().int().min(1).max(7)).min(1).max(7).transform(value => [...new Set(value)].sort((a, b) => a - b)),
   timezone, startDate: date, localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   durationMinutes: z.number().int().min(1).max(1440),
+  category: z.enum(['personal', 'work']).nullable().optional(),
 };
 export const routineCreate = z.object({ requestId: identifier, ...fields }).strict();
 export const routinePatch = z.object({ requestId: identifier, expectedRevision: z.number().int().min(1),

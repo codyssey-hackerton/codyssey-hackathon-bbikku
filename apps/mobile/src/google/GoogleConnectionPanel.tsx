@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Linking, ScrollView, StyleSheet, View } from 'react-native';
 import { ApiError, type ApiClient } from '../api/http';
 import { operationGuard } from '../api/operationGuard';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
+import { ActionButton } from '../ui/ActionButton';
 import { createGoogleClient, type ConnectionStatus, type GoogleConnectionKind } from './client';
 
 const connections: { kind: GoogleConnectionKind; title: string; description: string }[] = [
@@ -19,12 +20,13 @@ function message(error: unknown): string {
   const code = error instanceof ApiError ? error.code : '';
   return code === 'not_configured' ? 'Google 연결이 아직 설정되지 않았습니다. 관리자에게 설정을 요청해 주세요.' :
     code === 'expired' ? 'Google 연결 준비 시간이 지났습니다. 연결을 다시 시작해 주세요.' :
-    code === 'unauthenticated' || code === 'permission_denied' ? '현재 삐꾸 사용자 세션을 확인해 주세요.' :
-    code === 'invalid_response' ? 'Google 연결 응답을 확인할 수 없습니다.' : 'Google 연결을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+    code === 'unauthenticated' ? '삐꾸 로그인 세션을 확인한 뒤 다시 시도해 주세요.' :
+    code === 'permission_denied' ? '현재 삐꾸 계정에서 이 연결을 확인할 권한이 없습니다.' :
+    code === 'invalid_response' ? 'Google 연결 상태 응답을 확인할 수 없습니다.' : '연결 상태를 불러오지 못했습니다. 서버 연결을 확인한 뒤 다시 시도해 주세요.';
 }
 
-function Button({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={[styles.button, disabled && styles.disabled]}><Text>{label}</Text></Pressable>;
+function Button({ label, onPress, disabled = false, primary = false }: { label: string; onPress: () => void; disabled?: boolean; primary?: boolean }) {
+  return <ActionButton label={label} onPress={onPress} disabled={disabled} secondary={!primary} />;
 }
 
 export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient; onBack: () => void }) {
@@ -98,19 +100,26 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
     }
   }
   return <ScrollView contentContainerStyle={styles.container}>
-    <Button label="뒤로" onPress={onBack} disabled={start.status === 'pending' || start.status === 'completing'} />
-    <Text accessibilityRole="header" style={styles.title}>내 Google 연결</Text>
-    <Text style={styles.text}>현재 삐꾸 사용자에 Google 계정을 연결합니다. 각 권한은 Google 동의 화면에서 별도로 확인합니다.</Text>
+    <Text style={styles.eyebrow}>GOOGLE 연결 관리</Text>
+    <Text accessibilityRole="header" style={styles.title}>Google 서비스 연결</Text>
+    <Text style={styles.intro}>삐꾸 로그인과 Google 서비스 연결은 별도입니다. 현재 삐꾸 사용자에게 필요한 권한만 Google 동의 화면에서 직접 확인해 주세요.</Text>
+    <View style={styles.notice}><Text style={styles.noticeTitle}>동의 없이 연결하지 않아요</Text>
+      <Text style={styles.detail}>캘린더와 Gmail 권한은 각각 연결합니다. 연결만으로 일정 변경이나 메일 발송이 이루어지지 않습니다.</Text></View>
+    <Text accessibilityRole="header" style={styles.section}>Google Calendar</Text>
     {connections.map(({ kind, title, description }) => {
       const status = statuses[kind];
-      return <View style={styles.card} key={kind}>
-      <Text accessibilityRole="header" style={styles.heading}>{title}</Text><Text style={styles.text}>{description}</Text>
-      {status.status === 'loading' && <View accessibilityLiveRegion="polite"><ActivityIndicator /><Text>연결 상태를 확인하는 중입니다.</Text></View>}
+      return <View key={kind}>
+      {kind === 'gmail_send' && <Text accessibilityRole="header" style={styles.section}>Gmail</Text>}
+      <View style={styles.card}>
+      <View style={styles.cardHeader}><Text accessibilityRole="header" style={styles.heading}>{title}</Text>
+        {status.status === 'success' && <Text style={[styles.status, status.data.status === 'available' ? styles.connected : styles.unconnected]}>{status.data.status === 'available' ? '연결됨' : '미연결'}</Text>}</View>
+      <Text style={styles.detail}>{description}</Text>
+      {status.status === 'loading' && <View accessibilityLiveRegion="polite" style={styles.loading}><ActivityIndicator size="small" /><Text style={styles.detail}>연결 상태를 확인하는 중입니다.</Text></View>}
       {status.status === 'error' && <Text accessibilityRole="alert" style={styles.error}>{message(status.error)}</Text>}
-      {status.status === 'success' && <Text style={styles.text}>{status.data.status === 'available'
-        ? `연결됨${status.data.account ? ` · ${status.data.account}` : ''}` : '연결되지 않음'}</Text>}
+      {status.status === 'success' && status.data.status === 'available' && status.data.account && <Text style={styles.detail}>연결 계정: {status.data.account}</Text>}
+      {status.status === 'success' && status.data.status === 'not_configured' && <Text style={styles.detail}>이 권한은 아직 연결되지 않았습니다.</Text>}
       <Button label={`${title} 연결 시작`} disabled={start.status === 'pending' || start.status === 'completing'} onPress={() => { void prepare(kind); }} />
-    </View>; })}
+    </View></View>; })}
     {start.status === 'pending' && <Text accessibilityLiveRegion="polite" style={styles.text}>Google 동의 화면을 준비하고 있습니다.</Text>}
     {start.status === 'error' && <Text accessibilityRole="alert" style={styles.error}>{message(start.error)}</Text>}
     {start.status === 'ready' && <>
@@ -126,13 +135,21 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
     {start.status === 'complete' && <Text accessibilityLiveRegion="polite" style={styles.text}>연결을 확인했습니다. 권한별 상태를 다시 조회합니다.</Text>}
     {start.status === 'completion_unknown' && <Text accessibilityRole="alert" style={styles.error}>연결 결과를 확인하지 못했습니다. 연결 상태를 다시 확인해 주세요. 기존 계정이 이미 연결되어 있었다면 상태만으로 이번 변경 여부를 알 수 없으므로 필요하면 처음부터 다시 시작해 주세요.</Text>}
     <Button label="연결 상태 다시 확인" disabled={start.status === 'pending' || start.status === 'completing'} onPress={() => { setAttempt((value) => value + 1); }} />
+    <Button label="뒤로" primary onPress={onBack} disabled={start.status === 'pending' || start.status === 'completing'} />
   </ScrollView>;
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, gap: 12, paddingBottom: 32 }, title: { color: colors.text, fontSize: 22, fontWeight: '700' },
-  heading: { color: colors.text, fontSize: 17, fontWeight: '700' }, text: { color: colors.text, lineHeight: 21 },
-  error: { color: colors.error, lineHeight: 21 }, card: { gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12 },
-  button: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.primarySoft }, disabled: { opacity: 0.5 },
-  input: { minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 12, color: colors.text },
+  container: { padding: 24, gap: 12, paddingBottom: 40 }, eyebrow: { color: colors.primaryPressed, fontSize: 11, fontWeight: '700' },
+  title: { color: colors.text, fontSize: 26, fontWeight: '700' }, intro: { color: colors.muted, fontSize: 14, lineHeight: 21 },
+  section: { color: colors.text, fontSize: 17, fontWeight: '700', marginTop: 12, marginBottom: 8 },
+  heading: { color: colors.text, fontSize: 15, fontWeight: '700', flexShrink: 1 }, text: { color: colors.text, lineHeight: 21 },
+  detail: { color: colors.muted, fontSize: 13, lineHeight: 19 }, notice: { backgroundColor: colors.surfaceSecondary, borderRadius: 18, padding: 16, gap: 6 },
+  noticeTitle: { color: colors.text, fontSize: 15, fontWeight: '700' }, error: { color: colors.error, lineHeight: 21 },
+  card: { gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 17, padding: 16 },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  status: { overflow: 'hidden', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, fontSize: 12, fontWeight: '700' },
+  connected: { backgroundColor: '#E3F7EA', color: '#17633D' }, unconnected: { backgroundColor: colors.surfaceSecondary, color: colors.muted },
+  loading: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  input: { minHeight: 44, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 12, color: colors.text },
 });

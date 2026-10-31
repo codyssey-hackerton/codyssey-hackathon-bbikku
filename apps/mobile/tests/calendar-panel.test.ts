@@ -225,7 +225,7 @@ function createHarness() {
 const harness = createHarness();
 const panelModule = build({
   stdin: { contents: `export { default as Panel } from '../src/calendar/CalendarImportPanel'; export { ScheduleForm } from '../src/schedule/ScheduleForm'; export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native-calendar', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'calendar-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'calendar-native' }, ({ path }) => ({ contents:

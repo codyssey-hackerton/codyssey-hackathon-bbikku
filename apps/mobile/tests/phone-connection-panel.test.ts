@@ -108,7 +108,7 @@ const harness = createHarness();
 const components = build({
   stdin: { contents: `export { default as PhoneConnectionPanel } from '../src/contacts/PhoneConnectionPanel';
     export { ApiError } from '../src/api/http'; export { operationGuard } from '../src/api/operationGuard';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ contents:

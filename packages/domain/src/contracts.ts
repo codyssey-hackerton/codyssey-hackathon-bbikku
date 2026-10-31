@@ -13,6 +13,8 @@ export interface ScheduleFields {
   flexibility: "fixed" | "flexible";
   involvement: "personal" | "shared";
   completion: "pending" | "completed" | "incomplete" | "unknown";
+  category?: "personal" | "work" | null;
+  attendance?: "attended" | "absent" | "unknown" | null;
 }
 
 export interface ScheduleItem extends ScheduleFields {

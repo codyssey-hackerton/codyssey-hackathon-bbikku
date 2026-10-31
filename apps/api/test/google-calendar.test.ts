@@ -14,19 +14,33 @@ const event = { id: 'event-1', etag: 'etag-1', summary: '합성 일정', organiz
   start: { dateTime: '2026-11-01T09:00:00Z' }, end: { dateTime: '2026-11-01T10:00:00Z' } };
 const scope = 'openid email https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly';
 
-async function setup(t: TestContext, eventPage: (url: URL) => Response = () => Response.json({ timeZone: 'UTC', items: [event] })) {
+async function setup(t: TestContext, eventPage: (url: URL) => Response = () => Response.json({ timeZone: 'UTC', items: [event] }), grantedScope = scope) {
   const dir = await mkdtemp(join(tmpdir(), 'pikku-calendar-test-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'calendar.json');
   await writeFile(path, JSON.stringify({ version: 1, clientId: env.PIKKU_GOOGLE_OAUTH_CLIENT_ID, senderAddress: 'test@example.com', subject: 'synthetic-subject', refreshToken: 'synthetic-refresh' }), { mode: 0o600 });
   const fetcher: typeof fetch = async input => {
     const url = new URL(String(input));
-    if (url.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'synthetic-token', token_type: 'Bearer', scope });
+    if (url.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'synthetic-token', token_type: 'Bearer', scope: grantedScope });
     if (url.hostname === 'openidconnect.googleapis.com') return Response.json({ email: 'test@example.com', email_verified: true, sub: 'synthetic-subject' });
     if (url.pathname.endsWith('/calendarList')) return Response.json({ items: [{ id: query.calendarId, summary: '합성 캘린더', timeZone: 'UTC' }] });
     return eventPage(url);
   };
   const connection = await getCalendarConnection({ env, credentialPath: path, fetcher }); assert.ok(connection); return connection;
 }
+
+test('calendar read accepts readonly or events write grant but still requires list and identity scopes', async t => {
+  const writeScope = scope.replace('calendar.events.readonly', 'calendar.events');
+  for (const granted of [scope, writeScope]) {
+    const connection = await setup(t, undefined, granted);
+    assert.equal((await connection.listEvents(query)).events[0]?.id, event.id);
+    assert.equal('insertEvent' in connection, false); assert.equal('updateEvent' in connection, false); assert.equal('deleteEvent' in connection, false);
+  }
+  for (const granted of [writeScope.replace('https://www.googleapis.com/auth/calendar.calendarlist.readonly', ''), writeScope.replace('openid', ''), writeScope.replace('email', ''),
+    scope.replace('https://www.googleapis.com/auth/calendar.events.readonly', '')]) {
+    const connection = await setup(t, undefined, granted);
+    await assert.rejects(connection.listCalendars(), (error: any) => error.code === 'provider_unavailable');
+  }
+});
 
 test('calendar pages are consumed and unsupported events are counted', async t => {
   const connection = await setup(t, url => url.searchParams.has('pageToken')

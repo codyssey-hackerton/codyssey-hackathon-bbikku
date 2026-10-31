@@ -8,14 +8,18 @@ import type { ChatInput } from '@pikku/domain';
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
 import { Icon } from '../ui/Icon';
+import { ScreenBackground } from '../ui/ScreenBackground';
 import { ApiError } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import type { ScheduleClient } from '../schedule/client';
-import type { ChatClient, ChatResponse, CoordinationTarget } from './client';
+import type { ChatClient, ChatContext, ChatEntryContext, ChatResponse, CoordinationTarget, FormDraft } from './client';
+export type { ChatEntryContext } from './client';
 import { ChatScheduleSummary } from './ChatScheduleSummary';
 
 type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string };
-type Input = Omit<ChatInput, 'requestId'>;
+type Input = Omit<ChatInput, 'requestId'> & { entryContext?: ChatContext };
+const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
+const weekdayLabels: Record<string, string> = { '1': '월', '2': '화', '3': '수', '4': '목', '5': '금', '6': '토', '7': '일' };
 export type RecoveryRequest = { key: string; title: string; dateLabel: string; text: string };
 export type RevisionRequest = { key: string; proposalId: string; text: string; coordinationTarget?: CoordinationTarget & { title: string } };
 
@@ -36,7 +40,7 @@ function errorMessage(error: unknown): string {
   return '요청 결과를 확인할 수 없습니다.';
 }
 
-export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenMemory, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest }: {
+export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenMemory, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft }: {
   client: ChatClient;
   timezone: string;
   scheduleClient: ScheduleClient;
@@ -50,6 +54,9 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   onClearCoordinationTarget: () => void;
   recoveryRequest?: RecoveryRequest;
   revisionRequest?: RevisionRequest;
+  entryContext?: ChatEntryContext;
+  onClearEntryContext?: () => void;
+  onApplyDraft?: (draft: FormDraft) => void;
 }) {
   const [draft, setDraft] = useState('');
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryRequest[]>([]);
@@ -60,11 +67,14 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [activeEntry, setActiveEntry] = useState<ChatEntryContext | undefined>();
+  const [suggestedDraft, setSuggestedDraft] = useState<{ key: string; draft: FormDraft } | null>(null);
   const counter = useRef(0);
   const scrollRef = useRef<ScrollViewInstance>(null);
   const sentRecovery = useRef<string | null>(null);
   const sentRevision = useRef<string | null>(null);
   const sentTarget = useRef<(CoordinationTarget & { title: string }) | undefined>(undefined);
+  const sentEntry = useRef<ChatEntryContext | undefined>(undefined);
   const previousTarget = useRef(coordinationTarget);
   const action = useMutation<Input, ChatResponse>(
     (operation) => client.sendMessage({ ...operation.input, requestId: operation.requestId, idempotencyKey: operation.idempotencyKey }),
@@ -76,6 +86,10 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         sentRecovery.current = null;
         sentRevision.current = null;
         return;
+      }
+      if (result.kind === 'reply' && 'draft' in result && (sentEntry.current?.kind === 'create' ||
+          (sentEntry.current?.kind === 'form' && result.draft.kind === sentEntry.current.draft.kind))) {
+        setSuggestedDraft({ key: sentEntry.current.key, draft: result.draft });
       }
       if (sentRecovery.current !== null) {
         const key = sentRecovery.current;
@@ -99,11 +113,23 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     },
   );
   const busy = action.state.status !== 'idle';
+  const entryChanging = activeEntry !== entryContext;
   const activeRecovery = recoveryDrafts.find((item) => item.key === activeRecoveryKey);
   const activeRevision = revisionDrafts.find((item) => `revision:${item.key}` === activeRecoveryKey);
   const messageDraft = activeRecovery?.text ?? activeRevision?.text ?? draft;
   const displayedTarget = busy ? sentTarget.current : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
   useEffect(() => { if (action.state.status === 'success') action.reset(); }, [action.state.status]);
+  useEffect(() => {
+    if (busy || activeEntry === entryContext) return;
+    const changedKey = activeEntry?.key !== entryContext?.key;
+    setActiveEntry(entryContext);
+    if (!changedKey) return;
+    setActiveRecoveryKey(null);
+    setSuggestedDraft(null);
+    setConversationId(null);
+    setEntries([]);
+    setAgentError(null);
+  }, [busy, entryContext, activeEntry]);
   useEffect(() => {
     if (!recoveryRequest) return;
     setRecoveryDrafts((previous) => previous.some((item) => item.key === recoveryRequest.key) ? previous : [...previous, recoveryRequest]);
@@ -136,33 +162,46 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
 
   function send() {
     const message = messageDraft.trim();
-    if (!message || action.state.status !== 'idle') return;
+    if (!message || action.state.status !== 'idle' || entryChanging) return;
     setAgentError(null);
     setLastSent(message);
     sentRecovery.current = activeRecovery?.key ?? null;
     sentRevision.current = activeRevision?.key ?? null;
     if (!activeRecovery && !activeRevision) setDraft('');
     const userId = `user-${++counter.current}`;
-    const target = activeRecovery ? undefined : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
+    const selectedEntry = activeRevision || (activeRecovery && activeEntry?.key !== activeRecovery.key) ? undefined : activeEntry;
+    const target = activeRecovery || selectedEntry ? undefined : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
     sentTarget.current = target;
+    sentEntry.current = selectedEntry;
+    setSuggestedDraft(null);
     setEntries((previous) => [
       ...previous,
       { id: userId, role: 'user', text: message },
       ...(target ? [{ id: `${userId}-target`, role: 'status' as const, text: `이 요청의 공동 조정 검토 대상: ${target.title}. 선택은 변경·연락 승인이 아닙니다.` }] : []),
     ]);
-    action.submit({ message, conversationId, timezone, ...(target ? { coordinationTarget: { id: target.id, expectedRevision: target.expectedRevision } } : {}) });
+    const context: ChatContext | undefined = selectedEntry?.kind === 'item'
+      ? { kind: 'item', id: selectedEntry.id, expectedRevision: selectedEntry.expectedRevision }
+      : selectedEntry?.kind === 'form' ? { kind: 'form', draft: selectedEntry.draft }
+      : selectedEntry?.kind === 'create' ? { kind: 'create' } : undefined;
+    action.submit({ message, conversationId, timezone, ...(target ? { coordinationTarget: { id: target.id, expectedRevision: target.expectedRevision } } : {}), ...(context ? { entryContext: context } : {}) });
   }
 
   return (
+    <ScreenBackground variant="ai">
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={styles.heading}>
-        <Text style={styles.title} accessibilityRole="header">AI 채팅</Text>
+        <Text style={styles.title} accessibilityRole="header">AI 비서</Text>
         <View style={styles.links}>
           <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 검토</Text></Pressable>
           <Pressable accessibilityRole="button" onPress={onOpenMemory} style={styles.pill}><Icon name="memory" size={16} /><Text style={styles.pillText}>선호·상황</Text></Pressable>
           <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.pill}><Icon name="clock" size={16} /><Text style={styles.pillText}>자동 검토 설정</Text></Pressable>
         </View>
-        {displayedTarget && !activeRecovery && <View style={styles.target}>
+        {activeEntry && !activeRecovery && !activeRevision && <View style={styles.target}>
+          <Text style={styles.targetTitle}>{activeEntry.kind === 'item' ? `선택한 일정: ${activeEntry.title}` : activeEntry.kind === 'form' ? '작성 중인 입력 초안' : '새 일정 만들기'}</Text>
+          <Text style={styles.targetHint}>{activeEntry.kind === 'form' ? '기존 입력을 보관하며 제안은 확인 후 선택해요. 일정은 자동 저장되지 않아요.' : '제안은 확인하고 승인하기 전까지 일정에 반영되지 않아요.'}</Text>
+          {onClearEntryContext && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={onClearEntryContext} style={styles.link}><Text style={styles.linkText}>맥락 닫기</Text></Pressable>}
+        </View>}
+        {displayedTarget && !activeEntry && !activeRecovery && <View style={styles.target}>
           <Text style={styles.targetTitle}>조정 검토 대상: {displayedTarget.title}</Text>
           <Text style={styles.targetHint}>대상 선택은 일정 변경이나 연락 승인이 아닙니다.</Text>
           {!activeRevision && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClearCoordinationTarget} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>}
@@ -211,6 +250,12 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
           <View style={styles.messageHeading}>{entry.role !== 'user' && <Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} />}<Text style={[styles.messageRole, entry.role === 'user' && styles.userMessageRole]}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>
           <Text style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
         </View>)}
+        {suggestedDraft && (activeEntry?.kind === 'form' || activeEntry?.kind === 'create') && suggestedDraft.key === activeEntry.key && activeEntry.key === entryContext?.key && !activeRecovery && !activeRevision && <View style={styles.draftCard}>
+          <Text style={styles.targetTitle}>입력 제안 · 아직 반영되지 않음</Text>
+          {Object.entries(suggestedDraft.draft.fields).map(([key, value]) => <Text key={key} style={styles.targetHint}>{fieldLabels[key] ?? key}: {Array.isArray(value) ? value.map(day => weekdayLabels[day] ?? day).join(', ') : value || '비움'}</Text>)}
+          <Text style={styles.targetHint}>입력 화면에서 기존 값과 비교하고 반영할 항목을 선택하세요.</Text>
+          {onApplyDraft && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => onApplyDraft(suggestedDraft.draft)} style={styles.draftButton}><Text style={styles.draftButtonText}>입력 화면에서 검토</Text></Pressable>}
+        </View>}
         {action.state.status === 'pending' && <View style={styles.loading} accessibilityLiveRegion="polite"><ActivityIndicator size="small" color={colors.primary} /><Text style={styles.loadingText}>서버 응답을 기다리는 중입니다.</Text></View>}
         {agentError && <Text style={styles.error} accessibilityRole="alert">{agentError}</Text>}
         {action.state.status === 'error' && <View style={styles.errorBox}>
@@ -224,9 +269,10 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       </ScrollView>
       <View style={styles.composer}>
         <TextInput accessibilityLabel="채팅 메시지" multiline placeholder="메시지 입력" placeholderTextColor="#58667E" selectionColor="#3563E9" value={messageDraft} onChangeText={editMessage} editable={!busy} style={styles.input} />
-        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || !messageDraft.trim() }} disabled={busy || !messageDraft.trim()} onPress={send} style={({ pressed }) => [styles.send, (busy || !messageDraft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || entryChanging || !messageDraft.trim() }} disabled={busy || entryChanging || !messageDraft.trim()} onPress={send} style={({ pressed }) => [styles.send, (busy || entryChanging || !messageDraft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
       </View>
     </KeyboardAvoidingView>
+    </ScreenBackground>
   );
 }
 
@@ -237,7 +283,7 @@ const styles = StyleSheet.create({
   starters: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 16 },
   starter: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'space-between', padding: 12, borderRadius: 16, backgroundColor: colors.primarySoft },
   starterText: { flexShrink: 1, color: colors.primary, fontSize: 13, fontWeight: '600' },
-  container: { flex: 1, backgroundColor: colors.background },
+  container: { flex: 1 },
   heading: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 },
   title: { fontSize: 26, fontWeight: '700', color: colors.text },
   links: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
@@ -253,7 +299,7 @@ const styles = StyleSheet.create({
   welcome: { paddingHorizontal: 4, paddingVertical: 8 },
   empty: { color: colors.muted, fontSize: 14, lineHeight: 22 },
   message: { alignSelf: 'stretch', padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#EDF0F7', borderRadius: 20 },
-  userMessage: { alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: colors.primary, borderColor: colors.primary, borderBottomRightRadius: 7 },
+  userMessage: { alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: '#17191D', borderColor: '#17191D', borderBottomRightRadius: 7 },
   statusMessage: { backgroundColor: '#EEF3FF', borderColor: '#E5ECFF' },
   messageRole: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   userMessageRole: { color: '#F2F5FF' },
@@ -263,9 +309,12 @@ const styles = StyleSheet.create({
   loadingText: { color: colors.muted, fontSize: 14 },
   errorBox: { alignItems: 'flex-start', padding: 14, backgroundColor: '#FFF5F5', borderRadius: 18 },
   error: { color: '#A01818', lineHeight: 22 },
-  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 20, paddingTop: 10, paddingBottom: 12, backgroundColor: colors.background },
+  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 20, paddingTop: 10, paddingBottom: 12 },
   input: { flex: 1, minHeight: 50, maxHeight: 120, paddingHorizontal: 16, paddingVertical: 13, borderWidth: 1, borderColor: '#E4EAF4', borderRadius: 18, backgroundColor: colors.surface, color: colors.text },
-  send: { minHeight: 50, minWidth: 50, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: colors.primary, borderRadius: 18 },
+  send: { minHeight: 50, minWidth: 50, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: '#5369CA', borderRadius: 18 },
+  draftCard: { padding: 16, gap: 6, borderRadius: 16, backgroundColor: '#EEEFFF', borderWidth: 1, borderColor: '#FFFFFF' },
+  draftButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: '#5369CA', borderRadius: 12, paddingHorizontal: 12 },
+  draftButtonText: { color: '#FFFFFF', fontWeight: '700' },
   sendText: { color: colors.surface, fontSize: 10, fontWeight: '600' },
   disabled: { opacity: 0.4 },
   pressed: { opacity: 0.7 },

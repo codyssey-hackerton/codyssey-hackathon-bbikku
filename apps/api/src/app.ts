@@ -6,6 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { AgentExecutionFailure, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
+import { chatContext } from './chat-context.ts';
 import { createExternalTools } from './external-tools.ts';
 import { createExternalAccountTools } from './external-account-tools.ts';
 import type { SessionResolver } from './auth.ts';
@@ -40,7 +41,7 @@ import { ContactDispatch, gmailAvailable, type GmailContactPort } from './contac
 import { recipientBody, contactBody, contactDecisionBody } from './contact-schemas.ts';
 import { MemoryPlanningStore, type PlanningStore, type UserPlanningState } from './planning-store.ts';
 import { buildReviewEvents, type ReviewSchedulerRuntime, type TriggerEvent } from './scheduler.ts';
-import { checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timestamp, timezone } from './planning-schemas.ts';
+import { attendanceBody, checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timestamp, timezone, undoBody } from './planning-schemas.ts';
 
 class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable = false, readonly details?: unknown) { super(message); }
@@ -61,7 +62,8 @@ const chatBody = z.object({
     try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; }
   }),
   coordinationTarget: z.object({ id: nonblank, expectedRevision: z.number().int().min(1) }).strict().optional(),
-}).strict();
+  entryContext: chatContext.optional(),
+}).strict().refine(value => !(value.coordinationTarget && value.entryContext));
 const reviewTime = z.object({ enabled: z.boolean(), localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict()
   .refine(value => !value.enabled || value.localTime !== null);
 const reviewBody = z.object({ requestId: nonblank, expectedRevision: z.number().int().min(0), timezone, evening: reviewTime, morning: reviewTime }).strict();
@@ -527,7 +529,7 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
         let prepared;
         try {
           prepared = await runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
-            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget });
+            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext });
           modelStatus = 'available';
         } catch (error) {
           if (!(error instanceof AgentExecutionFailure)) throw error;
@@ -595,6 +597,22 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     const result = await runIdempotent(request, 'schedule_checkin', async () => {
       const body = parse(checkinBody, request.body);
       return { status: 200, body: { requestId: body.requestId, data: await planning.checkin(authenticated.get(request)!, id, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/schedule/:id/attendance', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const result = await runIdempotent(request, 'schedule_attendance', async () => {
+      const body = parse(attendanceBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await planning.attendance(authenticated.get(request)!, id, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/schedule/:id/undo', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const result = await runIdempotent(request, 'schedule_undo', async () => {
+      const body = parse(undoBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await planning.undo(authenticated.get(request)!, id, body) } };
     });
     return reply.code(result.status).send(result.body);
   });

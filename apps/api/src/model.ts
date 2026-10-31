@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ModelPort } from './agent.ts';
 import { PLANNING_PROMPT } from './planning-prompt.ts';
 import { changeSet } from './planning-schemas.ts';
+import { formDraft } from './chat-context.ts';
 
 export const MODEL_ID = 'gpt-6.1-terra';
 export const REASONING_EFFORT = 'high';
@@ -16,6 +17,7 @@ const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authori
 const FinalDecision = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('answer'), text: z.string().min(1) }),
   z.strictObject({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
+  z.strictObject({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }),
   z.strictObject({ kind: z.literal('proposal'), reason: z.string(), changeSet, evidenceRefs: z.array(z.string()) }),
 ]);
 const Response = z.object({
@@ -99,8 +101,10 @@ export function createResponsesModel(apiKey: string, fetcher: typeof fetch = fet
     async decide(input) {
       const { functions, validators } = prepareTools(input.tools);
       let scope: string;
+      const entry = input.context.entryContext;
+      const draftContext = typeof entry === 'object' && entry !== null && 'kind' in entry && (entry.kind === 'form' || entry.kind === 'create');
       const items: unknown[] = [
-        { role: 'developer', content: PLANNING_PROMPT },
+        { role: 'developer', content: PLANNING_PROMPT + (draftContext ? '\n폼 초안 맥락 또는 새 일정 만들기 맥락이면 일정 저장 대신 {"kind":"draft","text":"확인 안내","draft":{"kind":"event|task|routine 중 하나","fields":{...}}} 형식으로 입력란의 제안값을 반환할 수 있다. 폼 초안에서는 기존 종류와 제공된 키만 사용한다. event/task 필드 키는 kind,title,startsAt,endsAt,startDate,startTime,endDate,endTime,timezone,durationMinutes,deadline,flexibility,involvement,completion,category, routine은 title,weekdays,startDate,localTime,duration,category다. 날짜는 YYYY-MM-DD, 시간은 HH:mm, 값은 문자열이며 weekdays는 문자열 배열이다. 없는 정보는 생략하고 날짜나 시간을 임의로 만들지 않는다. 초안은 사용자 확인 전 반영하지 않는다.' : '') },
         { role: 'user', content: JSON.stringify({ message: input.message, context: input.context }) },
       ];
       try {

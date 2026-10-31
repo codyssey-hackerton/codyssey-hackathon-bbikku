@@ -3,7 +3,7 @@ import type { ApiClient } from '../api/http';
 import type { Mutation } from '../api/useMutation';
 
 export type { ScheduleFields, ScheduleItem, SourceRef, TimeSlot } from '@pikku/domain';
-export type ScheduleChange = Extract<Change, { operation: 'create' | 'update' }>;
+export type ScheduleChange = Change;
 
 export interface ScheduleCommandInput {
   expectedScheduleRevision: number;
@@ -20,6 +20,9 @@ export interface CheckinInput {
   expectedRevision: number;
   completion: 'completed' | 'incomplete' | 'unknown';
 }
+
+export interface AttendanceInput { id: string; expectedRevision: number; attendance: 'attended' | 'absent' | 'unknown' }
+export interface UndoInput { id: string; expectedRevision: number; field: 'completion' | 'attendance' }
 
 export interface CheckinResult {
   item: ScheduleItem;
@@ -42,6 +45,8 @@ export interface ScheduleClient {
   list(query: ScheduleQuery): Promise<ScheduleResult>;
   command(op: Mutation<ScheduleCommandInput>): Promise<ScheduleCommandResult>;
   checkin(op: Mutation<CheckinInput>): Promise<CheckinResult>;
+  attendance(op: Mutation<AttendanceInput>): Promise<CheckinResult>;
+  undo(op: Mutation<UndoInput>): Promise<CheckinResult>;
 }
 
 export class ScheduleResponseError extends Error {
@@ -112,6 +117,8 @@ function isScheduleItem(value: unknown): value is ScheduleItem {
       (value.involvement !== 'personal' && value.involvement !== 'shared') ||
       (value.completion !== 'pending' && value.completion !== 'completed' &&
         value.completion !== 'incomplete' && value.completion !== 'unknown') ||
+      (value.category != null && value.category !== 'personal' && value.category !== 'work') ||
+      (value.attendance != null && (value.kind !== 'event' || !['attended', 'absent', 'unknown'].includes(value.attendance as string))) ||
       !Array.isArray(value.sourceRefs) || !value.sourceRefs.every(isSourceRef)) return false;
 
   if (value.kind === 'event' && value.timeSlot === null) return false;
@@ -172,6 +179,20 @@ export function createScheduleClient(api: ApiClient): ScheduleClient {
       if (!isCheckinResult(data) || data.item.id !== id || data.item.completion !== input.completion) {
         throw new ScheduleResponseError();
       }
+      return data;
+    },
+    async attendance(op) {
+      const { id, ...input } = op.input;
+      const data = await api.post<unknown>(`/v1/schedule/${encodeURIComponent(id)}/attendance`,
+        { requestId: op.requestId, ...input }, { idempotencyKey: op.idempotencyKey });
+      if (!isCheckinResult(data) || data.item.id !== id || data.item.kind !== 'event' || data.item.attendance !== input.attendance) throw new ScheduleResponseError();
+      return data;
+    },
+    async undo(op) {
+      const { id, ...input } = op.input;
+      const data = await api.post<unknown>(`/v1/schedule/${encodeURIComponent(id)}/undo`,
+        { requestId: op.requestId, ...input }, { idempotencyKey: op.idempotencyKey });
+      if (!isCheckinResult(data) || data.item.id !== id || data.item.revision !== input.expectedRevision + 1) throw new ScheduleResponseError();
       return data;
     },
   };

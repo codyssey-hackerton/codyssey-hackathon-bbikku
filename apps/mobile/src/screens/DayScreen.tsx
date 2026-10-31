@@ -1,386 +1,273 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Text } from '../ui/typography';
-import { colors } from '../ui/theme';
-import { Icon } from '../ui/Icon';
-import { useMutation } from '../api/useMutation';
 import type { ApiClient } from '../api/http';
+import { useMutation } from '../api/useMutation';
+import { operationGuard } from '../api/operationGuard';
 import PreparationProposalPanel from '../preparation/PreparationProposalPanel';
-import { compareTimestamps } from '../schedule/client';
-import type { CheckinInput, CheckinResult, ScheduleClient, ScheduleCommandInput, ScheduleCommandResult, ScheduleFields, ScheduleItem } from '../schedule/client';
-import { addDays, civilDate, dayRange, formatCivilDate, startOfDay } from '../schedule/dates';
+import { createProposalClient } from '../proposals/client';
+import type { AttendanceInput, CheckinInput, CheckinResult, ScheduleClient, ScheduleCommandInput, ScheduleCommandResult, ScheduleFields, ScheduleItem, UndoInput } from '../schedule/client';
+import { addDays, civilDate, dayRange, formatCivilDate, startOfDay, weekday } from '../schedule/dates';
 import { MutationStatus } from '../schedule/MutationStatus';
 import { ScheduleForm } from '../schedule/ScheduleForm';
 import { canCoordinate } from '../schedule/form';
 import { ScheduleError, ScheduleLoading } from '../schedule/ScheduleStatus';
 import { useSchedule } from '../schedule/useSchedule';
-import { selectNextActions } from '../schedule/nextAction';
+import { BottomSheet } from '../ui/BottomSheet';
+import { PastScheduleStack } from '../ui/PastScheduleStack';
+import { ScheduleCard } from '../ui/ScheduleCard';
+import { ProfileAvatar } from '../ui/ProfileAvatar';
+import { scheduleCardModel } from '../ui/scheduleCardModel';
+import { Text } from '../ui/typography';
+import { axisTime, dailyProgress, scheduleLayout } from './schedule-display';
 
 export type DayScreenProps = {
-  selectedDate: Date;
-  onSelectDate: (date: Date) => void;
-  client: ScheduleClient;
-  timezone: string;
-  refreshVersion: number;
-  onScheduleChanged: () => void;
-  onCoordinate: (item: ScheduleItem) => void;
-  onRecovery: (item: ScheduleItem) => void;
-  api: ApiClient;
-  onOpenPreparationProposals: () => void;
-  visible?: boolean;
+  selectedDate: Date; onSelectDate: (date: Date) => void; client: ScheduleClient; timezone: string; refreshVersion: number;
+  onScheduleChanged: () => void; onCoordinate: (item: ScheduleItem) => void; onRecovery: (item: ScheduleItem) => void;
+  api: ApiClient; onOpenPreparationProposals: () => void; visible?: boolean;
+  createRequest?: () => void; editRequest?: (item: ScheduleItem) => void; onAsk?: (item: ScheduleItem) => void;
+  onCalendar?: () => void; onOpenProposals?: () => void; onOpenSettings?: () => void;
+  presentation?: 'home' | 'day';
 };
+type Editor = { item: ScheduleItem | null; expectedScheduleRevision: number; client: ScheduleClient };
+type Sheet = { kind: 'status' | 'more' | 'detail' | 'delete'; item: ScheduleItem } | null;
+const completionChoices = [{ value: 'completed', label: '완료' }, { value: 'incomplete', label: '미완료' }, { value: 'unknown', label: '미확인' }] as const;
+const attendanceChoices = [{ value: 'attended', label: '참석' }, { value: 'absent', label: '불참' }, { value: 'unknown', label: '미확인' }] as const;
 
-type Editor = {
-  item: ScheduleItem | null;
-  expectedScheduleRevision: number;
-  client: ScheduleClient;
-};
-
-const COMPLETION_LABELS: Record<ScheduleItem['completion'], string> = {
-  pending: '대기', completed: '완료', incomplete: '미완료', unknown: '상태 미확인',
-};
-
-function formatTime(instant: string, timezone: string): string {
-  return new Intl.DateTimeFormat('ko-KR', {
-    timeZone: timezone, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(instant));
-}
-
-function formatTimeRange(start: string, end: string, timezone: string): string {
-  const startDate = civilDate(new Date(start), timezone);
-  const endDate = civilDate(new Date(end), timezone);
-  if (startDate.year === endDate.year && startDate.month === endDate.month && startDate.day === endDate.day) {
-    const clock = new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false });
-    return `${clock.format(new Date(start))} – ${clock.format(new Date(end))}`;
-  }
-  return `${formatTime(start, timezone)} – ${formatTime(end, timezone)}`;
-}
-
-export default function DayScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onScheduleChanged, onCoordinate, onRecovery, api, onOpenPreparationProposals, visible = true }: DayScreenProps) {
-  const selected = useMemo(() => {
-    try { return civilDate(selectedDate, timezone); } catch { return null; }
-  }, [selectedDate.getTime(), timezone]);
-  const year = selected?.year;
-  const month = selected?.month;
-  const day = selected?.day;
-  const range = useMemo(() => {
-    if (year === undefined || month === undefined || day === undefined) return null;
-    try { return dayRange({ year, month, day }, timezone); } catch { return null; }
-  }, [year, month, day, timezone]);
-  const result = useSchedule(client, range && { ...range, timezone, includeUnscheduled: true }, refreshVersion);
-  const [selectionError, setSelectionError] = useState('');
+export default function DayScreen(props: DayScreenProps) {
+  const { selectedDate, onSelectDate, client, timezone, refreshVersion, onScheduleChanged, onCoordinate, onRecovery,
+    api, onOpenPreparationProposals, visible = true, createRequest, editRequest, onAsk, onCalendar, onOpenProposals, onOpenSettings, presentation = 'day' } = props;
+  const selected = useMemo(() => { try { return civilDate(selectedDate, timezone); } catch { return null; } }, [selectedDate.getTime(), timezone]);
+  const range = useMemo(() => { try { return selected ? dayRange(selected, timezone) : null; } catch { return null; } },
+    [selected?.year, selected?.month, selected?.day, timezone]);
+  const result = useSchedule(client, range && { ...range, timezone, includeUnscheduled: presentation === 'day' }, refreshVersion);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!visible) return;
-    const update = () => setNow(Date.now());
-    update();
+    const update = () => setNow(Date.now()); update();
     const timer = setInterval(update, 30_000);
-    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') update(); });
+    const subscription = AppState.addEventListener('change', state => { if (state === 'active') update(); });
     return () => { clearInterval(timer); subscription.remove(); };
   }, [visible]);
+  const [selectionError, setSelectionError] = useState('');
+  const [guardMessage, setGuardMessage] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   const [preparation, setPreparation] = useState<{ item: ScheduleItem; revision: number } | null>(null);
-  const commandClient = useRef<ScheduleClient | null>(null);
-  const checkinClient = useRef<ScheduleClient | null>(null);
-  const command = useMutation<ScheduleCommandInput, ScheduleCommandResult>(
-    (op) => commandClient.current!.command(op),
-    () => { setEditor(null); onScheduleChanged(); },
-  );
-  const checkin = useMutation<CheckinInput, CheckinResult>(
-    (op) => checkinClient.current!.checkin(op),
-    () => onScheduleChanged(),
-  );
-  const blocked = command.state.status === 'pending' || command.state.status === 'error' ||
-    checkin.state.status === 'pending' || checkin.state.status === 'error';
+  const [sheet, setSheet] = useState<Sheet>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'personal' | 'work'>('all');
+  const [proposal, setProposal] = useState<{ api: ApiClient; version: number; text: string } | null>(null);
+  useEffect(() => {
+    if (presentation !== 'home' || !visible || !onOpenProposals) return;
+    let active = true;
+    setProposal(null);
+    createProposalClient(api).list().then(page => {
+      if (!active) return;
+      const pending = page.proposals.find(value => value.status === 'pending');
+      setProposal({ api, version: refreshVersion, text: pending ? pending.reason || '확인이 필요한 제안이 있어요.' :
+        page.nextCursor ? '제안 화면에서 더 많은 제안을 확인해 주세요.' : '아직 확인할 제안이 없어요.' });
+    }).catch(() => { if (active) setProposal({ api, version: refreshVersion, text: '제안을 불러오지 못했어요.' }); });
+    return () => { active = false; };
+  }, [api, refreshVersion, presentation, visible, onOpenProposals]);
+  const commandClient = useRef<ScheduleClient | null>(null), checkinClient = useRef<ScheduleClient | null>(null);
+  const attendanceClient = useRef<ScheduleClient | null>(null), undoClient = useRef<ScheduleClient | null>(null);
+  const command = useMutation<ScheduleCommandInput, ScheduleCommandResult>(op => commandClient.current!.command(op), () => { setEditor(null); setSheet(null); onScheduleChanged(); });
+  const checkin = useMutation<CheckinInput, CheckinResult>(op => checkinClient.current!.checkin(op), () => { setSheet(null); onScheduleChanged(); });
+  const attendance = useMutation<AttendanceInput, CheckinResult>(op => attendanceClient.current!.attendance(op), () => { setSheet(null); onScheduleChanged(); });
+  const undo = useMutation<UndoInput, CheckinResult>(op => undoClient.current!.undo(op), () => { setSheet(null); onScheduleChanged(); });
+  const mutations = [command.state, checkin.state, attendance.state, undo.state];
+  const blocked = mutations.some(state => state.status === 'pending' || state.status === 'error');
   const actionDisabled = blocked || editor !== null || preparation !== null;
-
-  if (!selected || !range) {
-    return <View style={styles.content}><Text accessibilityRole="alert" style={styles.error}>날짜 또는 시간대를 확인할 수 없습니다.</Text></View>;
-  }
-
-  function moveDay(offset: number) {
-    try {
-      const next = startOfDay(addDays(selected!, offset), timezone);
-      setSelectionError('');
-      onSelectDate(next);
-    } catch {
-      setSelectionError('이 시간대에서 해당 날짜를 선택할 수 없습니다.');
-    }
-  }
+  useEffect(() => { setExpanded(false); setSheet(null); }, [selected?.year, selected?.month, selected?.day, timezone, client]);
+  if (!selected || !range) return <View style={styles.content}><Text accessibilityRole="alert" style={styles.error}>날짜 또는 시간대를 확인할 수 없습니다.</Text></View>;
 
   function clearSuccess() {
+    setSelectionError('');
     if (command.state.status === 'success') command.reset();
     if (checkin.state.status === 'success') checkin.reset();
+    if (attendance.state.status === 'success') attendance.reset();
+    if (undo.state.status === 'success') undo.reset();
   }
-
+  function blockedByOtherRequest() {
+    if (!operationGuard.hasUnresolved()) { setGuardMessage(''); return false; }
+    setSheet(null); setGuardMessage('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return true;
+  }
   function openEditor(item: ScheduleItem | null) {
-    if (blocked || result.status !== 'success') return;
-    clearSuccess();
+    if (result.status !== 'success') return;
+    if (item && editRequest) { setSheet(null); editRequest(item); return; }
+    if (!item && createRequest) { setSheet(null); createRequest(); return; }
+    if (blocked || blockedByOtherRequest()) return;
+    setSheet(null); clearSuccess();
     setEditor({ item, expectedScheduleRevision: result.data.scheduleRevision, client });
   }
-
   function save(fields: ScheduleFields) {
-    if (!editor || blocked || editor.client !== client) return;
+    if (!editor || blocked || blockedByOtherRequest() || editor.client !== client) return;
     const changeId = `change-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const change = editor.item
-      ? { changeId, operation: 'update' as const, targetId: editor.item.id, expectedRevision: editor.item.revision, after: fields }
+    const change = editor.item ? { changeId, operation: 'update' as const, targetId: editor.item.id, expectedRevision: editor.item.revision, after: fields }
       : { changeId, operation: 'create' as const, after: fields };
     commandClient.current = editor.client;
     command.submit({ expectedScheduleRevision: editor.expectedScheduleRevision, changeSet: { changes: [change] } });
   }
-
-  function submitCheckin(item: ScheduleItem, completion: CheckinInput['completion']) {
+  function current(item: ScheduleItem) {
+    if (result.status === 'success' && result.data.items.some(value => value.id === item.id && value.revision === item.revision)) return true;
+    setSheet(null); setSelectionError('일정이 변경되어 최신 목록을 다시 불러옵니다.'); result.retry(); return false;
+  }
+  function submitCompletion(item: ScheduleItem, completion: CheckinInput['completion']) {
+    if (actionDisabled || blockedByOtherRequest() || !current(item)) return;
+    setSheet(null); clearSuccess(); checkinClient.current = client; checkin.submit({ id: item.id, expectedRevision: item.revision, completion });
+  }
+  function submitAttendance(item: ScheduleItem, value: AttendanceInput['attendance']) {
+    if (actionDisabled || blockedByOtherRequest() || !current(item)) return;
+    setSheet(null); clearSuccess(); attendanceClient.current = client; attendance.submit({ id: item.id, expectedRevision: item.revision, attendance: value });
+  }
+  function submitUndo(item: ScheduleItem) {
+    if (actionDisabled || blockedByOtherRequest() || !current(item)) return;
+    setSheet(null); clearSuccess(); undoClient.current = client; undo.submit({ id: item.id, expectedRevision: item.revision, field: item.kind === 'event' ? 'attendance' : 'completion' });
+  }
+  function deleteItem(item: ScheduleItem) {
+    if (actionDisabled || blockedByOtherRequest() || !current(item) || item.involvement === 'shared' || result.status !== 'success') return;
+    setSheet(null); clearSuccess(); commandClient.current = client;
+    command.submit({ expectedScheduleRevision: result.data.scheduleRevision, changeSet: { changes: [{
+      changeId: `delete-${Date.now()}-${Math.random().toString(36).slice(2)}`, operation: 'delete', targetId: item.id, expectedRevision: item.revision,
+    }] } });
+  }
+  function moveDay(offset: number) {
     if (actionDisabled) return;
-    clearSuccess();
-    checkinClient.current = client;
-    checkin.submit({ id: item.id, expectedRevision: item.revision, completion });
+    try { onSelectDate(startOfDay(addDays(selected!, offset), timezone)); setSelectionError(''); }
+    catch { setSelectionError('이 시간대에서 해당 날짜를 선택할 수 없습니다.'); }
   }
-
-  function renderItem(item: ScheduleItem) {
-    const eligibleForCoordination = canCoordinate(item);
-    const choices: { completion: CheckinInput['completion']; label: string }[] = [
-      { completion: 'completed', label: '완료' },
-      { completion: 'incomplete', label: '미완료' },
-      { completion: 'unknown', label: '미확인' },
-    ];
-    return (
-      <View key={item.id} style={styles.item}>
-        <View style={styles.itemHeader}>
-          <View style={styles.timeRow}>
-            <Icon name="clock" size={15} color={item.completion === 'completed' ? '#14734C'
-              : item.completion === 'incomplete' ? '#9A4B14' : item.completion === 'unknown' ? colors.muted : colors.primary} />
-            {item.timeSlot ? <Text style={styles.itemTime}>{formatTimeRange(item.timeSlot.startsAt, item.timeSlot.endsAt, timezone)}</Text>
-              : <Text style={styles.itemTime}>미배치 · {item.durationMinutes}분</Text>}
-          </View>
-          <View style={[styles.stateBadge, item.completion === 'completed' && styles.completedBadge,
-            item.completion === 'incomplete' && styles.incompleteBadge, item.completion === 'unknown' && styles.unknownBadge]}>
-            {item.completion === 'completed' && <Icon name="check" size={13} color="#14734C" />}
-            <Text style={[styles.stateText, item.completion === 'completed' && styles.completedText,
-              item.completion === 'incomplete' && styles.incompleteText, item.completion === 'unknown' && styles.unknownText]}>{COMPLETION_LABELS[item.completion]}</Text>
-          </View>
-        </View>
-        <Text style={[styles.itemTitle, item.completion === 'completed' && styles.completedTitle]}>{item.title}</Text>
-        <Text style={styles.itemDetail}>{item.kind === 'event' ? '일정' : '할 일'} · {item.flexibility === 'fixed' ? '고정' : '유동'} · {item.involvement === 'shared' ? '공동' : '개인'}</Text>
-        <View style={styles.itemActions}>
-          <Pressable accessibilityRole="button" accessibilityLabel={`${item.title} 수정`}
-            accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled} onPress={() => openEditor(item)}
-            style={[styles.actionButton, actionDisabled && styles.disabled]}><Text style={styles.actionText}>수정</Text></Pressable>
-          {choices.map(({ completion, label }) => (
-            <Pressable key={completion} accessibilityRole="button" accessibilityLabel={`${item.title} ${label} 체크인`}
-              accessibilityState={{ disabled: actionDisabled, selected: item.completion === completion }}
-              disabled={actionDisabled} onPress={() => submitCheckin(item, completion)}
-              style={[styles.actionButton, item.completion === completion && styles.activeAction,
-                item.completion === completion && completion === 'completed' && styles.activeCompletedAction,
-                item.completion === completion && completion === 'incomplete' && styles.activeIncompleteAction,
-                item.completion === completion && completion === 'unknown' && styles.activeUnknownAction,
-                actionDisabled && styles.disabled]}>
-              {completion === 'completed' && <Icon name="check" size={15} color={item.completion === completion ? '#14734C' : '#34435D'} />}
-              <Text style={[styles.actionText, item.completion === completion && styles.activeActionText,
-                item.completion === completion && completion === 'completed' && styles.completedText,
-                item.completion === completion && completion === 'incomplete' && styles.incompleteText,
-                item.completion === completion && completion === 'unknown' && styles.unknownText]}>{label}</Text>
-            </Pressable>
-          ))}
-        </View>
-        {item.kind === 'event' && item.completion !== 'completed' && <Pressable accessibilityRole="button"
-          accessibilityLabel={`${item.title} 준비계획`} accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled}
-          onPress={() => { if (result.status === 'success' && !actionDisabled) setPreparation({ item, revision: result.data.scheduleRevision }); }}
-          style={[styles.coordinateButton, actionDisabled && styles.disabled]}>
-          <Text style={styles.actionText}>준비계획</Text><Icon name="arrowRight" size={15} color="#34435D" />
-        </Pressable>}
-        {item.kind === 'task' && item.completion === 'incomplete' && <Pressable accessibilityRole="button"
-          accessibilityLabel={`${item.title} 복구 상담`} accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled}
-          onPress={() => onRecovery(item)} style={[styles.coordinateButton, actionDisabled && styles.disabled]}>
-          <Text style={styles.actionText}>복구 상담</Text><Icon name="arrowRight" size={15} color="#34435D" />
-        </Pressable>}
-        {eligibleForCoordination && <>
-          <Pressable accessibilityRole="button" accessibilityLabel={`${item.title} 공동 약속 조정 검토`}
-            accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled} onPress={() => onCoordinate(item)}
-            style={[styles.coordinateButton, actionDisabled && styles.disabled]}><Text style={styles.actionText}>공동 약속 조정 검토</Text><Icon name="arrowRight" size={15} color="#34435D" /></Pressable>
-          <Text style={styles.hint}>선택은 채팅의 조정 검토 대상 지정이며 승인, 일정 반영 또는 연락이 아닙니다.</Text>
-        </>}
-      </View>
-    );
+  const items = result.status === 'success' ? result.data.items : [];
+  const filtered = items.filter(item => filter === 'all' || item.category === filter);
+  const scheduled = filtered.filter(item => item.timeSlot);
+  const unscheduled = presentation === 'day' ? filtered.filter(item => item.kind === 'task' && !item.timeSlot) : [];
+  const progress = dailyProgress(scheduled);
+  const ongoing = scheduled.filter(item => item.kind === 'task' && item.completion !== 'completed' && item.completion !== 'incomplete' &&
+    item.timeSlot && Date.parse(item.timeSlot.startsAt) <= now && now < Date.parse(item.timeSlot.endsAt)).length;
+  const layout = scheduleLayout(scheduled, now, selectedDate, timezone);
+  function card(item: ScheduleItem) {
+    return <ScheduleCard item={item} timezone={timezone} now={now} variant={presentation === 'day' ? 'timeline' : 'list'} disabled={actionDisabled}
+      onPress={() => setSheet({ kind: 'detail', item })} onStatus={() => setSheet({ kind: 'status', item })} onMore={() => setSheet({ kind: 'more', item })} />;
   }
-
-  const scheduled = result.status === 'success'
-    ? result.data.items.filter((item) => item.timeSlot !== null)
-      .slice().sort((a, b) => compareTimestamps(a.timeSlot!.startsAt, b.timeSlot!.startsAt)) : [];
-  const unscheduled = result.status === 'success'
-    ? result.data.items.filter((item) => item.kind === 'task' && item.timeSlot === null) : [];
-  const completedCount = scheduled.filter((item) => item.completion === 'completed').length;
-  const remainingCount = scheduled.filter((item) => item.completion === 'pending' || item.completion === 'incomplete').length;
-  const unknownCount = scheduled.filter((item) => item.completion === 'unknown').length;
-  const actions = selectNextActions(scheduled, selected, timezone, new Date(now));
-
+  function row(item: ScheduleItem, content = card(item)) {
+    if (presentation === 'home' || !item.timeSlot) return <View key={item.id} style={styles.rowGap}>{content}</View>;
+    const itemLayout = layout.layout.get(item.id);
+    return <View key={item.id} style={[styles.timelineRow, { marginTop: itemLayout?.gap ?? 8 }]}>
+      <View style={styles.axis}><Text style={styles.axisText}>{axisTime(item.timeSlot.startsAt, selectedDate, timezone)}</Text>
+        <Text style={styles.axisText}>{axisTime(item.timeSlot.endsAt, selectedDate, timezone)}</Text></View>
+      <View style={[styles.timelineCard, { minHeight: itemLayout?.height ?? 72 }, scheduleCardModel(item, now).active &&
+        !scheduleCardModel(item, now).recorded && styles.timelineActive]}>{content}
+        {itemLayout?.overlap && <Text style={styles.overlap}>시간 겹침</Text>}</View>
+    </View>;
+  }
+  let rows: React.ReactNode[] = [];
+  if (layout.front) {
+    const front = layout.front;
+    rows = [<PastScheduleStack key={front.id} front={row(front)} count={layout.past.length} expanded={expanded}
+      onToggle={() => setExpanded(value => !value)} disabled={actionDisabled} insetLeft={presentation === 'day' ? 60 : 0}>{layout.past.map(item => row(item))}</PastScheduleStack>, ...layout.remaining.map(item => row(item))];
+  } else rows = layout.remaining.map(item => row(item));
   if (preparation) return <PreparationProposalPanel target={preparation.item} expectedScheduleRevision={preparation.revision}
     timezone={timezone} api={api} visible={visible} onClose={() => setPreparation(null)}
     onProposalCreated={() => { setPreparation(null); onOpenPreparationProposals(); }} />;
-
-  return (
+  const undoNoHistory = undo.state.status === 'error' && !undo.state.uncertain &&
+    typeof undo.state.error === 'object' && undo.state.error !== null && 'code' in undo.state.error && undo.state.error.code === 'no_undo';
+  const activeSheet = sheet && result.status === 'success' && filtered.some(value => value.id === sheet.item.id && value.revision === sheet.item.revision) ? sheet : null;
+  const item = activeSheet?.item;
+  const button = (label: string, onPress: () => void, disabled = false) => <Pressable key={label} accessibilityRole="button"
+    accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.sheetButton, disabled && styles.disabled, pressed && styles.pressed]}>
+    <Text style={styles.sheetButtonText}>{label}</Text></Pressable>;
+  return <>
     <ScrollView style={styles.screen} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <View style={styles.heading}>
-        <Text accessibilityRole="header" style={styles.title}>일간</Text>
-        <Text style={styles.subtitle}>선택한 날짜의 일정과 할 일</Text>
-      </View>
-      <View style={styles.dateHeader}>
-        <Pressable accessibilityRole="button" accessibilityLabel="이전 날짜" accessibilityState={{ disabled: actionDisabled }}
-          disabled={actionDisabled} onPress={() => moveDay(-1)}
-          style={({ pressed }) => [styles.navigationButton, pressed && styles.pressed, actionDisabled && styles.disabled]}>
-          <Icon name="chevronLeft" size={20} color={colors.primary} />
-        </Pressable>
-        <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={styles.dateTitle}>{formatCivilDate(selected)}</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="다음 날짜" accessibilityState={{ disabled: actionDisabled }}
-          disabled={actionDisabled} onPress={() => moveDay(1)}
-          style={({ pressed }) => [styles.navigationButton, pressed && styles.pressed, actionDisabled && styles.disabled]}>
-          <Icon name="chevronRight" size={20} color={colors.primary} />
-        </Pressable>
-      </View>
+      {presentation === 'home' ? <View style={styles.headingRow}><View><Text style={styles.dateLabel}>{formatCivilDate(selected)}</Text><Text accessibilityRole="header" style={styles.title}>오늘도 함께해요</Text></View>
+        {onOpenSettings && <Pressable accessibilityRole="button" accessibilityLabel="설정 열기" accessibilityHint="기본 프로필 그림" onPress={onOpenSettings} style={styles.profile}><ProfileAvatar size={39} /></Pressable>}</View>
+        : <View style={styles.dateHeader}><Pressable accessibilityRole="button" accessibilityLabel="이전 날짜" disabled={actionDisabled} onPress={() => moveDay(-1)} style={styles.nav}><Text>‹</Text></Pressable>
+          <Text accessibilityRole="header" style={styles.dateTitle}>{formatCivilDate(selected)}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="다음 날짜" disabled={actionDisabled} onPress={() => moveDay(1)} style={styles.nav}><Text>›</Text></Pressable></View>}
+      {presentation === 'day' && <><View style={styles.weekHeader}>{onCalendar && button('월간 보기', onCalendar, actionDisabled)}</View>
+        <View style={styles.weekStrip}>{Array.from({ length: 7 }, (_, index) => {
+          const date = addDays(selected, index - ((weekday(selected) + 1) % 7));
+          const chosen = date.year === selected.year && date.month === selected.month && date.day === selected.day;
+          return <View key={`${date.year}-${date.month}-${date.day}`} style={styles.weekColumn}><Text style={styles.weekLabel}>{['일','월','화','수','목','금','토'][weekday(date)]}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel={formatCivilDate(date)} accessibilityState={{ selected: chosen, disabled: actionDisabled }}
+              disabled={actionDisabled} onPress={() => { try { onSelectDate(startOfDay(date, timezone)); setSelectionError(''); } catch { setSelectionError('이 시간대에서 해당 날짜를 선택할 수 없습니다.'); } }}
+              style={[styles.weekDay, chosen && styles.weekSelected]}><Text style={chosen ? styles.weekSelectedText : undefined}>{date.day}</Text></Pressable></View>;
+        })}</View></>}
+      {presentation === 'home' && <View style={styles.filters}>{([['all','전체'],['personal','개인'],['work','업무']] as const).map(([key, label]) =>
+        <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: filter === key }} onPress={() => { setSheet(null); setFilter(key); }} style={[styles.filter, filter === key && styles.filterSelected]}><Text>{label}</Text></Pressable>)}</View>}
       {!!selectionError && <Text accessibilityRole="alert" style={styles.error}>{selectionError}</Text>}
-      <MutationStatus state={command.state} retry={command.retry} reset={command.reset} refresh={result.retry}
-        canRetry={commandClient.current === client} success="일정을 저장했습니다." />
-      <MutationStatus state={checkin.state} retry={checkin.retry} reset={checkin.reset} refresh={result.retry}
-        canRetry={checkinClient.current === client} success="체크인을 기록했습니다." />
+      {!!guardMessage && <Text accessibilityRole="alert" style={styles.error}>{guardMessage}</Text>}
+      <MutationStatus state={command.state} retry={command.retry} reset={() => { command.reset(); result.retry(); }} refresh={result.retry} canRetry={commandClient.current === client} success="일정을 저장했습니다." />
+      <MutationStatus state={checkin.state} retry={checkin.retry} reset={() => { checkin.reset(); result.retry(); }} refresh={result.retry} canRetry={checkinClient.current === client} success="상태를 기록했습니다." />
+      <MutationStatus state={attendance.state} retry={attendance.retry} reset={() => { attendance.reset(); result.retry(); }} refresh={result.retry} canRetry={attendanceClient.current === client} success="참석 여부를 기록했습니다." />
+      {undoNoHistory ? <View style={styles.statusBox}><Text accessibilityRole="alert" style={styles.error}>이전 상태를 확인할 수 없어 되돌릴 수 없습니다. 상태를 직접 선택해 주세요.</Text>
+        {button('닫고 최신 목록 확인', () => { undo.reset(); setSheet(null); result.retry(); })}</View>
+        : <MutationStatus state={undo.state} retry={undo.retry} reset={() => { undo.reset(); result.retry(); }} refresh={result.retry} canRetry={undoClient.current === client} success="이전 상태로 되돌렸습니다." />}
       {editor && editor.client !== client && <Text accessibilityRole="alert" style={styles.error}>연결이 변경되어 기존 편집을 저장할 수 없습니다. 편집을 취소한 뒤 다시 열어 주세요.</Text>}
-      {editor && <View style={styles.editorCard}><ScheduleForm key={editor.item ? `${editor.item.id}:${editor.item.revision}` : 'create'}
-        item={editor.item} timezone={timezone} disabled={blocked || editor.client !== client} cancelDisabled={blocked}
-        onCancel={() => setEditor(null)} onSave={save} /></View>}
-      {result.status === 'loading' && <View style={styles.statusCard}><ScheduleLoading /></View>}
-      {result.status === 'error' && <View style={styles.statusCard}><ScheduleError error={result.error} retry={result.retry} /></View>}
-      {result.status === 'success' && (
-        <View style={styles.sections}>
-          <View style={styles.summaryCard}>
-            <View style={styles.summaryHeadingMain}>
-              <Icon name="clock" size={19} color={colors.primary} />
-              <Text accessibilityRole="header" style={styles.summaryTitle}>현재와 다음 행동</Text>
-            </View>
-            {actions.current && <View style={styles.nextAction}>
-              <Text style={styles.nextActionLabel}>이 시간의 일정</Text>
-              <Text style={styles.itemTitle}>{actions.current.title}</Text>
-              <Text style={styles.itemTime}>{formatTimeRange(actions.current.timeSlot!.startsAt, actions.current.timeSlot!.endsAt, timezone)}</Text>
-              <Text style={styles.summaryHint}>수행 상태: {COMPLETION_LABELS[actions.current.completion]}</Text>
-            </View>}
-            {actions.next && <View style={styles.nextAction}>
-              <Text style={styles.nextActionLabel}>다음 행동</Text>
-              <Text style={styles.itemTitle}>{actions.next.title}</Text>
-              <Text style={styles.itemTime}>{formatTimeRange(actions.next.timeSlot!.startsAt, actions.next.timeSlot!.endsAt, timezone)}</Text>
-              <Text style={styles.summaryHint}>수행 상태: {COMPLETION_LABELS[actions.next.completion]}</Text>
-            </View>}
-            {!actions.current && !actions.next && <Text style={styles.summaryHint}>선택한 날짜에 지금 진행 중이거나 앞으로 시작할 배치된 일정이 없습니다.</Text>}
-            {(actions.current || actions.next) && <Text style={styles.summaryHint}>저장된 일정 시간 기준이며 수행 상태는 자동으로 바뀌지 않습니다.</Text>}
-          </View>
-          <View style={styles.summaryCard}>
-            <View style={styles.summaryHeading}>
-              <View style={styles.summaryHeadingMain}>
-                <Icon name="calendar" size={19} color={colors.primary} />
-                <Text accessibilityRole="header" style={styles.summaryTitle}>선택한 날짜 요약</Text>
-              </View>
-              <Text style={styles.summaryTotal}>배치된 일정 {scheduled.length}건</Text>
-            </View>
-            <View style={styles.summaryMetrics}>
-              <View accessible accessibilityLabel={`완료 ${completedCount}건`} style={styles.metric}>
-                <Text style={[styles.metricValue, styles.completedText]}>{completedCount}</Text><Text style={styles.metricLabel}>완료</Text>
-              </View>
-              <View accessible accessibilityLabel={`남은 일정 ${remainingCount}건`} style={styles.metric}>
-                <Text style={[styles.metricValue, styles.remainingValue]}>{remainingCount}</Text><Text style={styles.metricLabel}>남은 일정</Text>
-              </View>
-              <View accessible accessibilityLabel={`상태 미확인 ${unknownCount}건`} style={styles.metric}>
-                <Text style={styles.metricValue}>{unknownCount}</Text><Text style={styles.metricLabel}>상태 미확인</Text>
-              </View>
-            </View>
-            <Text style={styles.summaryHint}>남은 일정은 대기·미완료 기준이며 미배치 할 일은 제외됩니다.</Text>
-          </View>
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled}
-            onPress={() => openEditor(null)} style={[styles.addButton, actionDisabled && styles.disabled]}>
-            <Icon name="plus" size={18} color={colors.surface} />
-            <Text style={styles.addText}>일정 또는 할 일 추가</Text>
-          </Pressable>
-          {scheduled.length === 0 && unscheduled.length === 0 ? (
-            <View style={styles.emptyCard}><Text style={styles.emptyText}>등록된 일정과 미배치 할 일이 없습니다.</Text></View>
-          ) : (
-            <>
-              <View style={styles.sectionHeading}>
-                <Text accessibilityRole="header" style={styles.sectionTitle}>배치된 일정</Text>
-                <Text style={styles.sectionCount}>{scheduled.length}건</Text>
-              </View>
-              {scheduled.length === 0 ? <View style={styles.emptyCard}><Text style={styles.emptyText}>이 날짜에 배치된 일정이 없습니다.</Text></View> :
-                scheduled.map(renderItem)}
-              {unscheduled.length > 0 && (
-                <>
-                  <View style={styles.sectionHeading}>
-                    <Text accessibilityRole="header" style={styles.sectionTitle}>미배치 할 일</Text>
-                    <Text style={styles.sectionCount}>{unscheduled.length}건</Text>
-                  </View>
-                  <Text style={styles.hint}>날짜나 시간이 정해지지 않은 할 일입니다.</Text>
-                  {unscheduled.map(renderItem)}
-                </>
-              )}
-            </>
-          )}
-        </View>
-      )}
+      {editor && <View style={styles.panel}><ScheduleForm key={editor.item ? `${editor.item.id}:${editor.item.revision}` : 'create'} item={editor.item} timezone={timezone}
+        disabled={blocked || editor.client !== client} cancelDisabled={blocked} onCancel={() => setEditor(null)} onSave={save} /></View>}
+      {result.status === 'loading' && <ScheduleLoading />}
+      {result.status === 'error' && <ScheduleError error={result.error} retry={result.retry} />}
+      {result.status === 'success' && <>
+        {presentation === 'home' && <><View style={styles.sectionTitleRow}><Text accessibilityRole="header" style={styles.sectionTitle}>오늘의 일정 {scheduled.length}개</Text>
+          {onCalendar && button('캘린더', onCalendar, actionDisabled)}</View>
+          <View style={styles.summary}><View accessible accessibilityLabel={progress.percent === null ? '완료를 기록할 할 일이 없어요' : `할 일과 루틴 ${progress.total}개 중 ${progress.done}개 완료, ${progress.percent}퍼센트`} style={styles.summaryRing}>
+            <Text style={styles.ringText}>{progress.percent === null ? '–' : `${progress.percent}%`}</Text></View>
+            <View style={styles.summaryMetrics}><Text style={styles.summaryLabel}>완료 <Text style={styles.summaryValue}>{progress.done}개</Text></Text>
+              <Text style={styles.summaryLabel}>진행 중 <Text style={styles.summaryValue}>{ongoing}개</Text></Text>
+              <Text style={styles.summaryLabel}>남은 할 일 <Text style={styles.summaryValue}>{Math.max(0, progress.total - progress.done - ongoing)}개</Text></Text></View></View>
+          <Text style={styles.muted}>{progress.percent === null ? '완료를 기록할 할 일이 없어요.' : `할 일·루틴 ${progress.total}개 중 ${progress.done}개 완료`}</Text>
+          {onOpenProposals && <View style={styles.panel}><Text accessibilityRole="header" style={styles.sectionTitle}>AI 제안</Text>
+            <Text style={styles.muted}>{proposal?.api === api && proposal.version === refreshVersion ? proposal.text : '제안을 불러오는 중입니다.'}</Text>
+            {button('제안 확인', onOpenProposals, actionDisabled)}</View>}</>}
+        {presentation === 'day' && <View style={styles.sectionTitleRow}><Text accessibilityRole="header" style={styles.sectionTitle}>일간 일정</Text>{button('추가', () => openEditor(null), !createRequest && actionDisabled)}</View>}
+        {!scheduled.length && <View style={styles.panel}><Text style={styles.muted}>{presentation === 'home'
+          ? '해당하는 시간 지정 일정이 없어요.' : '이 날짜에 시간이 정해진 일정이 없어요.'}</Text></View>}
+        {rows}
+        {unscheduled.length > 0 && <><Text accessibilityRole="header" style={styles.sectionTitle}>미배치 할 일</Text>{unscheduled.map(item => row(item))}</>}
+      </>}
     </ScrollView>
-  );
+    <BottomSheet visible={activeSheet !== null} title={item?.title ?? ''} onClose={() => { if (!blocked) setSheet(null); }}>
+      {item && activeSheet?.kind === 'detail' && <View style={styles.sheetContent}>
+        <Text style={styles.muted}>{item.timeSlot ? `${axisTime(item.timeSlot.startsAt, selectedDate, timezone)} – ${axisTime(item.timeSlot.endsAt, selectedDate, timezone)}` : '시간 미정'}</Text>
+        <Text style={styles.muted}>{item.kind === 'event' ? '약속' : item.sourceRefs.some(ref => ref.provider === 'routine') ? '루틴' : '할 일'} · {item.involvement === 'shared' ? '공동' : '개인'}</Text>
+        {button('상태 변경', () => setSheet({ kind: 'status', item }), actionDisabled)}{button('더보기', () => setSheet({ kind: 'more', item }), actionDisabled)}
+      </View>}
+      {item && activeSheet?.kind === 'status' && <View style={styles.sheetContent}>
+        <Text style={styles.muted}>{item.kind === 'event' ? '참석 여부를 선택해 주세요.' : '수행 상태를 선택해 주세요.'}</Text>
+        {item.kind === 'event' ? attendanceChoices.map(choice => button(choice.label, () => submitAttendance(item, choice.value), actionDisabled))
+          : completionChoices.map(choice => button(choice.label, () => submitCompletion(item, choice.value), actionDisabled))}
+        {button('이전 상태로 되돌리기', () => submitUndo(item), actionDisabled)}
+      </View>}
+      {item && activeSheet?.kind === 'more' && <View style={styles.sheetContent}>
+        {button('수정', () => openEditor(item), actionDisabled)}
+        {onAsk && button('AI에게 문의', () => { setSheet(null); onAsk(item); }, actionDisabled)}
+        {item.kind === 'event' && item.completion !== 'completed' && button('준비계획', () => { if (result.status === 'success') { setSheet(null); setPreparation({ item, revision: result.data.scheduleRevision }); } }, actionDisabled)}
+        {item.kind === 'task' && item.completion === 'incomplete' && button('복구 상담', () => { setSheet(null); onRecovery(item); }, actionDisabled)}
+        {canCoordinate(item) && button('공동 약속 조정 검토', () => { setSheet(null); onCoordinate(item); }, actionDisabled)}
+        {item.involvement === 'shared' ? <Text style={styles.muted}>공동 일정은 직접 삭제할 수 없습니다.</Text> : button('삭제', () => setSheet({ kind: 'delete', item }), actionDisabled)}
+      </View>}
+      {item && activeSheet?.kind === 'delete' && <View style={styles.sheetContent}><Text>이 일정을 삭제할까요?</Text>
+        {button('취소', () => setSheet({ kind: 'more', item }), actionDisabled)}{button('삭제 확인', () => deleteItem(item), actionDisabled)}</View>}
+    </BottomSheet>
+  </>;
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.background },
-  content: { flexGrow: 1, paddingHorizontal: 16, paddingTop: 18, paddingBottom: 36 },
-  heading: { gap: 6 },
-  title: { color: colors.text, fontSize: 26, fontWeight: '700' },
-  subtitle: { color: colors.muted, fontSize: 14 },
-  dateHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 20, padding: 10, backgroundColor: colors.surface, borderRadius: 20, borderWidth: 1, borderColor: '#EDF0F7' },
-  dateTitle: { flex: 1, marginHorizontal: 8, color: colors.text, fontSize: 17, fontWeight: '700', textAlign: 'center' },
-  navigationButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: '#F5F7FC' },
-  pressed: { opacity: 0.65 },
-  disabled: { opacity: 0.5 },
-  editorCard: { marginTop: 16, paddingHorizontal: 14, paddingBottom: 14, backgroundColor: colors.surface, borderRadius: 20 },
-  statusCard: { marginTop: 16, paddingHorizontal: 16, backgroundColor: colors.surface, borderRadius: 20 },
-  sections: { marginTop: 20, gap: 12 },
-  summaryCard: { padding: 16, gap: 14, backgroundColor: colors.surface, borderRadius: 20, borderWidth: 1, borderColor: colors.border },
-  nextAction: { gap: 3 },
-  nextActionLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' },
-  summaryHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 },
-  summaryHeadingMain: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  summaryTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  summaryTotal: { color: colors.muted, fontSize: 13 },
-  summaryMetrics: { flexDirection: 'row', gap: 8 },
-  metric: { flex: 1, minWidth: 0, paddingVertical: 10, paddingHorizontal: 8, gap: 3, backgroundColor: colors.background, borderRadius: 14 },
-  metricValue: { color: colors.text, fontSize: 20, fontWeight: '700' },
-  remainingValue: { color: colors.primary },
-  metricLabel: { color: colors.muted, fontSize: 12, lineHeight: 17 },
-  summaryHint: { color: colors.muted, fontSize: 12, lineHeight: 18 },
-  sectionHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 },
-  sectionTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
-  sectionCount: { color: colors.primary, fontSize: 13, fontWeight: '700' },
-  item: { padding: 18, borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#EDF0F7', gap: 6 },
-  itemHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
-  timeRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 7 },
-  itemTitle: { color: colors.text, fontSize: 16, fontWeight: '700', lineHeight: 23 },
-  completedTitle: { color: colors.muted, textDecorationLine: 'line-through' },
-  stateBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: '#EEF3FF', borderRadius: 10 },
-  stateText: { color: '#3155B8', fontSize: 12, fontWeight: '700' },
-  completedBadge: { backgroundColor: '#E7F5ED' },
-  completedText: { color: '#14734C' },
-  incompleteBadge: { backgroundColor: '#FFF1E5' },
-  incompleteText: { color: '#9A4B14' },
-  unknownBadge: { backgroundColor: '#F0F2F6' },
-  unknownText: { color: colors.muted },
-  itemTime: { flexShrink: 1, color: colors.primary, fontSize: 13, fontWeight: '600', lineHeight: 20 },
-  itemDetail: { color: colors.muted, fontSize: 13, lineHeight: 20 },
-  itemActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
-  actionButton: { flexGrow: 1, minWidth: 60, minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 10, borderWidth: 1, borderColor: '#E3E8F2', borderRadius: 14, backgroundColor: '#F8F9FD' },
-  activeAction: { borderColor: colors.primary, backgroundColor: '#EEF3FF' },
-  activeCompletedAction: { borderColor: '#14734C', backgroundColor: '#E7F5ED' },
-  activeIncompleteAction: { borderColor: '#9A4B14', backgroundColor: '#FFF1E5' },
-  activeUnknownAction: { borderColor: colors.muted, backgroundColor: '#F0F2F6' },
-  actionText: { color: '#34435D', fontSize: 13, fontWeight: '600' },
-  activeActionText: { color: '#2851C7', fontWeight: '700' },
-  coordinateButton: { alignSelf: 'flex-start', minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 12, marginTop: 4, borderRadius: 14, backgroundColor: '#EEF3FF' },
-  addButton: { alignSelf: 'stretch', minHeight: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 16, borderRadius: 16, backgroundColor: colors.primary },
-  addText: { color: colors.surface, fontWeight: '700' },
-  hint: { color: colors.muted, fontSize: 13, lineHeight: 20 },
-  emptyCard: { padding: 18, backgroundColor: colors.surface, borderRadius: 20 },
-  emptyText: { color: colors.muted, fontSize: 14, lineHeight: 21 },
-  error: { color: colors.error, marginTop: 12 },
+  screen: { flex: 1, backgroundColor: 'transparent' }, content: { flexGrow: 1, paddingHorizontal: 16, paddingTop: 18, paddingBottom: 100 },
+  headingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, dateLabel: { color: '#626B80', fontSize: 13 },
+  title: { color: '#14151A', fontSize: 24, fontWeight: '700', marginTop: 6 }, profile: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  dateHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, dateTitle: { flex: 1, textAlign: 'center', color: '#14151A', fontSize: 17, fontWeight: '700' },
+  nav: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: '#fff' },
+  weekHeader: { alignItems: 'flex-end', marginTop: 8 }, weekStrip: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  weekColumn: { alignItems: 'center', gap: 4 }, weekLabel: { color: '#626B80', fontSize: 12 }, weekDay: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
+  weekSelected: { backgroundColor: '#5369CA' }, weekSelectedText: { color: '#fff', fontWeight: '700' },
+  filters: { flexDirection: 'row', gap: 8, marginTop: 22 }, filter: { minWidth: 62, minHeight: 44, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center', borderRadius: 24, backgroundColor: '#F3F5FC' },
+  filterSelected: { backgroundColor: '#C4D0FF' }, sectionTitleRow: { marginTop: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  sectionTitle: { color: '#14151A', fontSize: 18, fontWeight: '700', marginTop: 10 }, summary: { marginTop: 12, padding: 20, gap: 24, flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 20 },
+  summaryRing: { width: 92, height: 92, borderRadius: 46, borderWidth: 9, borderColor: '#C4D0FF', alignItems: 'center', justifyContent: 'center' },
+  ringText: { color: '#14151A', fontSize: 17, fontWeight: '700' }, summaryMetrics: { flex: 1, gap: 8 },
+  summaryLabel: { color: '#626B80', fontSize: 14 }, summaryValue: { color: '#14151A', fontSize: 14, fontWeight: '700' },
+  rowGap: { marginTop: 10 }, timelineRow: { flexDirection: 'row', alignItems: 'stretch', gap: 10 }, axis: { width: 50, justifyContent: 'space-between', paddingVertical: 4 }, axisText: { fontSize: 12, color: '#626B80' },
+  timelineCard: { flex: 1, minWidth: 0, borderRadius: 13, backgroundColor: '#fff' }, timelineActive: { backgroundColor: '#5369CA' },
+  overlap: { color: '#A54720', fontSize: 12, marginTop: 4 }, panel: { marginTop: 16, padding: 16, backgroundColor: '#fff', borderRadius: 18 },
+  sheetContent: { gap: 8 }, sheetButton: { minHeight: 44, paddingHorizontal: 14, justifyContent: 'center', borderRadius: 12, backgroundColor: '#F3F5FC' }, sheetButtonText: { color: '#14151A', fontWeight: '600' },
+  statusBox: { marginTop: 12, gap: 8 }, muted: { color: '#626B80', lineHeight: 20 }, error: { color: '#A01818', lineHeight: 20 }, disabled: { opacity: 0.5 }, pressed: { opacity: 0.7 },
 });

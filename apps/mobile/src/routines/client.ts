@@ -1,8 +1,8 @@
 import { ApiError, type ApiClient } from '../api/http';
 import type { Mutation } from '../api/mutation';
 
-export type Routine = { id: string; revision: number; title: string; weekdays: number[]; timezone: string; startDate: string; localTime: string; durationMinutes: number; active: boolean };
-export type RoutineInput = Pick<Routine, 'title' | 'weekdays' | 'timezone' | 'startDate' | 'localTime' | 'durationMinutes'>;
+export type Routine = { id: string; revision: number; title: string; weekdays: number[]; timezone: string; startDate: string; localTime: string; durationMinutes: number; active: boolean; category?: 'personal' | 'work' | null };
+export type RoutineInput = Pick<Routine, 'title' | 'weekdays' | 'timezone' | 'startDate' | 'localTime' | 'durationMinutes' | 'category'>;
 export type RoutineUpdate = { id: string; expectedRevision: number; changes: Partial<RoutineInput & { active: boolean }> };
 export type MaterializeInput = { fromDate: string; toDate: string };
 export type MaterializeResult = { createdCount: number; existingCount: number; conflicts: { routineId: string; date: string; code: 'schedule_conflict' | 'invalid_local_time' }[]; scheduleRevision: number };
@@ -26,7 +26,8 @@ function routine(value: unknown): Routine {
       !value.weekdays.every((day: unknown, i: number, days: number[]) => Number.isInteger(day) && (day as number) >= 1 && (day as number) <= 7 && (i === 0 || days[i - 1]! < (day as number))) ||
       typeof value.timezone !== 'string' || !value.timezone || typeof value.startDate !== 'string' || !validDate(value.startDate) ||
       typeof value.localTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value.localTime) ||
-      !integer(value.durationMinutes) || value.durationMinutes < 1 || value.durationMinutes > 1440 || typeof value.active !== 'boolean') throw invalid();
+      !integer(value.durationMinutes) || value.durationMinutes < 1 || value.durationMinutes > 1440 || typeof value.active !== 'boolean' ||
+      (value.category != null && value.category !== 'personal' && value.category !== 'work')) throw invalid();
   return value as Routine;
 }
 export function createRoutineClient(api: ApiClient) {

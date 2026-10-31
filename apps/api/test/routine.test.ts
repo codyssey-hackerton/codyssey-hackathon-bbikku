@@ -13,8 +13,9 @@ import { registerRoutineRoutes } from '../src/routine-routes.ts';
 import { MemoryPlanningStore } from '../src/planning-store.ts';
 import { PostgresPlanningStore } from '../src/postgres-store.ts';
 import { PlanningError, PlanningService } from '../src/planning-service.ts';
+import { buildApp } from '../src/app.ts';
 
-const rule = { requestId: 'request-1', title: '합성 루틴', weekdays: [2, 1, 1], timezone: 'UTC', startDate: '2030-01-07', localTime: '09:00', durationMinutes: 30 };
+const rule = { requestId: 'request-1', title: '합성 루틴', weekdays: [2, 1, 1], timezone: 'UTC', startDate: '2030-01-07', localTime: '09:00', durationMinutes: 30, category: 'work' as const };
 const window = { requestId: 'request-m', fromDate: '2030-01-07', toDate: '2030-01-08' };
 
 test('validates dates, bounded windows and ISO weekdays; rejects DST gaps and ambiguity', () => {
@@ -78,16 +79,42 @@ test('isolated PostgreSQL: idempotency, ownership, conflict, checkin and existin
     assert.deepEqual(await service.materialize(user, 'materialize-key', { ...window, requestId: 'retry' }), result);
     const item = [...(await store.read(user)).items.values()].find(value => value.sourceRefs.some(ref => ref.provider === 'routine'))!;
     assert.equal(item.sourceRefs[0]?.externalEventId, '2030-01-07');
+    assert.equal(item.category, 'work');
     await planning.checkin(user, item.id, { expectedRevision: 1, completion: 'completed' });
     const repeat = await service.materialize(user, 'new-key', window);
     assert.equal(repeat.data.existingCount, 1); assert.equal((await store.read(user)).items.get(item.id)?.completion, 'completed');
-    await service.patch(user, 'patch-key', id, { requestId: 'patch', expectedRevision: 1, title: '수정' });
+    await service.patch(user, 'patch-key', id, { requestId: 'patch', expectedRevision: 1, title: '수정', category: 'personal' });
     assert.equal((await store.read(user)).items.get(item.id)?.title, '합성 루틴');
+    assert.equal((await store.read(user)).items.get(item.id)?.category, 'work');
     const next = { requestId: 'next', fromDate: '2030-01-14', toDate: '2030-01-14' };
     const parallel = await Promise.all([service.materialize(user, 'parallel-a', next), service.materialize(user, 'parallel-b', next)]);
     assert.equal(parallel.reduce((sum, value) => sum + value.data.createdCount, 0), 1);
     assert.equal(parallel.reduce((sum, value) => sum + value.data.existingCount, 0), 1);
     assert.equal([...((await store.read(user)).items.values())].filter(value => value.title === '수정').length, 1);
+    assert.equal([...((await store.read(user)).items.values())].find(value => value.title === '수정')?.category, 'personal');
+
+    const statusReloadedStore = new PostgresPlanningStore(pool);
+    assert.equal((await statusReloadedStore.read(user)).statusUndo?.get(item.id)?.completion?.previous, 'pending');
+    const beforeStatusRollback = await store.read(user);
+    await assert.rejects(store.atomic(user, async () => {
+      await planning.undo(user, item.id, { expectedRevision: 2, field: 'completion' });
+      throw new Error('synthetic status rollback');
+    }), /synthetic status rollback/);
+    assert.deepEqual((await statusReloadedStore.read(user)).statusUndo, beforeStatusRollback.statusUndo);
+    assert.equal((await statusReloadedStore.read(user)).items.get(item.id)?.completion, 'completed');
+    assert.equal((await new PlanningService(statusReloadedStore).undo(user, item.id, { expectedRevision: 2, field: 'completion' })).item.completion, 'pending');
+    const sessions = { async resolve(token: string) { return token === 'synthetic' ? { userId: user } : null; } };
+    const statusApp = buildApp({ sessions, store });
+    const statusHeaders = { authorization: 'Bearer synthetic', 'idempotency-key': 'persistent-checkin' };
+    const statusPayload = { requestId: 'status', expectedRevision: 3, completion: 'completed' };
+    const firstStatus = await statusApp.inject({ method: 'POST', url: `/v1/schedule/${item.id}/checkin`, headers: statusHeaders, payload: statusPayload });
+    assert.equal(firstStatus.statusCode, 200, firstStatus.body); await statusApp.close();
+    const restartedApp = buildApp({ sessions, store: statusReloadedStore });
+    const replayStatus = await restartedApp.inject({ method: 'POST', url: `/v1/schedule/${item.id}/checkin`, headers: statusHeaders, payload: { ...statusPayload, requestId: 'retry' } });
+    assert.deepEqual(replayStatus.json(), firstStatus.json());
+    const conflictStatus = await restartedApp.inject({ method: 'POST', url: `/v1/schedule/${item.id}/checkin`, headers: statusHeaders, payload: { ...statusPayload, completion: 'unknown' } });
+    assert.equal(conflictStatus.statusCode, 409); assert.equal(conflictStatus.json().error.code, 'idempotency_conflict');
+    await restartedApp.close();
 
     const failingStore = { mode: store.mode, durable: store.durable, pool, read: store.read.bind(store), transaction: store.transaction.bind(store),
       atomic: store.atomic.bind(store), listUserIds: store.listUserIds.bind(store), transactionTimestamp: store.transactionTimestamp.bind(store),
