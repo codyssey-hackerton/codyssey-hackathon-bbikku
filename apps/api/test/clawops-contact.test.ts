@@ -97,3 +97,59 @@ test('abort after the request starts cannot claim the call was not submitted', a
   const pending = adapter.dispatch(approved, controller.signal); await started; controller.abort(); release();
   assert.deepEqual(await pending, unknown);
 });
+
+test('managed agent call sends only the expected AgentId and call context without Url', async () => {
+  let calls = 0; let checks = 0;
+  const adapter = createClawOpsContact({ accountId: options.accountId, apiKey: options.apiKey, fromNumber: options.fromNumber,
+    agentId: 'agent_test', callContext: { instruction: '승인된 연락 정보', variables: { note: '합성', count: 2, enabled: true } },
+    fetch: async (url, init) => {
+      calls++; assert.equal(url, 'https://api.claw-ops.com/v1/accounts/AC1a2b3c4d/calls');
+      const body = JSON.parse(String(init?.body));
+      assert.deepEqual(body, { To: '01012345678', From: '07052358010', AgentId: 'agent_test',
+        CallContext: { Instruction: '승인된 연락 정보', Variables: { note: '합성', count: 2, enabled: true } }, Timeout: 30 });
+      assert.equal('Url' in body, false); assert.equal(init?.redirect, 'error');
+      return Response.json({ callId: 'CAabcdef1234567890' }, { status: 201 });
+    } });
+  assert.deepEqual(await adapter.dispatch(approved, undefined, async () => { checks++; }),
+    { status: 'submitted', providerOperationId: 'CAabcdef1234567890' });
+  assert.equal(calls, 1); assert.equal(checks, 1);
+});
+
+test('managed options reject mixed modes and invalid contexts without sending', async () => {
+  let calls = 0;
+  const fetcher: typeof fetch = async () => { calls++; throw new Error('unexpected'); };
+  const base = { accountId: options.accountId, apiKey: options.apiKey, fromNumber: options.fromNumber, fetch: fetcher };
+  const cases: unknown[] = [
+    { ...base, voiceUrl: options.voiceUrl, agentId: 'agent', callContext: { instruction: 'approved' } },
+    { ...base, agentId: '', callContext: { instruction: 'approved' } },
+    { ...base, agentId: 'a'.repeat(201), callContext: { instruction: 'approved' } },
+    { ...base, agentId: 'agent', callContext: { instruction: '' } },
+    { ...base, agentId: 'agent', callContext: { instruction: '가'.repeat(6000) } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'bad\u0000' } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'approved', variables: { bad: Infinity } } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'approved', variables: { bad: ['a'] } } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'approved', variables: { 'bad-key': 'a' } } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'approved', variables: { data: 'x'.repeat(8192) } } },
+    { ...base, agentId: 'agent', callContext: { instruction: 'approved', variables: Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`key${i}`, i])) } },
+  ];
+  for (const value of cases) assert.deepEqual(await createClawOpsContact(value as Parameters<typeof createClawOpsContact>[0]).dispatch(approved), failed);
+  assert.equal(calls, 0);
+});
+
+test('managed mode snapshots context before approval and preserves pre-send and unknown-outcome semantics', async () => {
+  const context = { instruction: '승인된 정보', variables: { note: '원본' } };
+  let release!: () => void; let enter!: () => void;
+  const ready = new Promise<void>(resolve => { enter = resolve; });
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  let body: any; let calls = 0;
+  const adapter = createClawOpsContact({ accountId: options.accountId, apiKey: options.apiKey, fromNumber: options.fromNumber,
+    agentId: 'agent_test', callContext: context, fetch: async (_url, init) => {
+      calls++; body = JSON.parse(String(init?.body)); throw new Error('ambiguous transport');
+    } });
+  const pending = adapter.dispatch(approved, undefined, async () => { enter(); await wait; });
+  await ready; context.instruction = '변경'; context.variables.note = '변경'; release();
+  assert.deepEqual(await pending, unknown);
+  assert.deepEqual(body.CallContext, { Instruction: '승인된 정보', Variables: { note: '원본' } });
+  assert.deepEqual(await adapter.dispatch(approved, undefined, async () => { throw new Error('invalid approval'); }), failed);
+  assert.equal(calls, 1);
+});

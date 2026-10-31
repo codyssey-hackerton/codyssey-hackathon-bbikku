@@ -764,6 +764,7 @@ test('연락 화면의 ClawOps 연결은 제공자까지 일치해야 미결 잠
   mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
   const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
   await openContact(view);
+  press(view, '키패드 방식 선택');
   enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key'); enter(view, 'ClawOps 서명 비밀', 'signing');
   enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
   const call = posts(mock.calls, '/phone-connection')[0]; assert.equal(call.body.provider, 'clawops');
@@ -871,6 +872,63 @@ test('전화 결과 조회는 저장된 서버 응답만 읽고 확인 없이 �
   await openContact(view); press(view, '통화 결과 조회'); await view.settle();
   assert.match(textOf(view.tree), /저장된 응답이 없습니다/); assert.match(textOf(view.tree), /상대 응답 대기/);
   assert.equal(posts(mock.calls).length, 0); assert.equal(refreshed, 1);
+});
+
+test('완전한 상대방 통화 전사는 사용자가 직접 대안을 선택하고 재승인해야 반영된다', async t => {
+  const { ContactPanel } = await components;
+  const phone = { ...sent, channel: 'phone', recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const reviewed = { ...phone, negotiationStatus: 'needs_user_review' };
+  const response = { id: 'voice-1', contactRequestId: phone.id, providerEventId: 'voice-event', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'voice-evidence', displayText: 'AI: 이 시간이 괜찮으세요?\n상대: 네, 그 시간이 가능합니다.', reviewReason: 'voice_transcript_unverified' };
+  const mock = memoryApi([phone]);
+  mock.api.postHook = (path: string) => path.endsWith('/check-call') ? { contactRequest: reviewed, responses: [response], checkedCount: 1, unmatchedCount: 0, callStatus: 'completed', complete: true, truncated: false }
+    : path.endsWith('/confirm') ? { contactRequest: { ...phone, negotiationStatus: 'applied' }, response, scheduleRevision: 8, changed: true } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '통화 결과 확인'); await view.settle();
+  assert.match(textOf(view.tree), /자동 수락이 아닙니다/); assert.match(textOf(view.tree), /상대와 AI의 통화 전사/);
+  assert.equal(posts(mock.calls, '/check-call').length, 1); assert.equal(posts(mock.calls, '/confirm').length, 0);
+  press(view, '선택: option-1 · 제안 proposal-1');
+  assert.equal(posts(mock.calls, '/confirm').length, 0);
+  press(view, '통화 확인 후 선택한 대안 재승인'); await view.settle();
+  assert.equal(posts(mock.calls, '/confirm').length, 1);
+  assert.equal(posts(mock.calls, '/confirm')[0].body.selectedOptionId, 'option-1');
+  assert.equal(posts(mock.calls, '/call').length, 0);
+});
+
+test('미완료·잘림·무음 통화는 선택이나 재승인을 제공하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const phone = { ...sent, channel: 'phone', recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const reviewed = { ...phone, negotiationStatus: 'needs_user_review' };
+  const response = { id: 'voice-1', contactRequestId: phone.id, providerEventId: 'voice-event', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'voice-evidence', displayText: '상대: 네', reviewReason: 'voice_transcript_unverified' };
+  for (const item of [
+    { complete: false, truncated: false, text: '상대: 네' }, { complete: true, truncated: true, text: '상대: 네' },
+    { complete: undefined, truncated: false, text: '상대: 네' }, { complete: true, truncated: undefined, text: '상대: 네' },
+    { complete: true, truncated: false, text: '   ' }, { complete: true, truncated: false, text: 'AI: 네' },
+    { complete: true, truncated: false, text: '상대:  \nAI: 네' },
+  ]) {
+    const mock = memoryApi([phone]); mock.api.postHook = (path: string) => path.endsWith('/check-call')
+      ? { contactRequest: reviewed, responses: [{ ...response, displayText: item.text }], checkedCount: 1, unmatchedCount: 0, complete: item.complete, truncated: item.truncated } : undefined;
+    const view = harness.renderer(ContactPanel, directProps(mock.api));
+    await openContact(view); press(view, '통화 결과 확인'); await view.settle();
+    assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
+    assert.equal(posts(mock.calls, '/confirm').length, 0); assert.equal(posts(mock.calls, '/call').length, 0);
+    view.unmount();
+  }
+});
+
+test('통화 확인 결과 불명은 자동 반복이나 새 발신 없이 동일 요청만 명시 재시도한다', async t => {
+  const { ContactPanel, ApiError, operationGuard } = await components;
+  const phone = { ...sent, channel: 'phone', recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phone]);
+  mock.api.postHook = (path: string) => { if (path.endsWith('/check-call')) throw new ApiError('timeout', 'timeout', true); };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '통화 결과 확인'); await view.settle();
+  assert.equal(posts(mock.calls, '/check-call').length, 1); assert.equal(operationGuard.hasUnresolved(), true);
+  assert.match(textOf(view.tree), /응답이 없다는 뜻은 아닙니다/);
+  press(view, '동일 통화 확인 재시도'); await view.settle();
+  assert.deepEqual(posts(mock.calls, '/check-call')[1], posts(mock.calls, '/check-call')[0]);
+  assert.equal(posts(mock.calls, '/call').length, 0);
 });
 
 test('재승인 결과 불명 시 같은 응답과 옵션 및 멱등 키로만 재시도한다', async t => {

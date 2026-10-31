@@ -12,7 +12,7 @@ import { Text, TextInput } from '../ui/typography';
 import { createContactClient, matchesPhoneProvider } from './client';
 import { PhoneConnectionForm } from './PhoneConnectionPanel';
 import { proposalDraft } from './draft';
-import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, PhoneConnectionInput, PhoneProvider, RecipientInput } from './client';
+import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, PhoneConnectionInput, PhoneMode, PhoneProvider, RecipientInput } from './client';
 
 type Load<T> = { status: 'loading' } | { status: 'error' } | { status: 'success'; data: T };
 type Props = {
@@ -76,6 +76,10 @@ function validPhoneMessage(value: string): boolean {
       Array.from(value).some((char) => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff)) return false;
   const escaped = value.replace(/[&<>"'\r]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;', '\r': '&#13;' })[char]!);
   return `<Response><Say voice="Google.ko-KR-Standard-A" language="ko-KR">${escaped}</Say></Response>`.length <= 4000;
+}
+
+function hasCounterpartSpeech(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /(?:^|\n)상대:[^\S\r\n]*[^\s]/u.test(value);
 }
 
 function ContactDraft({ client, proposal, onSaved, onCancel }: {
@@ -170,6 +174,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   const setupNumber = useRef('');
   const setupRequestId = useRef('');
   const setupProvider = useRef<PhoneProvider>('clawops');
+  const setupMode = useRef<PhoneMode>('agent');
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; operationGuard.clear(setupOwner.current); }; }, []);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
@@ -181,6 +186,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   const [replyConnectionAttempt, setReplyConnectionAttempt] = useState(0);
   const [results, setResults] = useState<Load<ContactResponse[]> | null>(null);
   const [resultChoice, setResultChoice] = useState<{ responseId: string; optionId: string } | null>(null);
+  const [callReviewableIds, setCallReviewableIds] = useState<string[]>([]);
   const [requiresNewProposal, setRequiresNewProposal] = useState(false);
   const [resultsBusy, setResultsBusy] = useState(false);
   const lookupLock = useRef(false);
@@ -191,16 +197,21 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   const send = useMutation<ContactSendInput | ContactCallInput, ContactRequest>(async (op) => requireSameSubject(contact, await ('expectedSenderNumber' in op.input ? client.call({ ...op, input: op.input }) : client.send({ ...op, input: op.input }))), changed);
   const applyResults = (result: ContactResults) => {
     const latest = requireSameSubject(contact, result.contactRequest);
-    setResults({ status: 'success', data: result.responses }); setResultChoice(null); changed(latest); onScheduleChanged?.();
+    setResults({ status: 'success', data: result.responses }); setResultChoice(null); setCallReviewableIds([]); changed(latest); onScheduleChanged?.();
   };
   const checkReplies = useMutation<{ id: string; contactRevision: number }, Awaited<ReturnType<ContactClient['checkReplies']>>>(
     async (op) => { const result = await client.checkReplies(op); requireSameSubject(contact, result.contactRequest); return result; }, applyResults);
+  const checkCall = useMutation<{ id: string; contactRevision: number }, Awaited<ReturnType<ContactClient['checkCall']>>>(
+    async (op) => { const result = await client.checkCall(op); requireSameSubject(contact, result.contactRequest); return result; },
+    (result) => { applyResults(result); if (result.complete === true && result.truncated === false) setCallReviewableIds(result.responses.filter(response =>
+      response.outcome === 'unclear' && response.reviewReason === 'voice_transcript_unverified' && hasCounterpartSpeech(response.displayText)).map(response => response.id)); });
   const confirmResponse = useMutation<{ id: string; responseId: string; contactRevision: number; selectedOptionId: string }, Awaited<ReturnType<ContactClient['confirmResponse']>>>(
     async (op) => { const result = await client.confirmResponse(op); requireSameSubject(contact, result.contactRequest); return result; },
     (result) => { changed(result.contactRequest); setResultChoice(null); setResults(null); if (!result.changed) setRequiresNewProposal(true); onScheduleChanged?.(); });
   const locked = decision.state.status === 'pending' || decision.state.status === 'error' ||
     send.state.status === 'pending' || send.state.status === 'error' || lookupBusy || resultsBusy ||
     checkReplies.state.status === 'pending' || (checkReplies.state.status === 'error' && checkReplies.state.uncertain) ||
+    checkCall.state.status === 'pending' || (checkCall.state.status === 'error' && checkCall.state.uncertain) ||
     confirmResponse.state.status === 'pending' || (confirmResponse.state.status === 'error' && confirmResponse.state.uncertain) ||
     setup === 'pending' || setup === 'uncertain';
 
@@ -236,7 +247,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     (contact.channel === 'phone' ? client.phoneConnection() : client.emailConnection()).then((data) => { if (active) {
       setConnection({ status: 'success', data }); setSenderNeedsReview(false);
       if (setupLock.current && data.status === 'available' && 'senderNumber' in data && data.senderNumber === setupNumber.current &&
-          data.lastRequestId === setupRequestId.current && matchesPhoneProvider(data, setupProvider.current)) {
+          data.lastRequestId === setupRequestId.current && matchesPhoneProvider(data, setupProvider.current, setupMode.current)) {
         setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current); setSetup('idle');
       }
     } },
@@ -249,6 +260,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     setupLock.current = true;
     setupNumber.current = input.fromNumber;
     setupProvider.current = 'provider' in input ? input.provider : 'twilio';
+    setupMode.current = 'mode' in input && input.mode === 'agent' ? 'agent' : 'voiceml';
     setSetup('pending');
     operationGuard.update(setupOwner.current, { status: 'pending' });
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -256,7 +268,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     try {
       const data = await client.connectPhone({ input, requestId: setupRequestId.current, idempotencyKey: `operation-${id}` });
       if (!mounted.current) return;
-      if (data.status !== 'available' || data.senderNumber !== setupNumber.current || !matchesPhoneProvider(data, setupProvider.current)) throw new ApiError('invalid_response', '발신 번호를 확인할 수 없습니다.');
+      if (data.status !== 'available' || data.senderNumber !== setupNumber.current || !matchesPhoneProvider(data, setupProvider.current, setupMode.current)) throw new ApiError('invalid_response', '발신 번호를 확인할 수 없습니다.');
       setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current);
       setConnection({ status: 'success', data }); setSenderNeedsReview(false); setSetup('idle');
     } catch (error) {
@@ -278,7 +290,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       const latest = requireSameSubject(contact, await client.get(contact.id));
       if (version !== resultVersion.current) return;
       if (latest.negotiationStatus !== contact.negotiationStatus) onScheduleChanged?.();
-      const mutations = [decision.state, send.state, checkReplies.state, confirmResponse.state];
+      const mutations = [decision.state, send.state, checkReplies.state, checkCall.state, confirmResponse.state];
       if (latest.negotiationStatus === 'applied' && mutations.some(state => state.status === 'error') &&
           mutations.every(state => state.status !== 'pending') && setup !== 'pending' && setup !== 'uncertain') {
         resultVersion.current += 1;
@@ -354,7 +366,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       {connection.status === 'loading' && <Loading>발신 계정 설정을 확인하는 중입니다.</Loading>}
       {connection.status === 'error' && <ErrorNotice />}
       {connection.status === 'success' && (connection.data.status === 'available'
-        ? <Text style={styles.text}>{contact.channel === 'phone' ? '발신 번호' : '발신 계정'}: {'senderNumber' in connection.data ? connection.data.senderNumber : connection.data.senderAddress}{'senderNumber' in connection.data ? ` · 제공자: ${connection.data.provider === 'clawops' ? 'ClawOps' : 'Twilio'}` : ''}</Text>
+        ? <Text style={styles.text}>{contact.channel === 'phone' ? '발신 번호' : '발신 계정'}: {'senderNumber' in connection.data ? connection.data.senderNumber : connection.data.senderAddress}{'senderNumber' in connection.data ? ` · 제공자: ${connection.data.provider === 'clawops' ? `ClawOps · ${connection.data.mode === 'agent' ? '자연 음성 대화' : '키패드 방식'}` : 'Twilio'}` : ''}</Text>
         : <Text style={styles.notice}>{contact.channel === 'phone' ? '발신 전화번호가 설정되지 않았습니다.' : '발신 Gmail 계정이 설정되지 않았습니다. 개발 환경의 계정 연결 설정을 완료한 뒤 다시 확인해 주세요.'}</Text>)}
       {contact.channel === 'phone' && connection.status === 'success' && connection.data.status === 'not_configured' && setup !== 'uncertain' && <>
         <PhoneConnectionForm disabled={locked} onSubmit={(input) => void connectPhone(input)} />
@@ -402,6 +414,19 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
         {checkReplies.state.status === 'success' && <Text style={styles.text}>확인된 회신: {checkReplies.state.result.checkedCount}건</Text>}
         {checkReplies.state.status === 'success' && checkReplies.state.result.unmatchedCount > 0 && <Text style={styles.notice}>연관 여부를 판단할 수 없는 메일 {checkReplies.state.result.unmatchedCount}건이 있습니다. 메일함에서 별도로 확인해 주세요.</Text>}
       </>}
+      {!readOnly && contact.channel === 'phone' && <>
+        {(checkCall.state.status === 'idle' || checkCall.state.status === 'success') && <Button label="통화 결과 확인" disabled={locked} onPress={() => {
+          setCallReviewableIds([]); setResultChoice(null);
+          if (checkCall.state.status === 'success') checkCall.reset();
+          checkCall.submit({ id: contact.id, contactRevision: contact.revision });
+        }} />}
+        {checkCall.state.status === 'pending' && <Loading>통화 결과를 확인하는 중입니다.</Loading>}
+        {checkCall.state.status === 'error' && <><Text style={styles.error} accessibilityRole="alert">통화 결과를 확인하지 못했습니다. 응답이 없다는 뜻은 아닙니다.</Text>
+          {checkCall.state.uncertain && <Text style={styles.notice}>처리 결과가 불명확합니다. 동일한 요청으로 확인해 주세요.</Text>}
+          <Button label="동일 통화 확인 재시도" onPress={checkCall.retry} />
+          {!checkCall.state.uncertain && <Button label="통화 확인 오류 닫기" onPress={checkCall.reset} secondary />}</>}
+        {checkCall.state.status === 'success' && <Text style={styles.notice}>{checkCall.state.result.complete !== true ? '통화 또는 전사가 아직 확인되지 않았습니다.' : checkCall.state.result.truncated !== false ? '전사가 잘렸거나 완전성을 확인할 수 없어 재승인할 수 없습니다.' : '통화 전사는 자동 수락이 아닙니다. 상대방 발화를 직접 확인해 주세요.'}</Text>}
+      </>}
       <Button label={contact.channel === 'phone' ? '통화 결과 조회' : '저장된 응답 조회'} disabled={locked} onPress={lookupResponses} secondary />
       {results?.status === 'loading' && <Loading>저장된 응답을 불러오는 중입니다.</Loading>}
       {results?.status === 'error' && <Text style={styles.error} accessibilityRole="alert">저장된 응답을 조회하지 못했습니다.</Text>}
@@ -409,12 +434,13 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       {results?.status === 'success' && results.data.map((response) => <View style={styles.card} key={response.id}>
         <Text style={styles.text}>응답 {response.id} · {response.receivedAt}</Text>
         <Text style={styles.text}>상태: {response.outcome === 'unclear' ? readOnly ? '원문 판정 미확정' : '사용자 확인 필요' : response.outcome === 'accepted' ? '수락' : response.outcome === 'declined' ? '거절' : '대안 제시'}</Text>
-        {response.displayText?.trim() ? <><Text style={styles.notice}>회신 원문의 일부입니다. 메일 헤더만으로 상대의 신원은 확인되지 않습니다.</Text><Text style={styles.text}>{response.displayText}</Text></>
-          : <Text style={styles.muted}>확인할 수 있는 회신 본문이 없습니다.</Text>}
-        {!readOnly && !requiresNewProposal && contact.channel === 'email' && contact.negotiationStatus === 'needs_user_review' && response.outcome === 'unclear' && response.displayText?.trim() && response.reviewReason === 'sender_unverified' && <>
-          <Text style={styles.text}>회신을 직접 확인한 뒤 상대가 수락한 허용 대안을 선택해 주세요.</Text>
+        {response.displayText?.trim() ? <><Text style={styles.notice}>{contact.channel === 'phone' ? '상대와 AI의 통화 전사입니다. 상대방 발화와 수락 여부를 직접 확인해 주세요.' : '회신 원문의 일부입니다. 메일 헤더만으로 상대의 신원은 확인되지 않습니다.'}</Text><Text style={styles.text}>{response.displayText}</Text></>
+          : <Text style={styles.muted}>{contact.channel === 'phone' ? '확인할 수 있는 상대방 발화가 없습니다.' : '확인할 수 있는 회신 본문이 없습니다.'}</Text>}
+        {!readOnly && !requiresNewProposal && contact.negotiationStatus === 'needs_user_review' && response.outcome === 'unclear' && response.displayText?.trim() &&
+          ((contact.channel === 'email' && response.reviewReason === 'sender_unverified') || (contact.channel === 'phone' && response.reviewReason === 'voice_transcript_unverified' && callReviewableIds.includes(response.id))) && <>
+          <Text style={styles.text}>{contact.channel === 'phone' ? '상대방 발화를 직접 확인한 뒤 수락한 허용 대안을 선택해 주세요.' : '회신을 직접 확인한 뒤 상대가 수락한 허용 대안을 선택해 주세요.'}</Text>
           {contact.allowedOptions.map((option) => <Button key={option.optionId} label={`${resultChoice?.responseId === response.id && resultChoice.optionId === option.optionId ? '선택됨: ' : '선택: '}${option.optionId} · 제안 ${option.proposalId}`} disabled={locked} onPress={() => setResultChoice({ responseId: response.id, optionId: option.optionId })} secondary />)}
-          {resultChoice?.responseId === response.id && <Button label="회신 확인 후 선택한 대안 재승인" disabled={locked || confirmResponse.state.status !== 'idle'} onPress={() => confirmResponse.submit({ id: contact.id, responseId: response.id, contactRevision: contact.revision, selectedOptionId: resultChoice.optionId })} />}
+          {resultChoice?.responseId === response.id && <Button label={contact.channel === 'phone' ? '통화 확인 후 선택한 대안 재승인' : '회신 확인 후 선택한 대안 재승인'} disabled={locked || confirmResponse.state.status !== 'idle'} onPress={() => confirmResponse.submit({ id: contact.id, responseId: response.id, contactRevision: contact.revision, selectedOptionId: resultChoice.optionId })} />}
         </>}
       </View>)}
       {confirmResponse.state.status === 'pending' && <Loading>재승인과 현재 일정을 확인하는 중입니다.</Loading>}
@@ -428,7 +454,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
         {!confirmResponse.state.uncertain && <Button label="재승인 오류 닫기" onPress={confirmResponse.reset} secondary />}</>}
     </>}
     {lookupError && <Text style={styles.error} accessibilityRole="alert">연락 상태를 조회하지 못했습니다.</Text>}
-    <Button label="연락 상태 조회" onPress={lookup} disabled={lookupBusy || resultsBusy || checkReplies.state.status === 'pending' || confirmResponse.state.status === 'pending'} secondary />
+    <Button label="연락 상태 조회" onPress={lookup} disabled={lookupBusy || resultsBusy || checkReplies.state.status === 'pending' || checkCall.state.status === 'pending' || confirmResponse.state.status === 'pending'} secondary />
   </>;
 }
 

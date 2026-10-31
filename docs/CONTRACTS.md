@@ -196,15 +196,15 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 | `GET /v1/calendar/calendars` | 인증 | `{calendars: [{id, summary, timeZone?}]}` |
 | `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
 | `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
-| `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio}`; 비밀 반환 없음 |
-| `POST /v1/phone-connection` | ClawOps `{requestId, provider:"clawops", accountId, apiKey, signingSecret, fromNumber}` / 기존 Twilio `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
+| `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio, mode?: agent/voiceml}`; 비밀 반환 없음 |
+| `POST /v1/phone-connection` | 관리형 `{requestId, provider:"clawops", mode:"agent", accountId, apiKey, agentId, fromNumber}` / ClawOps VoiceML `{requestId, provider:"clawops", mode?:"voiceml", accountId, apiKey, signingSecret, fromNumber}` / 기존 Twilio `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
 | `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
 
 **Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
 
 가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
 
-**전화:** 신규 연결은 ClawOps를 기본으로 하며 계정 ID·API 키·별도 웹훅 서명키와 계정 소유 발신번호를 입력한다. 기존 Twilio의 Account SID/Auth Token 입력과 저장 파일은 보존한다. 번호는 앱·저장소에서 E.164를 유지하고 ClawOps 전송 시 한국 번호를 국내 형식으로 바꾼다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 읽기 전용 번호 조회이며 서명키의 실제 제공자 일치나 실통화 성공을 검증하지 않는다. 발신 승인이 아니며 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
+**전화:** 신규 ClawOps 연결의 기본은 관리형 음성이며 계정 ID·API 키·agent ID와 계정 소유 발신번호를 입력한다. 번호와 agent의 실존을 읽기 전용으로 확인하며 웹훅 서명키는 필요하지 않다. 기존 VoiceML 모드는 별도 서명키를 요구하고, Twilio Account SID/Auth Token 입력과 저장 파일은 보존한다. 번호는 앱·저장소에서 E.164를 유지하고 ClawOps 전송 시 한국 번호를 국내 형식으로 바꾼다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 실통화 성공이나 서명키 일치 검증, 발신 승인이 아니다. 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
 
 전화 설정 POST는 기존 사용자별 PG 잠금 안에서 제공자 번호 조회(15초 timeout)와 파일 저장을 순서대로 처리한다. 같은 사용자의 다른 쓰기는 그동안 기다릴 수 있으며 다른 사용자와는 분리된다. 다중 인스턴스는 같은 DB와 자격 저장 위치를 전제로 한다. 잠금은 활성 DB 트랜잭션 동안의 순서 제어이며 파일 저장과 DB commit이 원자적이라는 뜻은 아니다. 원자 파일에 저장된 `lastRequestId`와 발신번호가 둘 다 요청과 일치할 때만 클라이언트가 응답 유실을 해소한다. 번호만 같은 이전 연결을 새 설정 성공으로 간주하지 않는다.
 
@@ -223,13 +223,20 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 | `GET /v1/email-reply-connection` | 인증 | 회신 읽기 연결 상태·발신 계정. 발송 동의만으로 available이 되지 않음 |
 | `GET /v1/contact-requests/:id/responses` | 인증 | `{contactRequest, responses}`; 해당 사용자 연락의 서버 저장 회신만 |
 | `POST /v1/contact-requests/:id/check-replies` | `{requestId, contactRevision}` + Idempotency-Key | `{contactRequest, responses, checkedCount, unmatchedCount}`; Gmail 조회 뒤 검증한 후보 저장 |
+| `POST /v1/contact-requests/:id/check-call` | `{requestId, contactRevision}` + Idempotency-Key | `{contactRequest, responses, checkedCount, unmatchedCount, callStatus, complete, truncated}`; 관리형 통화·전사 조회 및 검토 후보 저장 |
 | `POST /v1/contact-requests/:id/responses/:responseId/confirm` | `{requestId, contactRevision, selectedOptionId}` + Idempotency-Key | `{contactRequest, response, scheduleRevision, changed}`; 저장된 최신 회신을 직접 확인하고 허용 대안을 선택한 사용자 승인 |
 
 `ContactResponse`에 `displayText: string/null`, `reviewReason: string/null`을 추가한다. displayText는 서버가 인용·서명 등을 제거한 최대 2,000자의 답변 발췌이며 원본 전체나 상대 신원 인증이 아니다. 자동응답·본문 없음·연관 불명은 수락 증거로 사용할 수 없다. 공개 요청으로 providerEventId, accepted 또는 발췌를 생성/수정하는 API는 제공하지 않는다.
 
 Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성, 전송 메시지 ID·스레드·원본 헤더·이후 회신의 참조 관계를 확인한다. 헤더 일치만으로 실제 상대의 신원을 단정하지 않으므로 이메일 이벤트는 항상 `unclear`이고 `needs_user_review`로 남긴다. 사용자 확인은 실제 저장된 최신 발췌와 `sender_unverified` 후보에만 가능하다. 자동 메일이나 공백 발췌, 이미 확인한 응답, 다른 연락/사용자 응답은 확인 대상이 아니다. 정기 자동 메일 조회는 없으며 회신 확인 버튼으로 조회한다.
 
-전화는 공개 HTTPS 웹훅·서명 검증·계정/통화/번호 결합·영속 세션을 통해 서버가 관찰한 응답만 받는다. 음성 모델은 승인된 옵션의 잠정 선택을 해석하며, 선택 내용을 다시 안내한 뒤 명시적 번호 확인을 받아야 accepted가 된다. 모델 timeout·불분명·승인 밖 대안은 일정 변경 권한이 아니다. 콜백 단계와 식별자를 중복 처리하지 않으며 서버 재시작 뒤 저장된 세션/응답을 재사용한다.
+기존 VoiceML/Twilio 전화는 공개 HTTPS 웹훅·서명 검증·계정/통화/번호 결합·영속 세션을 통해 서버가 관찰한 응답만 받는다. 음성 모델은 승인된 옵션의 잠정 선택을 해석하며, 선택 내용을 다시 안내한 뒤 명시적 번호 확인을 받아야 accepted가 된다. 모델 timeout·불분명·승인 밖 대안은 일정 변경 권한이 아니다. 콜백 단계와 식별자를 중복 처리하지 않으며 서버 재시작 뒤 저장된 세션/응답을 재사용한다.
+
+**관리형 음성:** 발신 직전 기존 `voiceSessions`의 namespaced 실행 키에 연락·계정·agent·발신번호·모드만 결합한다. 비밀키는 이 상태에 저장하지 않는다. `check-call`은 인증된 사용자의 서버 저장 통화 ID만 사용하고 원래 binding·계정·발신/수신 번호·방향·생성시각을 제공자와 대조한다. 외부 GET은 DB 잠금 밖에서 수행하고 저장 시 연락/자격/binding을 재검증한다. 전사 목록은 최대 100건×4페이지, partial/DTMF는 제외한다. `complete`는 통화 completed·정상 stream 종료·전체 페이지·상대 발화·유효한 전체 전사를 모두 확인한 때만 true다. `상대:`/`AI:` 라벨을 포함한 전체 전사가 2,000자를 넘거나 잘림·미완료·무음이면 검토 응답을 만들지 않는다.
+
+완전한 관리형 전사도 `outcome:"unclear", reviewReason:"voice_transcript_unverified"`로 서버에 한 번만 저장한다. 사용자에게 수락 여부·대안을 직접 확인받고 동일한 `/responses/:responseId/confirm`으로 재승인한다. Gmail의 `sender_unverified` 조건은 그대로 유지하며 전화라는 이유만으로 일반 확인을 허용하지 않는다. 사용자/연락/최신 응답/허용 옵션/불변 승인과 현재 일정 검증은 공통이다. 같은 멱등 키의 조회는 같은 결과를 재사용하며 새 상태 확인은 새 사용자 요청으로 한다. 자동 발신·자동 polling·전사 기반 자동 수락은 없다.
+
+관리형 통화가 접수되면 서버 종료 감시가 시작된다. 종료 감시는 회신 조회/승인과 별개이며 전사 저장이나 일정 변경을 하지 않는다. 본인 연락의 실행 binding과 계정·번호·통화 ID를 확인한 뒤 명확한 상대 종료 발화 또는 시간 한도에서 공식 `POST /calls/{callId}`의 `{Status:"completed"}`를 한 번 시도한다. 부정/인용/AI 발화는 종료 명령이 아니다. 프로세스 로컬 감시·종료 시도 기억은 재시작/다중 인스턴스를 가로지르지 않으며, 제공자 검증 불가·자격 변경 시 fail closed다. 기존 문단의 자동 polling 없음은 사용자 검토용 전사 저장 조회에 관한 것으로, 이 종료 전용 감시에는 해당하지 않는다.
 
 전화 대안은 1~9개이며 시각은 분 단위로 정확히 표현할 수 있어야 한다. 시작/종료의 시간대 이름과 그 순간의 UTC 시차를 함께 안내하여 DST 반복 시각도 구분한다. 초 또는 비0 소수초가 있거나 낭독 문구가 중복되는 대안은 발신 전 거절하며, 이미 접수된 통화에서도 재검증 후 검토 상태로 남긴다. 일반 일정/이메일의 시간 정밀도를 낮추거나 자동 반올림하는 변경은 아니다.
 

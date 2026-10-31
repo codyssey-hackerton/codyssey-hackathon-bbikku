@@ -104,11 +104,13 @@ export class ContactResponseService {
       }
       const superseded = [...state.contactResponses.values()].some(other => other.response.id !== stored.response.id &&
         other.response.contactRequestId === contactId && compareInstants(other.response.receivedAt, stored.response.receivedAt) >= 0);
-      if (contact.negotiationStatus !== 'needs_user_review' || stored.event.channel !== 'email' || stored.response.outcome !== 'unclear' ||
+      const reviewable = (stored.event.channel === 'email' && stored.response.reviewReason === 'sender_unverified') ||
+        (stored.event.channel === 'phone' && stored.response.reviewReason === 'voice_transcript_unverified');
+      if (contact.negotiationStatus !== 'needs_user_review' || !reviewable || stored.response.outcome !== 'unclear' ||
           superseded || contact.deliveryStatus !== 'sent_or_connected' || contact.channel !== stored.event.channel ||
           contact.providerOperationId !== stored.event.providerOperationId || contact.recipientSnapshot.address !== stored.event.recipientAddress ||
           stored.response.displayText !== (stored.event.displayText ?? null) || stored.response.reviewReason !== (stored.event.reviewReason ?? null) ||
-          stored.response.reviewReason !== 'sender_unverified' || !stored.response.displayText?.trim() ||
+          !stored.response.displayText?.trim() ||
           !contact.allowedOptions.some(option => option.optionId === input.selectedOptionId)) {
         throw new PlanningError(409, 'conflict', '회신 또는 허용된 대안을 다시 확인해 주세요.');
       }

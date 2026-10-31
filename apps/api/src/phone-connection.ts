@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { PlanningError } from './planning-service.ts';
 
 export type PhoneCredential = { provider?: 'twilio'; accountSid: string; authToken: string; fromNumber: string } |
-  { provider: 'clawops'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string };
+  { provider: 'clawops'; mode?: 'voiceml'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string } |
+  { provider: 'clawops'; mode: 'agent'; accountId: string; apiKey: string; agentId: string; fromNumber: string };
 export const validPhoneNumber = (value: string) => /^\+[1-9]\d{1,14}$/.test(value);
 export function normalizePhoneNumber(value: string): string | null {
   if (validPhoneNumber(value)) return value;
@@ -16,9 +17,10 @@ export function normalizePhoneNumber(value: string): string | null {
   return null;
 }
 const validCredential = (value: PhoneCredential) => value?.provider === 'clawops'
-  ? typeof value.accountId === 'string' && typeof value.apiKey === 'string' && typeof value.signingSecret === 'string' &&
+  ? typeof value.accountId === 'string' && typeof value.apiKey === 'string' &&
     /^[a-z0-9_-]{1,128}$/i.test(value.accountId) && /^[\x21-\x7e]{1,1024}$/.test(value.apiKey) &&
-    /^[\x21-\x7e]{1,1024}$/.test(value.signingSecret) && validPhoneNumber(value.fromNumber) &&
+    (value.mode === 'agent' ? typeof value.agentId === 'string' && /^[a-z0-9_-]{1,128}$/i.test(value.agentId) :
+      (value.mode === undefined || value.mode === 'voiceml') && typeof value.signingSecret === 'string' && /^[\x21-\x7e]{1,1024}$/.test(value.signingSecret)) && validPhoneNumber(value.fromNumber) &&
     (!value.fromNumber.startsWith('+82') || /^\+82[1-9]/.test(value.fromNumber))
   : (value?.provider === undefined || value.provider === 'twilio') && typeof value.accountSid === 'string' && typeof value.authToken === 'string' &&
     /^AC[0-9a-f]{32}$/i.test(value.accountSid) && /^[a-z0-9]{32}$/i.test(value.authToken) && validPhoneNumber(value.fromNumber);
@@ -54,35 +56,34 @@ export class PhoneConnections {
       const value = JSON.parse(await handle.readFile('utf8')) as PhoneCredential & { lastRequestId?: unknown };
       if (!value || typeof value.fromNumber !== 'string' || !validCredential(value) ||
           (value.lastRequestId !== undefined && value.lastRequestId !== null && !validRequestId(value.lastRequestId))) throw unavailable();
-      const credential: PhoneCredential = value.provider === 'clawops'
-        ? { provider: 'clawops', accountId: value.accountId, apiKey: value.apiKey, signingSecret: value.signingSecret, fromNumber: value.fromNumber }
-        : { accountSid: value.accountSid, authToken: value.authToken, fromNumber: value.fromNumber };
+      const credential = this.copyCredential(value);
       return { ...credential, lastRequestId: value.lastRequestId ?? null };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
       throw unavailable();
     } finally { await handle?.close(); }
   }
+  private copyCredential(value: PhoneCredential): PhoneCredential {
+    if (value.provider !== 'clawops') return { accountSid: value.accountSid, authToken: value.authToken, fromNumber: value.fromNumber };
+    if (value.mode === 'agent') return { provider: 'clawops', mode: 'agent', accountId: value.accountId, apiKey: value.apiKey, agentId: value.agentId, fromNumber: value.fromNumber };
+    return { provider: 'clawops', ...(value.mode ? { mode: value.mode } : {}), accountId: value.accountId, apiKey: value.apiKey, signingSecret: value.signingSecret, fromNumber: value.fromNumber };
+  }
   async read(userId: string): Promise<PhoneCredential | undefined> {
     const saved = await this.readSaved(userId);
     if (!saved) return undefined;
-    return saved.provider === 'clawops'
-      ? { provider: 'clawops', accountId: saved.accountId, apiKey: saved.apiKey, signingSecret: saved.signingSecret, fromNumber: saved.fromNumber }
-      : { accountSid: saved.accountSid, authToken: saved.authToken, fromNumber: saved.fromNumber };
+    return this.copyCredential(saved);
   }
-  async status(userId: string): Promise<{ status: 'available' | 'not_configured'; senderNumber: string | null; lastRequestId: string | null; provider?: 'clawops' }> {
+  async status(userId: string): Promise<{ status: 'available' | 'not_configured'; senderNumber: string | null; lastRequestId: string | null; provider?: 'clawops'; mode?: 'agent' | 'voiceml' }> {
     try {
       const saved = await this.readSaved(userId);
       return saved ? { status: 'available', senderNumber: saved.fromNumber, lastRequestId: saved.lastRequestId,
-        ...(saved.provider === 'clawops' ? { provider: 'clawops' as const } : {}) }
+        ...(saved.provider === 'clawops' ? { provider: 'clawops' as const, ...(saved.mode ? { mode: saved.mode } : {}) } : {}) }
         : { status: 'not_configured', senderNumber: null, lastRequestId: null };
     } catch { return { status: 'not_configured', senderNumber: null, lastRequestId: null }; }
   }
   async connect(userId: string, credential: PhoneCredential, requestId?: string) {
     if (!credential || typeof credential.fromNumber !== 'string' || !validCredential(credential) || (requestId !== undefined && !validRequestId(requestId))) throw invalid();
-    credential = credential.provider === 'clawops'
-      ? { provider: 'clawops', accountId: credential.accountId, apiKey: credential.apiKey, signingSecret: credential.signingSecret, fromNumber: credential.fromNumber }
-      : { accountSid: credential.accountSid, authToken: credential.authToken, fromNumber: credential.fromNumber };
+    credential = this.copyCredential(credential);
     const path = await this.path(userId);
     try {
       const query = new URLSearchParams({ PhoneNumber: credential.fromNumber, PageSize: '20' });
@@ -98,6 +99,11 @@ export class PhoneConnections {
       if (!Array.isArray(numbers) || !numbers.some(number => credential.provider === 'clawops'
         ? typeof number?.number === 'string' && normalizePhoneNumber(number.number) === credential.fromNumber
         : number?.phone_number === credential.fromNumber && number?.capabilities?.voice === true)) throw invalid();
+      if (credential.provider === 'clawops' && credential.mode === 'agent') {
+        const agent = await this.fetcher(`https://api.claw-ops.com/v1/accounts/${encodeURIComponent(credential.accountId)}/agents/${encodeURIComponent(credential.agentId)}`, {
+          headers: { Authorization: `Bearer ${credential.apiKey}` }, redirect: 'error', signal: AbortSignal.timeout(15_000) });
+        if (!agent.ok || (await agent.json() as { agentId?: unknown })?.agentId !== credential.agentId) throw invalid();
+      }
     } catch (error) { if (error instanceof PlanningError) throw error; throw new PlanningError(503, 'provider_unavailable', '전화 계정을 확인할 수 없습니다.'); }
     const temporary = `${path}.${randomUUID()}.tmp`;
     let handle;
@@ -110,6 +116,6 @@ export class PhoneConnections {
     } catch { throw unavailable(); }
     finally { await handle?.close(); await unlink(temporary).catch(() => {}); }
     return { status: 'available' as const, senderNumber: credential.fromNumber, lastRequestId: requestId ?? null,
-      ...(credential.provider === 'clawops' ? { provider: 'clawops' as const } : {}) };
+      ...(credential.provider === 'clawops' ? { provider: 'clawops' as const, ...(credential.mode ? { mode: credential.mode } : {}) } : {}) };
   }
 }

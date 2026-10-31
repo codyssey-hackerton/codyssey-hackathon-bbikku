@@ -6,7 +6,7 @@ import { operationGuard } from '../api/operationGuard';
 import { ActionButton } from '../ui/ActionButton';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
-import { createContactClient, matchesPhoneProvider, type PhoneConnection, type PhoneConnectionInput, type PhoneProvider } from './client';
+import { createContactClient, matchesPhoneProvider, type PhoneConnection, type PhoneConnectionInput, type PhoneMode, type PhoneProvider } from './client';
 
 type Props = { api: ApiClient; onBack: () => void };
 type Load = { status: 'loading' } | { status: 'error'; message: string } | { status: 'success'; data: PhoneConnection };
@@ -15,6 +15,7 @@ type PhoneReceipt = PhoneConnection & { lastRequestId?: string | null };
 
 export function PhoneConnectionForm({ disabled, onSubmit }: { disabled: boolean; onSubmit: (input: PhoneConnectionInput) => void }) {
   const [provider, setProvider] = useState<PhoneProvider>('clawops');
+  const [mode, setMode] = useState<PhoneMode>('agent');
   const [account, setAccount] = useState('');
   const [secret, setSecret] = useState('');
   const [signingSecret, setSigningSecret] = useState('');
@@ -28,19 +29,27 @@ export function PhoneConnectionForm({ disabled, onSubmit }: { disabled: boolean;
       onPress={() => { clear(); setProvider(item); }} style={styles.choice}>
       <Text style={styles.text}>{provider === item ? '●' : '○'} {item === 'clawops' ? 'ClawOps' : 'Twilio'}</Text>
     </Pressable>)}
-    {provider === 'clawops' && <Text style={styles.text}>ClawOps 계정 ID, API 키, 서명 비밀과 발신 번호가 모두 필요합니다. 전화에서는 안내 후 키패드 선택과 재확인으로 응답을 받습니다.</Text>}
+    {provider === 'clawops' && <>
+      {(['agent', 'voiceml'] as const).map(item => <Pressable key={item} accessibilityRole="radio" accessibilityLabel={item === 'agent' ? '자연 음성 대화 선택' : '키패드 방식 선택'}
+        accessibilityState={{ checked: mode === item, disabled }} aria-checked={mode === item} disabled={disabled}
+        onPress={() => { clear(); setMode(item); }} style={styles.choice}>
+        <Text style={styles.text}>{mode === item ? '●' : '○'} {item === 'agent' ? '자연 음성 대화' : '키패드 방식'}</Text>
+      </Pressable>)}
+      <Text style={styles.text}>{mode === 'agent' ? '한국어 음성 대화로 통화합니다. 통화 결과를 확인한 뒤 사용자가 직접 검토해야 일정에 반영됩니다.' : '서명 비밀이 필요합니다. 안내 후 키패드 선택과 재확인으로 응답을 받습니다.'}</Text>
+    </>}
     <Text style={styles.label}>{provider === 'clawops' ? 'ClawOps 계정 ID' : '계정 SID'}</Text>
     <TextInput accessibilityLabel={provider === 'clawops' ? 'ClawOps 계정 ID' : '전화 계정 SID'} value={account} onChangeText={setAccount} editable={!disabled} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} />
     <Text style={styles.label}>{provider === 'clawops' ? 'ClawOps API 키' : '인증 토큰'}</Text>
     <TextInput accessibilityLabel={provider === 'clawops' ? 'ClawOps API 키' : '전화 인증 토큰'} value={secret} onChangeText={setSecret} editable={!disabled} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} />
-    {provider === 'clawops' && <><Text style={styles.label}>ClawOps 서명 비밀</Text>
-      <TextInput accessibilityLabel="ClawOps 서명 비밀" value={signingSecret} onChangeText={setSigningSecret} editable={!disabled} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} /></>}
+    {provider === 'clawops' && <><Text style={styles.label}>{mode === 'agent' ? '음성 에이전트 ID' : 'ClawOps 서명 비밀'}</Text>
+      <TextInput accessibilityLabel={mode === 'agent' ? 'ClawOps 에이전트 ID' : 'ClawOps 서명 비밀'} value={signingSecret} onChangeText={setSigningSecret} editable={!disabled} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" style={styles.input} /></>}
     <Text style={styles.label}>발신 번호 (E.164)</Text>
     <TextInput accessibilityLabel="발신 전화번호" value={fromNumber} onChangeText={setFromNumber} editable={!disabled} keyboardType="phone-pad" style={styles.input} />
     <ActionButton label="전화 연결 설정" disabled={disabled || !valid} onPress={() => {
       if (!valid || disabled) return;
       const input: PhoneConnectionInput = provider === 'clawops'
-        ? { provider, accountId: account.trim(), apiKey: secret.trim(), signingSecret: signingSecret.trim(), fromNumber: fromNumber.trim() }
+        ? mode === 'agent' ? { provider, mode, accountId: account.trim(), apiKey: secret.trim(), agentId: signingSecret.trim(), fromNumber: fromNumber.trim() }
+          : { provider, accountId: account.trim(), apiKey: secret.trim(), signingSecret: signingSecret.trim(), fromNumber: fromNumber.trim() }
         : { accountSid: account.trim(), authToken: secret.trim(), fromNumber: fromNumber.trim() };
       clear(); onSubmit(input);
     }} />
@@ -62,7 +71,7 @@ export default function PhoneConnectionPanel({ api, onBack }: Props) {
   const active = useRef(true);
   const busy = useRef(false);
   const reading = useRef(false);
-  const expected = useRef<{ number: string; requestId: string; provider: PhoneProvider } | null>(null);
+  const expected = useRef<{ number: string; requestId: string; provider: PhoneProvider; mode: PhoneMode } | null>(null);
 
   async function refresh() {
     if (reading.current || (busy.current && setup !== 'uncertain')) return;
@@ -72,7 +81,7 @@ export default function PhoneConnectionPanel({ api, onBack }: Props) {
       const data: PhoneReceipt = await client.phoneConnection();
       if (!active.current) return;
       setConnection({ status: 'success', data });
-      if (expected.current && data.status === 'available' && data.senderNumber === expected.current.number && data.lastRequestId === expected.current.requestId && matchesPhoneProvider(data, expected.current.provider)) {
+      if (expected.current && data.status === 'available' && data.senderNumber === expected.current.number && data.lastRequestId === expected.current.requestId && matchesPhoneProvider(data, expected.current.provider, expected.current.mode)) {
         expected.current = null; busy.current = false; operationGuard.clear(owner.current);
         setSetup('idle'); setMessage('전화 연결을 확인했습니다.');
       }
@@ -95,10 +104,11 @@ export default function PhoneConnectionPanel({ api, onBack }: Props) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const requestId = `request-${id}`;
     const provider = 'provider' in input ? input.provider : 'twilio';
-    expected.current = { number: input.fromNumber, requestId, provider };
+    const mode = 'mode' in input && input.mode === 'agent' ? 'agent' : 'voiceml';
+    expected.current = { number: input.fromNumber, requestId, provider, mode };
     try {
       const result: PhoneReceipt = await client.connectPhone({ input, requestId, idempotencyKey: `operation-${id}` });
-      if (result.status !== 'available' || result.senderNumber !== input.fromNumber || !matchesPhoneProvider(result, provider) ||
+      if (result.status !== 'available' || result.senderNumber !== input.fromNumber || !matchesPhoneProvider(result, provider, mode) ||
           (result.lastRequestId !== undefined && result.lastRequestId !== requestId)) throw new ApiError('invalid_response', '');
       expected.current = null; busy.current = false; operationGuard.clear(owner.current);
       if (active.current) { setConnection({ status: 'success', data: result }); setSetup('idle'); setMessage('전화 연결을 확인했습니다.'); }
@@ -123,7 +133,7 @@ export default function PhoneConnectionPanel({ api, onBack }: Props) {
     {connection.status === 'loading' && <View accessibilityLiveRegion="polite" style={styles.row}><ActivityIndicator size="small" /><Text style={styles.text}>연결 상태를 확인하는 중입니다.</Text></View>}
     {connection.status === 'error' && <Text accessibilityRole="alert" style={styles.error}>{connection.message}</Text>}
     {connection.status === 'success' && <Text style={styles.text}>{expected.current ? '전화 연결 결과를 다시 확인해 주세요.' : connection.data.status === 'available'
-      ? `연결됨 · 발신 번호: ${connection.data.senderNumber} · 제공자: ${connection.data.provider === 'clawops' ? 'ClawOps' : 'Twilio'}` : '전화 연결이 설정되지 않았습니다.'}</Text>}
+      ? `연결됨 · 발신 번호: ${connection.data.senderNumber} · 제공자: ${connection.data.provider === 'clawops' ? `ClawOps · ${connection.data.mode === 'agent' ? '자연 음성 대화' : '키패드 방식'}` : 'Twilio'}` : '전화 연결이 설정되지 않았습니다.'}</Text>}
     <ActionButton label="전화 연결 상태 확인" onPress={() => void refresh()} disabled={setup === 'pending' || connection.status === 'loading'} secondary />
     <PhoneConnectionForm disabled={locked || connection.status !== 'success'} onSubmit={(input) => void connect(input)} />
     {setup === 'pending' && <Text accessibilityLiveRegion="polite" style={styles.text}>전화 연결을 설정하는 중입니다.</Text>}

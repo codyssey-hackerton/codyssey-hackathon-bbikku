@@ -252,3 +252,24 @@ test('ClawOps connection sends its own credential shape and requires the matchin
   await assert.rejects(createContactClient(stub({ status: 'available', provider: 'clawops', senderNumber: input.fromNumber }))
     .connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: input.fromNumber })), isInvalidResponse);
 });
+
+test('managed connection requires agent mode and its own matching receipt', async () => {
+  const input = { provider: 'clawops' as const, mode: 'agent' as const, accountId: 'account', apiKey: 'key', agentId: 'agent', fromNumber: '+15550000001' };
+  const response = { status: 'available', provider: 'clawops', mode: 'agent', senderNumber: input.fromNumber, lastRequestId: 'request-1' };
+  assert.deepEqual(await createContactClient(stub(response)).connectPhone(op(input)), response);
+  for (const invalid of [{ ...response, mode: undefined }, { ...response, mode: 'voiceml' }, { ...response, lastRequestId: undefined }]) {
+    await assert.rejects(createContactClient(stub(invalid)).connectPhone(op(input)), isInvalidResponse);
+  }
+});
+
+test('call check sends a scoped idempotent request and validates review metadata', async () => {
+  const phone = { ...sent, channel: 'phone' as const, recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone' as const, address: '+821012345678' } };
+  const calls: any[] = [];
+  const response = { contactRequest: phone, responses: [], checkedCount: 0, unmatchedCount: 0, callStatus: 'completed', complete: true, truncated: false };
+  const api: ApiClient = { get: async <T>() => ({} as T), post: async <T>(path, body, options) => { calls.push({ path, body, options }); return response as T; } };
+  assert.deepEqual(await createContactClient(api).checkCall(op({ id: contactId, contactRevision: 1 })), response);
+  assert.deepEqual(calls[0], { path: '/v1/contact-requests/contact%20%2F%3F1/check-call', body: { requestId: 'request-1', contactRevision: 1 }, options: { idempotencyKey: 'operation-1', timeoutMs: 60_000 } });
+  for (const invalid of [{ ...response, complete: 'true' }, { ...response, truncated: 0 }, { ...response, contactRequest: sent }]) {
+    await assert.rejects(createContactClient(stub(invalid)).checkCall(op({ id: contactId, contactRevision: 1 })), isInvalidResponse);
+  }
+});

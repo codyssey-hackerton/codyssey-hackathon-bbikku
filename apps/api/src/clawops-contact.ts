@@ -4,6 +4,30 @@ const e164 = /^\+[1-9][0-9]{1,14}$/;
 const domestic = (number: string) => number.startsWith('+82') ? `0${number.slice(3)}` : number;
 const failed: TwilioContactResult = { status: 'failed', providerOperationId: null };
 const unknown: TwilioContactResult = { status: 'outcome_unknown', providerOperationId: null };
+export type ClawOpsCallContext = { instruction: string; variables?: Record<string, string | number | boolean> };
+export type ClawOpsContactOptions = { accountId: string; apiKey: string; fromNumber: string; fetch: typeof fetch } & (
+  | { voiceUrl: string; agentId?: never; callContext?: never }
+  | { agentId: string; callContext: ClawOpsCallContext; voiceUrl?: never }
+);
+
+function managedContext(context: ClawOpsCallContext): { Instruction: string; Variables?: Record<string, string | number | boolean> } | null {
+  if (!context || typeof context !== 'object' || typeof context.instruction !== 'string' || !context.instruction.trim() ||
+      Buffer.byteLength(context.instruction, 'utf8') > 16_384 ||
+      Buffer.from(context.instruction, 'utf8').toString('utf8') !== context.instruction ||
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/u.test(context.instruction)) return null;
+  if (context.variables === undefined) return { Instruction: context.instruction };
+  const vars = context.variables;
+  if (!vars || typeof vars !== 'object' || Array.isArray(vars) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(vars)) || Object.keys(vars).length > 50) return null;
+  const entries = Object.entries(vars);
+  if (entries.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) ||
+    !(['string', 'number', 'boolean'].includes(typeof value)) ||
+    (typeof value === 'number' && !Number.isFinite(value)) ||
+    (typeof value === 'string' && Buffer.from(value, 'utf8').toString('utf8') !== value))) return null;
+  const variables = Object.fromEntries(entries);
+  if (Buffer.byteLength(JSON.stringify(variables), 'utf8') > 8192) return null;
+  return { Instruction: context.instruction, Variables: variables };
+}
 
 async function readCallId(response: Response): Promise<string | null> {
   if (!response.body) return null;
@@ -25,8 +49,8 @@ async function readCallId(response: Response): Promise<string | null> {
   } finally { reader.releaseLock(); }
 }
 
-export function createClawOpsContact(options: { accountId: string; apiKey: string; fromNumber: string; fetch: typeof fetch; voiceUrl: string }) {
-  const { accountId, apiKey, fromNumber, fetch: send, voiceUrl } = options;
+export function createClawOpsContact(options: ClawOpsContactOptions) {
+  const { accountId, apiKey, fromNumber, fetch: send, voiceUrl, agentId, callContext } = options;
   return {
     async dispatch(input: ApprovedTwilioContact, signal?: AbortSignal, beforeSend?: () => Promise<void>): Promise<TwilioContactResult> {
       if (!input || typeof input.recipient !== 'string' || !e164.test(input.recipient) ||
@@ -37,14 +61,24 @@ export function createClawOpsContact(options: { accountId: string; apiKey: strin
           typeof accountId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId) ||
           typeof apiKey !== 'string' || apiKey.length > 4096 || !/^[\x21-\x7e]+$/.test(apiKey) ||
           typeof fromNumber !== 'string' || !e164.test(fromNumber) ||
-          (fromNumber.startsWith('+82') && !/^\+82[1-9]/.test(fromNumber)) || typeof send !== 'function' ||
-          typeof voiceUrl !== 'string' || voiceUrl.length > 2048 || !/^https:\/\/[^/?#]+/i.test(voiceUrl) ||
-          /[\s\\#]|%(?![0-9a-f]{2})/i.test(voiceUrl)) return failed;
-      try {
-        const url = new URL(voiceUrl);
-        if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return failed;
-      } catch { return failed; }
-      const body = JSON.stringify({ To: domestic(input.recipient), From: domestic(fromNumber), Url: voiceUrl, Timeout: 30 });
+          (fromNumber.startsWith('+82') && !/^\+82[1-9]/.test(fromNumber)) || typeof send !== 'function') return failed;
+      let target: { Url: string } | { AgentId: string; CallContext: NonNullable<ReturnType<typeof managedContext>> };
+      if (voiceUrl !== undefined) {
+        if (agentId !== undefined || callContext !== undefined || typeof voiceUrl !== 'string' || voiceUrl.length > 2048 ||
+            !/^https:\/\/[^/?#]+/i.test(voiceUrl) || /[\s\\#]|%(?![0-9a-f]{2})/i.test(voiceUrl)) return failed;
+        try {
+          const url = new URL(voiceUrl);
+          if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return failed;
+        } catch { return failed; }
+        target = { Url: voiceUrl };
+      } else {
+        if (typeof agentId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(agentId) || !callContext) return failed;
+        let context: ReturnType<typeof managedContext>;
+        try { context = managedContext(callContext); } catch { return failed; }
+        if (!context) return failed;
+        target = { AgentId: agentId, CallContext: context };
+      }
+      const body = JSON.stringify({ To: domestic(input.recipient), From: domestic(fromNumber), ...target, Timeout: 30 });
       try {
         signal?.throwIfAborted();
         await beforeSend?.();

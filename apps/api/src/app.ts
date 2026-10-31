@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
@@ -21,7 +21,9 @@ import type { createKakaoTravel } from './kakao-travel.ts';
 import type { createOpenMeteo } from './open-meteo.ts';
 import type { createSeoulSubway } from './seoul-subway.ts';
 import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
-import { PhoneDispatch } from './phone-dispatch.ts';
+import { managedCallBindingKey, PhoneDispatch } from './phone-dispatch.ts';
+import { createClawOpsReplies } from './clawops-replies.ts';
+import { createManagedCallWatch } from './clawops-call-watch.ts';
 import { VoiceTokens } from './voice-token.ts';
 import { VoiceWebhook } from './voice-webhook.ts';
 import type { VoiceClassifier } from './voice-model.ts';
@@ -74,7 +76,9 @@ const phoneNumber = z.string().refine(validPhoneNumber);
 const phoneConnectBody = z.union([
   z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict(),
   z.object({ requestId: identifier, provider: z.literal('clawops'), accountId: identifier,
-    apiKey: z.string().min(1).max(1024), signingSecret: z.string().min(1).max(1024), fromNumber: phoneNumber }).strict(),
+    mode: z.literal('voiceml').optional(), apiKey: z.string().min(1).max(1024), signingSecret: z.string().min(1).max(1024), fromNumber: phoneNumber }).strict(),
+  z.object({ requestId: identifier, provider: z.literal('clawops'), mode: z.literal('agent'), accountId: identifier,
+    apiKey: z.string().min(1).max(1024), agentId: identifier, fromNumber: phoneNumber }).strict(),
 ]);
 const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
@@ -95,7 +99,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -119,10 +123,15 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   }
   const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens,
     typeof options.voice?.model?.classify === 'function') : undefined;
-  const phoneProvider = async (userId: string): Promise<'twilio' | 'clawops' | null> => {
-    if (!voiceWebhook || !voiceTokens) return null;
+  const managedCallWatch = store.durable && options.phoneConnections
+    ? options.managedCallWatch ?? createManagedCallWatch({ store, connections: options.phoneConnections }) : undefined;
+  app.addHook('onClose', async () => { await managedCallWatch?.stop(); });
+  const phoneProvider = async (userId: string): Promise<'twilio' | 'clawops' | 'clawops_agent' | null> => {
+    if (!store.durable) return null;
     const connection = await options.phoneConnections?.status(userId);
     if (connection?.status !== 'available') return null;
+    if (connection.provider === 'clawops' && connection.mode === 'agent') return 'clawops_agent';
+    if (!voiceWebhook || !voiceTokens) return null;
     if (connection.provider === 'clawops') return 'clawops';
     return typeof options.voice?.model?.classify === 'function' ? 'twilio' : null;
   };
@@ -442,9 +451,15 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     const { id } = parse(z.object({ id: identifier }).strict(), request.params); const body = parse(phoneCallBody, request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
-    const currentProvider = await phoneProvider(authenticated.get(request)!);
+    const userId = authenticated.get(request)!;
+    const currentProvider = await phoneProvider(userId);
     if (!phoneDispatch || !currentProvider) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
-    const result = await phoneDispatch.call(authenticated.get(request)!, id, body, key, currentProvider);
+    const result = await phoneDispatch.call(userId, id, body, key, currentProvider);
+    const contact = (result.body as { data?: { contactRequest?: { id?: string; deliveryStatus?: string; providerOperationId?: string | null } } })?.data?.contactRequest;
+    if (currentProvider === 'clawops_agent' && result.status === 200 && contact?.id === id &&
+        contact.deliveryStatus === 'sent_or_connected' && contact.providerOperationId) {
+      try { managedCallWatch?.start(userId, id); } catch { /* The call was already sent; do not report a dispatch failure. */ }
+    }
     return reply.code(result.status).send(result.body);
   });
 
@@ -618,6 +633,52 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
         for (const event of lookup.events) await contactResponses.recordVerified(userId, id, event);
         return { status: 200, body: { requestId: body.requestId, data: { ...await contactResponses.list(userId, id),
           checkedCount: lookup.events.length, unmatchedCount: lookup.unmatchedCount } } };
+      });
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/contact-requests/:id/check-call', async (request, reply) => {
+    if (!store.durable || !options.phoneConnections) throw new ApiError(503, 'not_configured', '전화 연결과 지속 저장소가 필요합니다.');
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const body = parse(checkRepliesBody, request.body); const userId = authenticated.get(request)!;
+    const connections = options.phoneConnections;
+    const result = await runIdempotent(request, 'contact_call_check', async (_requestBody, control) => {
+      const state = await store.read(userId); const snapshot = state.contactRequests.get(id);
+      if (!snapshot) throw new ApiError(404, 'not_found', '연락 요청을 찾을 수 없습니다.');
+      if (snapshot.revision !== body.contactRevision || snapshot.channel !== 'phone' || snapshot.deliveryStatus !== 'sent_or_connected' || !snapshot.providerOperationId) {
+        throw new ApiError(409, 'conflict', '발신한 전화와 연락 요청 버전을 확인해 주세요.');
+      }
+      const credential = await connections.read(userId).catch(() => undefined);
+      if (!credential || credential.provider !== 'clawops' || credential.mode !== 'agent') throw new ApiError(503, 'not_configured', '관리형 전화 연결이 필요합니다.');
+      const binding = { contactId: id, accountId: credential.accountId, agentId: credential.agentId, fromNumber: credential.fromNumber, mode: 'agent' };
+      if (!isDeepStrictEqual(state.voiceSessions.get(managedCallBindingKey(snapshot.executionKey)), binding)) throw new ApiError(409, 'conflict', '발신 당시 전화 연결을 확인할 수 없습니다.');
+      const lookup = await createClawOpsReplies({ accountId: credential.accountId, apiKey: credential.apiKey, fetch: connections.fetcher }).check({
+        callId: snapshot.providerOperationId, fromNumber: credential.fromNumber, toNumber: snapshot.recipientSnapshot.address, createdAt: snapshot.createdAt,
+      });
+      if (!lookup.ok) {
+        if (lookup.error === 'provider_unavailable') return { ...errorResult(new ApiError(503, 'provider_unavailable', '통화 내용을 확인할 수 없습니다.', true), body.requestId), retryableWithoutEffects: true };
+        throw new ApiError(409, 'conflict', '발신한 통화와 연결을 확인할 수 없습니다.');
+      }
+      return control.finalize(async () => {
+        const currentState = await store.read(userId);
+        const latestCredential = await connections.read(userId).catch(() => undefined);
+        if (!isDeepStrictEqual(currentState.contactRequests.get(id), snapshot) || !isDeepStrictEqual(latestCredential, credential) ||
+            !isDeepStrictEqual(currentState.voiceSessions.get(managedCallBindingKey(snapshot.executionKey)), binding)) {
+          throw new ApiError(409, 'conflict', '통화 조회 중 연락 요청 또는 연결이 변경되었습니다.');
+        }
+        const userEvents = lookup.events.filter(event => event.role === 'user');
+        const text = lookup.events.map(event => `${event.role === 'user' ? '상대' : 'AI'}: ${event.text}`).join('\n');
+        const clipped = text.slice(0, 2000).replace(/[\ud800-\udbff]$/, '');
+        const truncated = lookup.truncated || clipped.length < text.length;
+        const eventId = `clawops-${createHash('sha256').update(snapshot.providerOperationId!).digest('hex')}`;
+        const prior = currentState.contactResponses.get(JSON.stringify(['phone', eventId]));
+        if (lookup.complete && !truncated && userEvents.length && clipped.trim() && !prior && snapshot.negotiationStatus === 'awaiting_response') {
+          await contactResponses.recordVerified(userId, id, { providerEventId: eventId, providerOperationId: snapshot.providerOperationId!,
+            channel: 'phone', recipientAddress: snapshot.recipientSnapshot.address, receivedAt: userEvents[userEvents.length - 1]!.receivedAt,
+            outcome: 'unclear', selectedOptionId: null, evidenceRef: eventId, displayText: clipped, reviewReason: 'voice_transcript_unverified' });
+        }
+        return { status: 200, body: { requestId: body.requestId, data: { ...await contactResponses.list(userId, id),
+          checkedCount: lookup.events.length, unmatchedCount: 0, callStatus: lookup.callStatus, complete: lookup.complete && !truncated, truncated } } };
       });
     });
     return reply.code(result.status).send(result.body);

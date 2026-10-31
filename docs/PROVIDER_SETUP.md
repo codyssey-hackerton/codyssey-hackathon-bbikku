@@ -77,6 +77,20 @@ Twilio 추가 작업은 사용자의 요청으로 보류한다. 아래 계정 �
 
 ## ClawOps 전화 전환 — 2026-11-01
 
+### 관리형 자유 음성 — 최신 증분
+
+기본 연결은 **관리형 음성 대화**다. ClawOps 계정 ID·API 키·agent ID·보유 발신번호(E.164)를 입력한다. 발신은 `AgentId`와 승인된 설명·대안의 `CallContext`를 사용하며 VoiceML `Url`을 함께 보내지 않는다. 서버가 Bearer 인증으로 통화와 확정 전사를 조회하므로 이 모드에는 **Webhook Signing Secret이 필요하지 않다.** 아래의 서명키 설명은 VoiceML 모드에만 해당한다.
+
+관리형 agent는 계정에서 미리 준비해야 한다. 전용 한국어 agent를 생성하고 실행 프롬프트 정본 `apps/api/src/clawops-agent-prompt.ts`와 일치시켰다. 실제 설정 GET에서 `gpt-realtime-2.1-mini`, `greeting:true`, `language:ko`, 최대 120초, `liveEvents.events:["transcript.final"]`를 확인했다. 지식 문서·외부 MCP 연결은 0개이며 기존 번호 라우팅은 바꾸지 않았다. 이는 생성·설정 확인이며 실제 통화 결과는 검증 기록을 별도로 따른다. 메인 일정 모델 Terra/high를 바꾸는 설정이 아니다.
+
+연락 내용 승인 → 발신 → **통화 결과 확인** → 완료된 전체 대화 검토 → 상대의 동의를 확인한 허용 대안 재승인 순서다. AI 발화나 전사만으로 일정을 바꾸지 않는다. 미완료·전사 없음·상대 발화 없음·잘린 대화는 재승인 대상이 아니며 결과 불명에서 자동 재발신하지 않는다. 새 발신에는 새 승인 범위가 필요하다.
+
+승인된 1회 실통화에서 양방향 대화와 완료 전사 저장을 확인했다. 수락은 불명확해 실제·가상 일정 모두 바꾸지 않았다. 통화에서 발견한 지침 낭독·종료 지연은 프롬프트와 종료 감시로 보완했으며, 전용 agent에는 새 지침을 PATCH/GET으로 확인했다. 수정 후 추가 통화는 사용자가 원하지 않아 미검증이다. 국내 서울 일정은 기본 한국시간으로 처리하고 구분이 필요하지 않으면 연도·시간대/UTC 시차를 낭독하지 않는다.
+
+서버 종료 감시는 접수된 관리형 통화만 확인하며, 명확한 상대 종료 발화가 있으면 결속한 통화 ID에 `{Status:"completed"}`를 POST한다. 3초 간격의 프로세스 로컬 감시이며 최장 150초, 통화 중 상태를 관측한 뒤 120초가 한도다. 재시작/상류 오류·통화 결속 확인 불가 시의 종료 성공을 보장하지 않는다. 제공자 agent의 120초 제한은 유지한다. 실제 종료 API는 [공식 통화 제어](https://platform.claw-ops.com/docs/api/calls/updateCall)를 따른다.
+
+### VoiceML 이식 이력
+
 사용자 요청에 따라 신규 전화 연결 화면의 기본 제공자를 ClawOps로 바꾼다. 기존 Twilio 경로와 저장 자격은 보존한다. 현재 제공된 계정·키로 공식 번호 목록 API HTTP200과 보유 발신번호 1개를 확인했으며 실제 발신은 하지 않았다. 이는 API 인증·번호 조회 성공이며 웹훅이나 실통화 성공은 아니다.
 
 앱의 **전화 외부 연결**에서 ClawOps 계정 ID, API 키, 별도 Webhook Signing Secret, 계정 소유 발신번호(E.164)를 입력한다. API 키와 서명키는 서로 다르며, 서명키는 ClawOps 대시보드의 개발자 → 웹훅에서 확인한다. 사용자별 서버 private 자격 디렉터리에 0600으로 저장하고 브라우저 영속 저장·Git·공개 로그에 남기지 않는다. 번호 조회로 API 키·소유권을 확인할 수 있지만 입력한 서명키의 실제 일치는 서명된 제공자 콜백으로 별도 검증해야 한다.
@@ -85,7 +99,7 @@ Twilio 추가 작업은 사용자의 요청으로 보류한다. 아래 계정 �
 
 콜백은 기존 `PIKKU_VOICE_PUBLIC_BASE_URL`과 `PIKKU_VOICE_SESSION_KEY` 설정을 재사용하는 `/v1/voice/clawops/:token`이다. 원본 form의 HMAC-SHA256 서명, 토큰, 통화·계정·연락·번호와 최신 승인 대안을 확인한다. VoiceML은 설명·대안 낭독과 키패드 선택·명시적 재확인을 지원한다. **자유로운 양방향 음성 대화는 이 증분에 포함하지 않는다.** 무응답은 자동 수락하지 않으며 기존 상대 회신/최신 일정 검증 경계를 유지한다. 안내는 Gather 밖에서 재생하나 선입력 버퍼·빈 Gather의 실제 서비스 동작과 서명키 일치는 실통화 미검증이다. 무응답 action이 없어 현재 연락 상태가 awaiting_response로 남을 수 있다.
 
-Managed Agent는 별도 agent ID·음성 모델·이벤트 권한 및 통화별 CallContext가 필요하고 VoiceML과 발신 모드가 다르다. 계정 설정이나 동작을 실제 확인하기 전 사용 가능하다고 단정하지 않는다. 현재 전화의 사람 확인 후 적용 경로는 Gmail 전용 confirm API와 같지 않으며 음성 결과를 이메일 응답으로 위장해 통과시키지 않는다.
+관리형 음성과 VoiceML은 발신 모드가 다르다. 이 VoiceML 이식 당시 자유 음성 및 사람 확인 후 전화 반영은 미구현이었다. 최신 관리형 음성의 전사 검토·재승인은 위 절과 CONTRACTS §9를 따르며, 음성 결과를 이메일 응답으로 위장하지 않는다.
 
 공식 근거: [발신](https://docs.claw-ops.com/api-reference/claw-ops-api/calls/create-call), [번호 조회](https://docs.claw-ops.com/api-reference/claw-ops-api/numbers/list-numbers), [VoiceML 지원 범위](https://platform.claw-ops.com/docs/build/voiceml), [서명 검증](https://platform.claw-ops.com/docs/webhooks/signature-verification).
 
