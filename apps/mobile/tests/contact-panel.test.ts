@@ -830,6 +830,7 @@ test('회신 확인은 저장된 본문과 허용 대안의 명시 선택 뒤 �
   const view = harness.renderer(ContactPanel, { ...directProps(mock.api), onScheduleChanged: () => { refreshed += 1; } }); t.after(() => view.unmount());
   await openContact(view); press(view, '회신 확인'); await view.settle();
   assert.match(textOf(view.tree), /사용자 확인 필요/); assert.match(textOf(view.tree), /신원은 확인되지 않습니다/);
+  assert.match(textOf(view.tree), /상태: 사용자 확인 필요/);
   assert.match(textOf(view.tree), /판단할 수 없는 메일 1건/);
   assert.match(textOf(view.tree), /제안하신 시간이 괜찮습니다/); assert.equal(posts(mock.calls, '/confirm').length, 0);
   press(view, '선택: option-1 · 제안 proposal-1');
@@ -988,6 +989,22 @@ for (const contact of [draft, ready]) {
     assert.equal(posts(mock.calls, '/decision').length, 0); assert.equal(posts(mock.calls, '/send').length, 0);
   });
 }
+
+test('반영 완료 연락의 원본 미확정 회신은 추가 확인이 필요한 상태로 표시하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const applied = { ...sent, negotiationStatus: 'applied' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '확인했습니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([applied]);
+  mock.proposals.set(proposal.id, { ...proposal, revision: proposal.revision + 1, status: 'applied' });
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: applied, responses: [response] } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api, mock.proposals.get(proposal.id))); t.after(() => view.unmount());
+  await openContact(view); press(view, '저장된 응답 조회'); await view.settle();
+  assert.match(textOf(view.tree), /일정 반영됨/);
+  assert.match(textOf(view.tree), /상태: 원문 판정 미확정/);
+  assert.doesNotMatch(textOf(view.tree), /상태: 사용자 확인 필요/);
+  assert.equal(mock.calls.filter(call => call.method === 'POST').length, 0);
+});
 
 test('완료 이력에서 예상과 다른 제안 버전은 승인 내역으로 표시하지 않는다', async t => {
   const { ContactPanel } = await components;

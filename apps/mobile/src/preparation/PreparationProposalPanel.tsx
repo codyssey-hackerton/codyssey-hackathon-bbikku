@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, BackHandler, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, AppState, BackHandler, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import type { AgentResult, ScheduleItem } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { operationGuard } from '../api/operationGuard';
@@ -118,7 +118,7 @@ export default function PreparationProposalPanel({ target, expectedScheduleRevis
   const unresolvedRef = useRef(unresolved);
   unresolvedRef.current = unresolved;
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || Platform.OS === 'web') return;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (!unresolvedRef.current && !operationGuard.hasUnresolved()) closeRef.current();
       return true;

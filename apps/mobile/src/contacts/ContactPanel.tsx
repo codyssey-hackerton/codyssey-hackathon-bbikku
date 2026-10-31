@@ -412,7 +412,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       {results?.status === 'success' && results.data.length === 0 && <Text style={styles.muted}>저장된 응답이 없습니다.</Text>}
       {results?.status === 'success' && results.data.map((response) => <View style={styles.card} key={response.id}>
         <Text style={styles.text}>응답 {response.id} · {response.receivedAt}</Text>
-        <Text style={styles.text}>상태: {response.outcome === 'unclear' ? '사용자 확인 필요' : response.outcome === 'accepted' ? '수락' : response.outcome === 'declined' ? '거절' : '대안 제시'}</Text>
+        <Text style={styles.text}>상태: {response.outcome === 'unclear' ? readOnly ? '원문 판정 미확정' : '사용자 확인 필요' : response.outcome === 'accepted' ? '수락' : response.outcome === 'declined' ? '거절' : '대안 제시'}</Text>
         {response.displayText?.trim() ? <><Text style={styles.notice}>회신 원문의 일부입니다. 메일 헤더만으로 상대의 신원은 확인되지 않습니다.</Text><Text style={styles.text}>{response.displayText}</Text></>
           : <Text style={styles.muted}>확인할 수 있는 회신 본문이 없습니다.</Text>}
         {!readOnly && !requiresNewProposal && contact.channel === 'email' && contact.negotiationStatus === 'needs_user_review' && response.outcome === 'unclear' && response.displayText?.trim() && response.reviewReason === 'sender_unverified' && <>

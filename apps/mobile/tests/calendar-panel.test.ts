@@ -299,6 +299,20 @@ test('일정 폼 라디오는 선택 전후 네이티브 상태와 웹 aria-chec
   assertWebChecked(find('참여: 개인'), false); assertWebChecked(find('참여: 공동'), true);
 });
 
+test('웹에서는 하드웨어 뒤로가기를 등록하지 않고 종료 후 늦은 조회를 무시한다', async t => {
+  const { Panel } = await panelModule;
+  const native = (globalThis as any).__calendarPanelHarness.native;
+  const originalOs = native.Platform.OS, originalBack = native.BackHandler;
+  native.Platform.OS = 'web'; native.BackHandler = { addEventListener() { throw new Error('unexpected web listener'); } };
+  t.after(() => { native.Platform.OS = originalOs; native.BackHandler = originalBack; });
+  const pending = deferred<any>(); const calls: string[] = [];
+  const api = { get: (path: string) => { calls.push(path); return pending.promise; }, post: async () => ({}) };
+  const view = harness.renderer(Panel, { api, timezone: 'Asia/Seoul', scheduleClient: { list: async () => ({ items: [], scheduleRevision: 1 }) }, onBack() {}, onScheduleChanged() {} });
+  press(view, '연결 및 캘린더 조회'); view.unmount();
+  pending.resolve({ status: 'available', accountLabel: null }); await view.settle();
+  assert.deepEqual(calls, ['/v1/calendar-connection']);
+});
+
 
 test('panel treats an incomplete success as uncertain and retries the same import without claiming success', async () => {
   const { Panel, operationGuard } = await panelModule;
