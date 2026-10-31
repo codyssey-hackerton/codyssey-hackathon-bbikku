@@ -37,14 +37,7 @@ export interface ContactSendInput { id: string; contactRevision: number; expecte
 export interface ContactCallInput { id: string; contactRevision: number; expectedSenderNumber: string }
 export type PhoneProvider = 'twilio' | 'clawops';
 export type PhoneMode = 'agent' | 'voiceml';
-export type PhoneConnectionInput = { accountSid: string; authToken: string; fromNumber: string } |
-  { provider: 'clawops'; mode: 'agent'; accountId: string; apiKey: string; agentId: string; fromNumber: string } |
-  { provider: 'clawops'; accountId: string; apiKey: string; signingSecret: string; fromNumber: string; mode?: 'voiceml' };
 export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null; provider?: PhoneProvider; mode?: PhoneMode };
-export function matchesPhoneProvider(connection: PhoneConnection, provider: PhoneProvider, mode: PhoneMode = 'voiceml'): boolean {
-  return provider === 'twilio' ? (connection.provider === undefined || connection.provider === 'twilio') && connection.mode === undefined
-    : connection.provider === 'clawops' && (mode === 'agent' ? connection.mode === 'agent' : connection.mode === undefined || connection.mode === 'voiceml');
-}
 export type EmailConnection = { status: 'available'; senderAddress: string } | { status: 'not_configured'; senderAddress: string | null };
 export interface ContactResponse {
   id: string; contactRequestId: string; providerEventId: string; receivedAt: string;
@@ -66,7 +59,6 @@ export interface ContactClient {
   checkCall(op: Mutation<{ id: string; contactRevision: number }>): Promise<ContactCallCheck>;
   confirmResponse(op: Mutation<{ id: string; responseId: string; contactRevision: number; selectedOptionId: string }>): Promise<ContactConfirmResult>;
   phoneConnection(): Promise<PhoneConnection>;
-  connectPhone(op: Mutation<PhoneConnectionInput>): Promise<PhoneConnection>;
   createRecipient(op: Mutation<RecipientInput>): Promise<Recipient>;
   createDraft(op: Mutation<ContactDraftInput>): Promise<ContactRequest>;
   decide(op: Mutation<ContactDecisionInput>): Promise<ContactRequest>;
@@ -238,14 +230,6 @@ export function createContactClient(api: ApiClient): ContactClient {
     },
     async phoneConnection() {
       return phoneConnectionFrom(await api.get<unknown>('/v1/phone-connection'));
-    },
-    async connectPhone({ input, requestId, idempotencyKey }) {
-      const result = phoneConnectionFrom(await api.post<unknown>('/v1/phone-connection',
-        { requestId, ...input }, { idempotencyKey }));
-      if (('provider' in input && result.lastRequestId !== requestId) ||
-          (result.lastRequestId !== undefined && result.lastRequestId !== requestId)) throw invalidResponse();
-      if (!matchesPhoneProvider(result, 'provider' in input ? input.provider : 'twilio', 'mode' in input && input.mode === 'agent' ? 'agent' : 'voiceml')) throw invalidResponse();
-      return result;
     },
     async createRecipient({ input, requestId, idempotencyKey }) {
       const { displayName, channel, address, confirmed } = input;

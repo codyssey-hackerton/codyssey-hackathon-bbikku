@@ -136,14 +136,14 @@ async function main() {
     return Response.json({ callId, accountId: credential.accountId, from: credential.fromNumber, to: target, direction: 'outbound', status: 'completed', dateCreated: iso() });
   };
   const connections = new PhoneConnections({ directory, fetcher });
-  const app = buildApp({ store, phoneConnections: connections, allowLocalPhoneConnect: true,
+  const app = buildApp({ store, phoneConnections: connections,
     sessions: { async resolve(token) { return token === 'synthetic-session' ? { userId: actor } : null; } } });
   const checks: string[] = [];
   const post = (path: string, payload: object, key: string) => app.inject({ method: 'POST', url: path,
     headers: { authorization: 'Bearer synthetic-session', 'idempotency-key': key }, payload });
   try {
-    const connected = await post('/v1/phone-connection', { requestId: 'connect', ...credential }, 'connect');
-    assert.equal(connected.statusCode, 200); checks.push('connection');
+    const connected = await connections.connect(actor, credential, 'connect');
+    assert.equal(connected.status, 'available'); checks.push('connection');
     const planning = new PlanningService(store), contacts = new ContactService(store, planning);
     const original: ScheduleFields = { kind: 'event', title: '가상 저녁 약속', timeSlot: { startsAt: '2026-11-02T17:00:00+09:00', endsAt: '2026-11-02T18:00:00+09:00', timezone: 'Asia/Seoul' }, durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'shared', completion: 'pending' };
     const item = (await planning.command(actor, { expectedScheduleRevision: 0, changeSet: { changes: [{ changeId: 'seed', operation: 'create', after: original }] } })).items[0]!;

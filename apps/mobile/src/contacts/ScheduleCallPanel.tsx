@@ -6,15 +6,17 @@ import { useMutation } from '../api/useMutation';
 import { ActionButton } from '../ui/ActionButton';
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
+import { ContactPicker } from './ContactPicker';
 import { createScheduleCallClient, normalizeScheduleCallNumber } from './schedule-call-client';
 import type { ScheduleCall, ScheduleCallOperation } from './schedule-call-client';
 
-export type ScheduleCallPanelProps = { api: ApiClient; itemId: string; expectedRevision: number; onClose: () => void; onFinish: () => void; onScheduleChanged: () => void; onOpenPhoneSettings: () => void };
-export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClose, onFinish, onScheduleChanged, onOpenPhoneSettings }: ScheduleCallPanelProps) {
+export type ScheduleCallPanelProps = { api: ApiClient; itemId: string; expectedRevision: number; onClose: () => void; onFinish: () => void; onScheduleChanged: () => void; onOpenPhoneSettings: () => void; onOpenGoogleContacts?: () => void };
+export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClose, onFinish, onScheduleChanged, onOpenPhoneSettings, onOpenGoogleContacts }: ScheduleCallPanelProps) {
   const client = useMemo(() => createScheduleCallClient(api), [api]);
   const requestClient = useRef<typeof client | null>(null), readLock = useRef(false);
   const lastKind = useRef<ScheduleCallOperation['kind'] | null>(null);
   const [number, setNumber] = useState('');
+  const [recipientName, setRecipientName] = useState('');
   const [call, setCall] = useState<ScheduleCall | null>(null);
   const [readback, setReadback] = useState<ScheduleCall | null>(null);
   const [message, setMessage] = useState('');
@@ -50,14 +52,16 @@ export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClo
     <Text accessibilityRole="header" style={styles.title}>일정 장소 전화 확인</Text>
     <Text style={styles.hint}>전화 내용과 번호를 확인한 뒤 직접 승인해야 발신합니다.</Text>
     {!call && <View style={styles.card}><Text style={styles.label}>받는 전화번호</Text>
-      <TextInput accessibilityLabel="받는 전화번호" keyboardType="phone-pad" value={number} onChangeText={setNumber}
+      <TextInput accessibilityLabel="받는 전화번호" keyboardType="phone-pad" value={number} onChangeText={value => { setNumber(value); setRecipientName(''); }}
         editable={!locked} placeholder="예: 01012345678 또는 +821012345678" style={styles.input} />
       <Text style={styles.hint}>확인할 상대의 번호를 직접 입력해 주세요.</Text>
+      <ContactPicker api={api} disabled={locked} onOpenGoogleContacts={onOpenGoogleContacts} onSelect={value => { setRecipientName(value.name); setNumber(value.number); }} />
+      {!!recipientName && <Text>선택한 상대: {recipientName}</Text>}
       <ActionButton label="전화 내용 확인" disabled={locked || !normalizeScheduleCallNumber(number)} onPress={() => submit({ kind: 'create', itemId, expectedRevision, toNumber: number })} />
     </View>}
     {call && <>
       <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>확인할 일정과 질문</Text>
-        <Text>일정: {call.title}</Text><Text>받는 번호: {call.toNumber}</Text><Text>질문: {call.question}</Text>
+        <Text>일정: {call.title}</Text>{!!recipientName && <Text>선택한 상대: {recipientName}</Text>}<Text>받는 번호: {call.toNumber}</Text><Text>질문: {call.question}</Text>
         <Text style={styles.hint}>전화 요청 접수는 통화 연결이나 상대의 응답을 보장하지 않습니다.</Text></View>
       <Text accessibilityLiveRegion="polite">전화 상태: {statusLabel[call.status]}</Text>
       {call.status === 'pending' && <ActionButton label="승인하고 전화" disabled={locked} onPress={() => submit({ kind: 'approve', call })} />}

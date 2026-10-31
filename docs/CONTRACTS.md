@@ -220,14 +220,14 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 | `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
 | `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
 | `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio, mode?: agent/voiceml}`; 비밀 반환 없음 |
-| `POST /v1/phone-connection` | 관리형 `{requestId, provider:"clawops", mode:"agent", accountId, apiKey, agentId, fromNumber}` / ClawOps VoiceML `{requestId, provider:"clawops", mode?:"voiceml", accountId, apiKey, signingSecret, fromNumber}` / 기존 Twilio `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
+| `POST /v1/phone-connection` | 인증 | `403 permission_denied`; 전화 자격은 운영자가 서버에서 관리하며 앱에서 입력·교체하지 않음 |
 | `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
 
 **Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
 
 가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
 
-**전화:** 신규 ClawOps 연결의 기본은 관리형 음성이며 계정 ID·API 키·agent ID와 계정 소유 발신번호를 입력한다. 번호와 agent의 실존을 읽기 전용으로 확인하며 웹훅 서명키는 필요하지 않다. 기존 VoiceML 모드는 별도 서명키를 요구하고, Twilio Account SID/Auth Token 입력과 저장 파일은 보존한다. 번호는 앱·저장소에서 E.164를 유지하고 ClawOps 전송 시 한국 번호를 국내 형식으로 바꾼다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 실통화 성공이나 서명키 일치 검증, 발신 승인이 아니다. 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
+**전화:** ClawOps 계정·키·agent ID·발신번호는 운영자가 서버에서 사용자별로 등록한다. 기존 `PhoneConnections.connect(userId, credential)`의 제공자 번호·agent 읽기 검증과 0600 파일 저장을 재사용하며, 일반 회원에게 전역 자격을 자동 배정하지 않는다. `GET /v1/phone-connection`은 상태만 제공하고 `POST`는 인증 후에도 403이다. 앱에는 키 입력 폼이 없다. 관리형 음성은 웹훅 서명키를 요구하지 않으며 기존 VoiceML/Twilio 저장 파일과 발신 경로는 유지한다. 발신에는 영속 저장소와 사용자 승인·번호·일정 최신성 검증이 필요하다. 연결 상태는 실통화 성공이나 발신 승인이 아니다. 자격은 클라이언트·일정 JSONB·로그에 저장하지 않는다.
 
 전화 설정 POST는 기존 사용자별 PG 잠금 안에서 제공자 번호 조회(15초 timeout)와 파일 저장을 순서대로 처리한다. 같은 사용자의 다른 쓰기는 그동안 기다릴 수 있으며 다른 사용자와는 분리된다. 다중 인스턴스는 같은 DB와 자격 저장 위치를 전제로 한다. 잠금은 활성 DB 트랜잭션 동안의 순서 제어이며 파일 저장과 DB commit이 원자적이라는 뜻은 아니다. 원자 파일에 저장된 `lastRequestId`와 발신번호가 둘 다 요청과 일치할 때만 클라이언트가 응답 유실을 해소한다. 번호만 같은 이전 연결을 새 설정 성공으로 간주하지 않는다.
 
@@ -309,7 +309,7 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 ## 14. 사용자별 Google OAuth — 통합 중인 계약
 
-인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'gmail_send' | 'gmail_read'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
+인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'calendar_write' | 'gmail_send' | 'gmail_read' | 'contacts'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
 
 사용자가 원래 앱에 확인 코드를 입력하면 인증된 `POST /v1/google/oauth/complete`에 `{completionSecret, confirmationCode}`를 보내고 성공 시 `{requestId, data: {status: 'connected'}}`를 받는다. 두 값은 43자 base64url이며 시작부터 10분 안에 같은 사용자에게서 함께 확인돼야 한다. 만료·불일치·재사용은 일반 400 오류다. 완료 요청은 한 번만 시도한다. 응답을 잃으면 자동 재시도하지 않고 연결 상태를 새로 조회하며, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 이미 있었다면 상태가 연결됨이어도 새 계정으로 변경됐는지는 확인할 수 없다. 취소·화면 이탈·계정 전환 시 앱의 비밀값을 지운다. 재시작 시 진행 중인 상태는 사라진다.
 
@@ -375,3 +375,13 @@ Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'l
 전화 자체와 장소 정정은 별도 승인이다. 정정 승인은 최신 item revision과 전체 snapshot을 재확인한 뒤 기존 사용자 command로 location만 수정한다. 시간·제목·참여 범위·상태·출처는 유지한다. shared event도 이 장소-only 직접 확인 범위는 허용하되 시간 변경·취소·다른 항목 수정으로 확대하지 않는다. 일반 AI proposal의 고정 항목 보호를 해제하지 않는다. 이 변경안은 기존 Proposal ID를 발급하는 일반 일정 제안과 별도의 통화 검토 상태다.
 
 수신 후 관리형 Agent 대화는 제공자의 10~120초 설정 및 transcript.final 활성화를 확인한다. 통화 전환 금지·종료 도구 사용을 지시하지만, 설정 변경 경쟁이나 제공자 전환 이후의 전체 통화시간을 기계적으로 보장하지는 않는다. 불완전 전사는 변경 제안으로 처리하지 않는다. 이번 경로는 기존 일정의 장소 확인·정정에 한정되며 자유로운 업무 전화 전체, 시간 변경, Google 원본 장소 반영은 포함하지 않는다.
+
+## 연락처 선택 — 2026-11-01
+
+- Google 연락처는 별도 `contacts` OAuth(readonly + openid/email)와 사용자별 `contacts-connection.json`을 사용한다. 다른 Google 연결을 덮어쓰거나 연락처 권한을 Calendar/Gmail 동의로 간주하지 않는다.
+- 인증된 `GET /v1/contacts/google/connection` → `{requestId,data:{status:'available'|'not_configured',accountLabel:string|null}}`.
+- 인증된 `GET /v1/contacts/google/search?q=이름` → `{requestId,data:{contacts:[{id,displayName,phoneNumbers:[{number,label?}]}],truncated:boolean}}`. q는 공백 제외 1~100자. 두 응답 모두 no-store. 외부 제공자 실패는 `provider_unavailable`, 미설정은 `not_configured`이며 상세 비밀/오류 원문은 노출하지 않는다.
+- 검색은 Google People의 이름 시작 부분 후보를 얻고 이름 포함 여부를 다시 확인한다. 이름 중간 문자열만으로 모든 연락처를 찾는다고 보장하지 않는다. 최대 30개, 연락처별 번호 20개. 결과 id는 응답 한정 UI 키이며 저장·권한 식별자로 사용하지 않는다. 초과 가능성이 있으면 truncated=true.
+- 검색 실행 전체 제한 15초(사전 사용자별 연결 파일 조회 시간 제외), 취소 전파·늦은 후속 호출 차단, token/userinfo64KiB·People512KiB 상한을 적용한다. Google 빈 검색 캐시 준비 후 5초 대기가 포함되어 즉시 응답은 보장하지 않는다.
+- 휴대폰 주소록은 Expo Contacts로 기기에서 권한을 요청하고 이름/번호를 조회한다. Android는 READ_CONTACTS만, iOS는 사용자 허용 범위(제한 허용 포함)만 읽으며 웹은 Google 연락처 또는 직접 입력을 사용한다. 네이티브 모듈/권한 설정 변경은 앱 재빌드가 필요하다.
+- 검색 결과나 연락처 선택은 발신 승인이 아니다. 같은 이름·다중 번호를 사용자가 구분하고 번호를 확인한 뒤 기존 승인 발신 경로를 사용한다. 전체 주소록은 서버/LLM에 업로드하지 않으며 Google 검색 결과도 Agent Tool로 제공하지 않는다. 선택한 이름/번호만 해당 연락 흐름에서 사용한다. 연락처 수정·삭제·자동 발신은 지원하지 않는다.

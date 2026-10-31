@@ -5,6 +5,7 @@ import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import { operationGuard } from '../api/operationGuard';
 import { createScheduleClient, type ScheduleClient } from '../schedule/client';
+import { addDays, civilDate, startOfDay } from '../schedule/dates';
 import { createCalendarClient, selectedEventRefs, validPeriod } from './client';
 import type { Calendar, CalendarConnection, CalendarEvents, CalendarImportInput, CalendarImportResult } from './client';
 
@@ -13,6 +14,7 @@ export interface CalendarImportPanelProps {
   timezone: string;
   onBack: () => void;
   onScheduleChanged: () => void;
+  onOpenGoogle?: () => void;
   scheduleClient?: Pick<ScheduleClient, 'list'>;
 }
 
@@ -35,12 +37,14 @@ function Button({ label, onPress, disabled = false }: { label: string; onPress: 
     style={[styles.button, disabled && styles.disabled]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
 }
 
-export default function CalendarImportPanel({ api, timezone, onBack, onScheduleChanged, scheduleClient }: CalendarImportPanelProps) {
+export default function CalendarImportPanel({ api, timezone, onBack, onScheduleChanged, onOpenGoogle, scheduleClient }: CalendarImportPanelProps) {
   const client = useMemo(() => createCalendarClient(api), [api]);
   const schedule = useMemo(() => scheduleClient ?? createScheduleClient(api), [api, scheduleClient]);
   const initialPeriod = useMemo(() => {
-    const now = Date.now();
-    return { from: new Date(now).toISOString(), to: new Date(now + 7 * 86400000).toISOString() };
+    try {
+      const today = civilDate(new Date(), timezone);
+      return { from: startOfDay(today, timezone).toISOString(), to: startOfDay(addDays(today, 7), timezone).toISOString() };
+    } catch { return { from: '', to: '' }; }
   }, []);
   const [from, setFrom] = useState(initialPeriod.from);
   const [to, setTo] = useState(initialPeriod.to);
@@ -96,8 +100,12 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     } catch (err) { if (alive.current && generation.current === current) setError(message(err)); }
     finally { if (alive.current && generation.current === current) setLoading(false); }
   }
+  useEffect(() => {
+    void readCalendars();
+    return () => { generation.current += 1; };
+  }, [client]);
   async function readEvents() {
-    if (!calendarId || !validPeriod(from, to)) { setError('시작과 종료에 시간대가 포함된 ISO 시각을 입력해 주세요. 종료는 시작보다 늦어야 합니다.'); return; }
+    if (!calendarId || !validPeriod(from, to)) { setError('시간대가 포함된 ISO 시각으로 시작과 종료를 입력해 주세요. 조회 기간은 최대 366일입니다.'); return; }
     const current = ++generation.current;
     setLoading(true); clearEvents();
     try {
@@ -128,7 +136,11 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     <Text style={styles.title}>캘린더 일정 가져오기</Text>
     <Text style={styles.body}>선택한 기간의 일정을 직접 조회하고, 선택한 항목만 앱 일정에 가져옵니다.</Text>
     <Button label="연결 및 캘린더 조회" onPress={() => { void readCalendars(); }} disabled={locked} />
+    {loading && <Text accessibilityLiveRegion="polite" style={styles.body}>Google 캘린더를 확인하고 있습니다.</Text>}
     {connection && <Text style={styles.body}>{connection.status === 'available' ? `연결됨${connection.accountLabel ? `: ${connection.accountLabel}` : ''}` : '캘린더 연결이 설정되지 않았습니다.'}</Text>}
+    {connection?.status === 'not_configured' && onOpenGoogle && <Button label="Google 연결 열기" onPress={() => {
+      if (!navigationLockRef.current && !prepareLock.current && !operationGuard.hasUnresolved()) onOpenGoogle();
+    }} disabled={navigationLocked || operationGuard.hasUnresolved()} />}
     {connection?.status === 'available' && calendars.length === 0 && !loading && !error && <Text style={styles.body}>조회된 캘린더가 없습니다.</Text>}
     {calendars.map(calendar => <Pressable key={calendar.id} accessibilityRole="radio" aria-checked={calendarId === calendar.id} accessibilityState={{ checked: calendarId === calendar.id, disabled: locked }} disabled={locked}
       onPress={() => { setCalendarId(calendar.id); clearEvents(); }} style={[styles.choice, calendarId === calendar.id && styles.chosen, locked && styles.disabled]}>
@@ -145,9 +157,10 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     {loading && <ActivityIndicator accessibilityLabel="조회 중" />}
     {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
     {events && <>
-      {events.unsupportedCount > 0 && <Text accessibilityRole="alert" style={styles.error}>지원하지 않는 일정 {events.unsupportedCount}개는 목록에 포함되지 않았습니다.</Text>}
+      {events.unsupportedCount > 0 && <Text accessibilityRole="alert" style={styles.error}>지원하지 않는 일정 {events.unsupportedCount}개는 목록에 포함되지 않았습니다. 반복·종일·투명 일정 등이 포함될 수 있습니다.</Text>}
       {events.events.length === 0 && <Text style={styles.body}>이 기간에 가져올 수 있는 일정이 없습니다.</Text>}
-      {events.events.map(event => <Pressable key={event.id} accessibilityRole="checkbox" aria-checked={selected.has(event.id)} accessibilityState={{ checked: selected.has(event.id), disabled: locked }} disabled={locked}
+      <Text style={styles.body}>한 번에 최대 100개를 선택할 수 있습니다.</Text>
+      {events.events.map(event => <Pressable key={event.id} accessibilityRole="checkbox" aria-checked={selected.has(event.id)} accessibilityState={{ checked: selected.has(event.id), disabled: locked || (selected.size >= 100 && !selected.has(event.id)) }} disabled={locked || (selected.size >= 100 && !selected.has(event.id))}
         onPress={() => setSelected(previous => { const next = new Set(previous); if (next.has(event.id)) next.delete(event.id); else next.add(event.id); return next; })}
         style={[styles.choice, selected.has(event.id) && styles.chosen, locked && styles.disabled]}>
         <Text style={styles.label}>{selected.has(event.id) ? '☑' : '☐'} {event.title || '(제목 없는 일정)'}</Text>

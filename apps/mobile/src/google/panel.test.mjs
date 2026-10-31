@@ -84,6 +84,7 @@ test('actual per-user status distinguishes connected, not connected and server f
       if (path === '/v1/calendar-connection') return { status: 'available', accountLabel: '테스트 계정' };
       if (path === '/v1/calendar-write-connection') return { status: 'not_configured', accountLabel: null };
       if (path === '/v1/email-connection') throw new Error('synthetic network error');
+      if (path === '/v1/contacts/google/connection') return { status: 'not_configured', accountLabel: null };
       if (path === '/v1/email-reply-connection') return { status: 'not_configured', senderAddress: null };
       throw new Error('unexpected endpoint');
     },
@@ -95,10 +96,10 @@ test('actual per-user status distinguishes connected, not connected and server f
   const output = text(view.tree);
   assert.match(output, /로그인과 Google 서비스 연결은 별도/);
   assert.equal((output.match(/연결됨/g) ?? []).length, 1);
-  assert.equal((output.match(/미연결/g) ?? []).length, 2);
+  assert.equal((output.match(/미연결/g) ?? []).length, 3);
   assert.match(output, /테스트 계정/);
   assert.match(output, /서버 연결을 확인/);
-  assert.equal(nodes(view.tree).filter(node => node.type === 'Pressable' && /연결 시작/.test(text(node.children))).length, 4);
-  assert.equal(requests.filter(([method]) => method === 'GET').length, 4);
+  assert.equal(nodes(view.tree).filter(node => node.type === 'Pressable' && /연결 시작/.test(text(node.children))).length, 5);
+  assert.equal(requests.filter(([method]) => method === 'GET').length, 5);
   assert.equal(requests.filter(([method]) => method === 'POST').length, 0);
 });

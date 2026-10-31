@@ -104,7 +104,7 @@ for (const origin of webOrigins) {
 }
 const app = buildApp({ memberAuth, routineService, calendarSync,
   memberAllowLocalInsecure: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host),
-  previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, subwayConfigured, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
+  previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, subwayConfigured, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }

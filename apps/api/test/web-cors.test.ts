@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/app.ts';
@@ -21,43 +21,68 @@ test('preview permits only configured browser origins and keeps routes authentic
   } finally { await app.close(); }
 });
 
-test('phone connection receipt survives a lost response and is scoped to its user', async () => {
+test('phone credentials are provisioned by the operator and HTTP writes cannot change files or call the provider', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pikku-phone-receipt-'));
-  const phoneConnections = new PhoneConnections({ directory, fetcher: async () => new Response(JSON.stringify({
-    incoming_phone_numbers: [{ phone_number: '+12025550123', capabilities: { voice: true } }],
-  }), { status: 200 }) });
+  let providerCalls = 0;
+  const phoneConnections = new PhoneConnections({ directory, fetcher: async () => {
+    providerCalls++;
+    return Response.json({ incoming_phone_numbers: [{ phone_number: '+12025550123', capabilities: { voice: true } }] });
+  } });
+  const credential = { accountSid: `AC${'a'.repeat(32)}`, authToken: 'b'.repeat(32), fromNumber: '+12025550123' };
   const memory = new MemoryPlanningStore();
   const store: PlanningStore = { mode: 'memory', durable: true, read: memory.read.bind(memory), transaction: memory.transaction.bind(memory),
     atomic: memory.atomic.bind(memory), transactionTimestamp: memory.transactionTimestamp.bind(memory), listUserIds: memory.listUserIds.bind(memory) };
-  const app = buildApp({ store, phoneConnections, allowLocalPhoneConnect: true, sessions: {
+  const app = buildApp({ store, phoneConnections, sessions: {
     resolve: async token => ({ userId: token === 'other' ? 'other-user' : 'user' }),
   } });
   try {
-    const post = await app.inject({ method: 'POST', url: '/v1/phone-connection', headers: { authorization: 'Bearer owner' },
-      payload: { requestId: 'receipt-1', accountSid: `AC${'a'.repeat(32)}`, authToken: 'b'.repeat(32), fromNumber: '+12025550123' } });
-    assert.equal(post.statusCode, 200);
-    assert.deepEqual(post.json().data, { status: 'available', senderNumber: '+12025550123', lastRequestId: 'receipt-1' });
+    const provisioned = await phoneConnections.connect('user', credential, 'receipt-1');
+    assert.equal(providerCalls, 1);
+    const files = (await readdir(directory)).sort();
+    const contents = await Promise.all(files.map(name => readFile(join(directory, name))));
+    const metadata = await Promise.all(files.map(async name => {
+      const info = await stat(join(directory, name)); return { mode: info.mode, size: info.size, mtimeMs: info.mtimeMs };
+    }));
+    const unauthenticated = await app.inject({ method: 'POST', url: '/v1/phone-connection', payload: { requestId: 'attempt', ...credential } });
+    assert.equal(unauthenticated.statusCode, 401);
+    for (const token of ['owner', 'other']) {
+      const post = await app.inject({ method: 'POST', url: '/v1/phone-connection', headers: { authorization: `Bearer ${token}` },
+        payload: { requestId: 'overwrite', ...credential, fromNumber: '+12025550124' } });
+      assert.equal(post.statusCode, 403);
+      assert.equal(post.json().error.code, 'permission_denied');
+      assert.doesNotMatch(post.body, /bbbbbbbb|ACaaaaaaaa/);
+    }
+    const empty = await app.inject({ method: 'POST', url: '/v1/phone-connection', headers: { authorization: 'Bearer owner' }, payload: {} });
+    assert.equal(empty.statusCode, 403);
+    assert.equal(empty.json().error.code, 'permission_denied');
+    assert.deepEqual((await readdir(directory)).sort(), files);
+    assert.deepEqual(await Promise.all(files.map(name => readFile(join(directory, name)))), contents);
+    assert.deepEqual(await Promise.all(files.map(async name => {
+      const info = await stat(join(directory, name)); return { mode: info.mode, size: info.size, mtimeMs: info.mtimeMs };
+    })), metadata);
+    assert.equal(providerCalls, 1);
     const status = await app.inject({ method: 'GET', url: '/v1/phone-connection', headers: { authorization: 'Bearer owner' } });
-    assert.deepEqual(status.json().data, post.json().data);
+    assert.deepEqual(status.json().data, provisioned);
+    assert.doesNotMatch(status.body, /bbbbbbbb|ACaaaaaaaa/);
     const other = await app.inject({ method: 'GET', url: '/v1/phone-connection', headers: { authorization: 'Bearer other' } });
     assert.deepEqual(other.json().data, { status: 'not_configured', senderNumber: null, lastRequestId: null });
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('phone connection rejects non-durable storage before contacting the provider', async () => {
+test('phone connection write is forbidden without durable storage before contacting the provider', async () => {
   let providerCalls = 0;
   const phoneConnections = new PhoneConnections({ directory: undefined, fetcher: async () => { providerCalls++; throw new Error('unexpected provider call'); } });
-  const app = buildApp({ phoneConnections, allowLocalPhoneConnect: true, sessions: { resolve: async () => ({ userId: 'user' }) } });
+  const app = buildApp({ phoneConnections, sessions: { resolve: async () => ({ userId: 'user' }) } });
   try {
     const response = await app.inject({ method: 'POST', url: '/v1/phone-connection', headers: { authorization: 'Bearer owner' },
       payload: { requestId: 'receipt-1', accountSid: `AC${'a'.repeat(32)}`, authToken: 'b'.repeat(32), fromNumber: '+12025550123' } });
-    assert.equal(response.statusCode, 503);
-    assert.equal(response.json().error.code, 'not_configured');
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.json().error.code, 'permission_denied');
     assert.equal(providerCalls, 0);
   } finally { await app.close(); }
 });
 
-test('forwarded HTTPS is trusted only from a configured loopback proxy', async () => {
+test('phone connection write remains forbidden even with forwarded HTTPS', async () => {
   const app = buildApp({ trustLoopbackProxy: true, sessions: { resolve: async () => ({ userId: 'synthetic-user' }) } });
   try {
     const payload = { requestId: 'test', accountSid: 'test', authToken: 'test', fromNumber: '+12025550123' };
@@ -66,7 +91,8 @@ test('forwarded HTTPS is trusted only from a configured loopback proxy', async (
     assert.equal(spoofed.statusCode, 403);
     for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const trusted = await app.inject({ method: 'POST', url: '/v1/phone-connection', remoteAddress, headers, payload });
-      assert.equal(trusted.statusCode, 503);
+      assert.equal(trusted.statusCode, 403);
+      assert.equal(trusted.json().error.code, 'permission_denied');
     }
   } finally { await app.close(); }
 });

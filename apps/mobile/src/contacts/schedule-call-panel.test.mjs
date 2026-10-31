@@ -14,7 +14,7 @@ const react = {
  useMemo(fn, deps) { const { instance, index } = slot(); if (!instance.hooks[index] || !same(instance.hooks[index].deps, deps)) instance.hooks[index] = { deps, value: fn() }; return instance.hooks[index].value; },
  useEffect(fn, deps) { const { instance, index } = slot(), effect = instance.hooks[index] ??= {}; if (!same(effect.deps, deps)) { effect.deps = deps; instance.view.effects.push(() => { effect.cleanup?.(); effect.cleanup = fn(); }); } },
 };
-globalThis.__profilePanelHarness = { react, jsx, Fragment, native: { View: 'View', ScrollView: 'ScrollView', Pressable: 'Pressable', StyleSheet: { create: styles => styles } } };
+globalThis.__profilePanelHarness = { react, jsx, Fragment, native: { View: 'View', ScrollView: 'ScrollView', Pressable: 'Pressable', Platform: { OS: 'ios' }, StyleSheet: { create: styles => styles } } };
 const built = await build({ stdin: { contents: "export {default as ScheduleCallPanel} from './ScheduleCallPanel'; export {ApiError} from '../api/http';", resolveDir: dirname(fileURLToPath(import.meta.url)), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
  plugins: [{ name: 'host', setup(b) { b.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/(typography|ActionButton|PikkuCharacter|ProfileAvatar|Icon))$/ }, a => ({ path: a.path, namespace: 'host' }));
   b.onLoad({ filter: /.*/, namespace: 'host' }, ({ path }) => ({ loader: 'js', contents: path === 'react' ? 'module.exports=globalThis.__profilePanelHarness.react' :
@@ -127,4 +127,12 @@ test('a response for a different phone target is rejected before approval', asyn
  const view = setup(api); t.after(view.close); enterNumber(view); press(view, '전화 내용 확인'); await view.settle();
  assert.match(text(view.tree), /요청 결과를 확인하지 못했습니다/);
  assert.ok(!nodes(view.tree).some(n => n.props?.accessibilityLabel === '승인하고 전화'));
+});
+test('selected Google contact only fills a number; sending still needs separate approval', async t => {
+ const writes = []; const api = { async get(path) { assert.match(path, /^\/v1\/contacts\/google\/search\?/); return { contacts: [{ id: 'contact-0', displayName: '친구', phoneNumbers: [{ number: '010-1234-5678' }] }], truncated: false }; },
+  async post(path, body) { writes.push({ path, body }); return { call: base }; } };
+ const view = setup(api); t.after(view.close); press(view, '연락처에서 선택'); press(view, 'Google 연락처'); input(view, '연락처 이름 검색', '친구'); press(view, '이름 검색'); await view.settle();
+ press(view, '친구 · 전화 · 010-1234-5678'); assert.equal(input(view, '받는 전화번호'), '+821012345678'); assert.equal(writes.length, 0);
+ press(view, '전화 내용 확인'); await view.settle(); assert.equal(writes.length, 1); assert.equal(writes[0].path, '/v1/schedule-calls');
+ assert.match(text(view.tree), /선택한 상대: 친구/); assert.ok(nodes(view.tree).some(n => n.props?.accessibilityLabel === '승인하고 전화'));
 });

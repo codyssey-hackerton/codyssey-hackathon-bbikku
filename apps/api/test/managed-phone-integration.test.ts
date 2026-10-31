@@ -59,7 +59,7 @@ async function fixture(t: TestContext, autoSend = true) {
     return Response.json({ callId, accountId: credential.accountId, from: '07012345678', to: '01012345678', direction: 'outbound', status: callStatus, dateCreated: baseTime });
   };
   const connections = new PhoneConnections({ directory, fetcher });
-  const app = buildApp({ store, clock, phoneConnections: connections, allowLocalPhoneConnect: true,
+  const app = buildApp({ store, clock, phoneConnections: connections,
     managedCallWatch: { start(userId, contactId) { watchStarts.push(`${userId}:${contactId}`); }, async stop() { watchStopped = true; } },
     sessions: { async resolve(token) { return ['alice', 'bob'].includes(token) ? { userId: token } : null; } } });
   t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });

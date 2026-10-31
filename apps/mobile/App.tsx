@@ -61,6 +61,7 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 
 function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null }) {
   const [tab, setTab] = useState<Tab>('home');
+  const [googleReturnTo, setGoogleReturnTo] = useState<'main' | 'scheduleCall' | 'calendarImport' | 'proposals'>('main');
   const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall'>('main');
   const [scheduleCallTarget, setScheduleCallTarget] = useState<{ itemId: string; expectedRevision: number } | null>(null);
   const [phoneReturnToCall, setPhoneReturnToCall] = useState(false);
@@ -179,7 +180,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     { label: 'Google 연결', run: () => setPanel('googleConnection') },
     { label: '캘린더 일정 가져오기', run: () => setPanel('calendarImport') },
     { label: 'Google 캘린더 동기화', run: () => { setCalendarSyncOpened(true); setPanel('calendarSync'); } },
-    { label: '전화 외부 연결', run: () => { setPhoneReturnToCall(false); setPanel('phoneConnection'); } },
+    { label: '전화 서비스 상태', run: () => { setPhoneReturnToCall(false); setPanel('phoneConnection'); } },
     { label: '내 정보·선호', run: () => { setMemoryReturn('connections'); setPanel('memory'); } },
     { label: '자동 검토 설정', run: () => { setReviewOpened(true); setPanel('review'); } },
     { label: '계정·앱 설정', run: onOpenSettings },
@@ -213,7 +214,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
             setPanel('scheduleCall');
           }} />
       </Scene>
-      <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'month'}><CalendarScreen selectedDate={selectedDate}
+      <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'month'}><CalendarScreen selectedDate={selectedDate} onImport={() => setPanel('calendarImport')}
         onSelectDate={date => { setSelectedDate(date); setCalendarMode('day'); }} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
       <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'day'}>
         <Pressable accessibilityRole="button" accessibilityLabel="월간 캘린더로" onPress={() => setCalendarMode('month')} style={styles.backButton}><Icon name="chevronLeft" /><Text style={styles.settingsToggleText}>월간 캘린더</Text></Pressable>
@@ -231,7 +232,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         <Pressable accessibilityRole="link" accessibilityLabel="Streamline 아이콘 원본" onPress={() => { void Linking.openURL('https://github.com/webalys-hq/streamline-vectors/tree/main/core').catch(() => setNavigationError('아이콘 출처 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>Streamline 원본</Text></Pressable>
         <Pressable accessibilityRole="link" accessibilityLabel="CC BY 4.0 라이선스" onPress={() => { void Linking.openURL('https://creativecommons.org/licenses/by/4.0/').catch(() => setNavigationError('라이선스 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>CC BY 4.0 라이선스</Text></Pressable>
       </ScrollView></Scene>
-      <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={proposal => {
+      <Scene visible={panel === 'proposals'}><ProposalPanel onOpenGoogleContacts={() => { setGoogleReturnTo('proposals'); setPanel('googleConnection'); }} api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={proposal => {
         const target = proposal.coordinationTarget;
         setEntryContext(undefined); setRecoveryRequest(undefined);
         setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
@@ -239,15 +240,15 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
           coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
         setTab('chat'); setPanel('main');
       }} /></Scene>
-      {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
+      {panel === 'calendarImport' && <CalendarImportPanel onOpenGoogle={() => { setGoogleReturnTo('calendarImport'); setPanel('googleConnection'); }} api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel(phoneReturnToCall && scheduleCallTarget ? 'scheduleCall' : 'main')} />}
-      {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
+      {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => { setPanel(googleReturnTo); setGoogleReturnTo('main'); }} onOpenCalendarImport={() => setPanel('calendarImport')} />}
       {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
       <Scene visible={panel === 'profile'}><ProfilePanel profile={profile} member={member} onBack={() => setPanel('main')}
         onOpenGoogle={() => setPanel('googleConnection')} onOpenReview={() => { setReviewOpened(true); setPanel('review'); }}
         onOpenAccount={() => setPanel('connections')} onOpenMemory={() => { setMemoryReturn('profile'); setPanel('memory'); }} /></Scene>
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={() => { refresh(); profile.refresh(); }} onBack={() => setPanel(memoryReturn)} /></Scene>
-      {scheduleCallTarget && <Scene visible={panel === 'scheduleCall'}><ScheduleCallPanel api={api} {...scheduleCallTarget}
+      {scheduleCallTarget && <Scene visible={panel === 'scheduleCall'}><ScheduleCallPanel api={api} {...scheduleCallTarget} onOpenGoogleContacts={() => { setGoogleReturnTo('scheduleCall'); setPanel('googleConnection'); }}
         onClose={() => { setTab('chat'); setPanel('main'); }} onFinish={() => { setScheduleCallTarget(null); setTab('chat'); setPanel('main'); }} onScheduleChanged={refresh} onOpenPhoneSettings={() => { setPhoneReturnToCall(true); setPanel('phoneConnection'); }} /></Scene>}
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
       {addSession && <Scene visible={panel === 'addItem'}><AddItemPanel key={addSession.key} api={api} client={scheduleClient} timezone={timezone}

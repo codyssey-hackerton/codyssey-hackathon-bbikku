@@ -94,13 +94,6 @@ const weatherBody = z.object({ destination: travelPoint, appointmentAt: timestam
 const subwayBody = z.object({ stationName: z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f/\\?#]/.test(value) && value !== '.' && value !== '..') }).strict();
 const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
-const phoneConnectBody = z.union([
-  z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict(),
-  z.object({ requestId: identifier, provider: z.literal('clawops'), accountId: identifier,
-    mode: z.literal('voiceml').optional(), apiKey: z.string().min(1).max(1024), signingSecret: z.string().min(1).max(1024), fromNumber: phoneNumber }).strict(),
-  z.object({ requestId: identifier, provider: z.literal('clawops'), mode: z.literal('agent'), accountId: identifier,
-    apiKey: z.string().min(1).max(1024), agentId: identifier, fromNumber: phoneNumber }).strict(),
-]);
 const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
 function requestId(request: FastifyRequest): string {
@@ -120,7 +113,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void>; chatDeadlineMs?: number; onChatMetrics?: (metrics: ChatMetrics) => void } = {}) {
+export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void>; chatDeadlineMs?: number; onChatMetrics?: (metrics: ChatMetrics) => void } = {}) {
   const chatDeadlineMs = options.chatDeadlineMs ?? 120_000;
   if (!Number.isSafeInteger(chatDeadlineMs) || chatDeadlineMs < 1 || chatDeadlineMs > 2_147_483_647) throw new Error('Invalid chat deadline');
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
@@ -393,8 +386,28 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     return { requestId: request.id, data: { status: connection?.userId === userId ? 'available' : 'not_configured',
       accountLabel: connection?.userId === userId ? connection.accountLabel : null } };
   });
+  app.get('/v1/contacts/google/connection', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.contactsConnection;
+    return { requestId: request.id, data: { status: connection?.userId === userId ? 'available' : 'not_configured',
+      accountLabel: connection?.userId === userId ? connection.accountLabel : null } };
+  });
+  app.get('/v1/contacts/google/search', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const { q } = parse(z.object({ q: z.string().trim().min(1).max(100) }).strict(), request.query);
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.contactsConnection;
+    if (connection?.userId !== userId) throw new ApiError(503, 'not_configured', 'Google 연락처를 먼저 연결해 주세요.');
+    const controller = new AbortController();
+    const cancel = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once('aborted', cancel); reply.raw.once('close', cancel);
+    if (request.raw.aborted || reply.raw.destroyed) controller.abort();
+    try { return { requestId: request.id, data: await connection.searchContacts({ query: q }, { signal: controller.signal }) }; }
+    finally { request.raw.off('aborted', cancel); reply.raw.off('close', cancel); }
+  });
   app.post('/v1/google/oauth/start', async (request, reply) => {
-    const body = parse(z.object({ kind: z.enum(['calendar', 'calendar_write', 'gmail_send', 'gmail_read']) }).strict(), request.body);
+    const body = parse(z.object({ kind: z.enum(['calendar', 'calendar_write', 'gmail_send', 'gmail_read', 'contacts']) }).strict(), request.body);
     let result: Awaited<ReturnType<NonNullable<typeof options.googleOAuth>['start']>>;
     try { result = await options.googleOAuth?.start(authenticated.get(request)!, body.kind); }
     catch { throw new ApiError(503, 'not_configured', 'Google 연결이 설정되지 않았습니다.'); }
@@ -474,13 +487,8 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     throw new ApiError(503, 'unavailable', '지하철 도착 조회를 사용할 수 없습니다.', true);
   });
   app.get('/v1/phone-connection', async request => ({ requestId: request.id, data: await options.phoneConnections?.status(authenticated.get(request)!) ?? { status: 'not_configured', senderNumber: null, lastRequestId: null } }));
-  app.post('/v1/phone-connection', async request => {
-    if (request.protocol !== 'https' && !options.allowLocalPhoneConnect) throw new ApiError(403, 'permission_denied', '안전한 연결이 필요합니다.');
-    if (!options.phoneConnections) throw new ApiError(503, 'not_configured', '전화 연결이 설정되지 않았습니다.');
-    if (!store.durable) throw new ApiError(503, 'not_configured', '전화 연결에는 지속 저장소가 필요합니다.');
-    const body = parse(phoneConnectBody, request.body);
-    const userId = authenticated.get(request)!;
-    return { requestId: body.requestId, data: await store.atomic(userId, () => options.phoneConnections!.connect(userId, body, body.requestId)) };
+  app.post('/v1/phone-connection', async () => {
+    throw new ApiError(403, 'permission_denied', '전화 연결은 서버에서 관리합니다.');
   });
 
   async function runIdempotent(request: FastifyRequest, operation: string, run: (body: z.infer<typeof requestBody>, control: IdempotencyControl) => Promise<HttpResult>): Promise<HttpResult> {

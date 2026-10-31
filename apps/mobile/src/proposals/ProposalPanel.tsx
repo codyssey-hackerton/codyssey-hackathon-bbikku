@@ -16,6 +16,7 @@ interface Props {
   onScheduleChanged: () => void;
   onBack: () => void;
   onRequestRevision: (proposal: Proposal) => void;
+  onOpenGoogleContacts?: () => void;
 }
 
 type Load<T> = { status: 'loading' } | { status: 'error'; error: unknown } | { status: 'success'; data: T };
@@ -320,8 +321,8 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
   </>;
 }
 
-function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: {
-  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void; onRequestRevision: (proposal: Proposal) => void;
+function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack, onRequestRevision, onOpenGoogleContacts }: {
+  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void; onRequestRevision: (proposal: Proposal) => void; onOpenGoogleContacts?: () => void;
 }) {
   const [contactProposal, setContactProposal] = useState<Proposal | null>(null);
   const mounted = useRef(false);
@@ -369,7 +370,7 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   // Keep the operation in memory until its error is retried or explicitly cleared.
   const locked = state.status === 'pending' || state.status === 'error';
   const shown = state.status === 'success' ? state.result.proposal : current.status === 'success' ? current.data : null;
-  if (contactProposal) return <ContactPanel api={api} proposalClient={client} proposal={contactProposal}
+  if (contactProposal) return <ContactPanel onOpenGoogleContacts={onOpenGoogleContacts} api={api} proposalClient={client} proposal={contactProposal}
     renderProposal={(item) => <ProposalContent proposal={item} />} onScheduleChanged={onScheduleChanged} onBack={() => {
       setContactProposal(null);
       if (mutation.state.status === 'success') mutation.reset();
@@ -413,12 +414,12 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   </ScrollView>;
 }
 
-function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: Props) {
+function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack, onRequestRevision, onOpenGoogleContacts }: Props) {
   const client = useMemo(() => createProposalClient(api), [api]);
   const [selected, setSelected] = useState<string | null>(null);
   return selected === null
     ? <ProposalList client={client} refreshVersion={refreshVersion} onSelect={setSelected} onBack={onBack} />
-    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} onRequestRevision={onRequestRevision} />;
+    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} onRequestRevision={onRequestRevision} onOpenGoogleContacts={onOpenGoogleContacts} />;
 }
 
 export default function ProposalPanel(props: Props) {

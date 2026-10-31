@@ -42,3 +42,18 @@ test('연결 상태를 권한별로 별도 확인하고 잘못된 상태를 연�
   assert.deepEqual(calls, ['/v1/calendar-connection', '/v1/email-connection', '/v1/email-reply-connection']);
   await assert.rejects(createGoogleClient(stub({ status: 'available', senderAddress: null })).status('gmail_send'), (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
 });
+
+
+test('Google 연락처는 읽기 전용 권한과 전용 상태 API를 사용한다', async () => {
+  const url = new URL(validUrl);
+  url.searchParams.set('scope', 'openid email https://www.googleapis.com/auth/contacts.readonly');
+  const data = { authorizationUrl: url.toString(), completionSecret };
+  assert.deepEqual(await createGoogleClient(stub(data)).start('contacts'), data);
+  url.searchParams.set('scope', 'openid email https://www.googleapis.com/auth/contacts');
+  await assert.rejects(createGoogleClient(stub({ ...data, authorizationUrl: url.toString() })).start('contacts'));
+  const api: ApiClient = { get: async <T>(path: string) => {
+    assert.equal(path, '/v1/contacts/google/connection');
+    return { status: 'available', accountLabel: 'test@example.test' } as T;
+  }, post: async <T>() => ({} as T) };
+  assert.deepEqual(await createGoogleClient(api).status('contacts'), { status: 'available', account: 'test@example.test' });
+});

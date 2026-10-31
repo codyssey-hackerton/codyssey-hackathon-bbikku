@@ -5,12 +5,13 @@ import { addDays, addMonths, civilDate, civilOrdinal, formatCivilDate, monthRang
 import type { CivilDate } from '../schedule/dates';
 import { ScheduleError, ScheduleLoading } from '../schedule/ScheduleStatus';
 import { useSchedule } from '../schedule/useSchedule';
+import { ActionButton } from '../ui/ActionButton';
 import { Text } from '../ui/typography';
 
-export type CalendarScreenProps = { selectedDate: Date; onSelectDate: (date: Date) => void; client: ScheduleClient; timezone: string; refreshVersion: number };
+export type CalendarScreenProps = { selectedDate: Date; onSelectDate: (date: Date) => void; client: ScheduleClient; timezone: string; refreshVersion: number; onImport?: () => void };
 const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
 
-export default function CalendarScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion }: CalendarScreenProps) {
+export default function CalendarScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onImport }: CalendarScreenProps) {
   const selected = useMemo(() => { try { return civilDate(selectedDate, timezone); } catch { return null; } }, [selectedDate.getTime(), timezone]);
   const key = selected ? `${timezone}:${selected.year}-${selected.month}-${selected.day}` : '';
   const [monthState, setMonthState] = useState<{ key: string; month: CivilDate } | null>(null);
@@ -44,6 +45,7 @@ export default function CalendarScreen({ selectedDate, onSelectDate, client, tim
   }
   return <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
     <Text style={styles.date}>{formatCivilDate(selected)}</Text><Text accessibilityRole="header" style={styles.title}>월간 캘린더</Text>
+    {onImport && <ActionButton label="Google 일정 가져오기" secondary onPress={onImport} />}
     <View style={styles.monthCard}>
       <View style={styles.monthHeader}>
         <Pressable accessibilityRole="button" accessibilityLabel="이전 달" onPress={() => setMonthState({ key, month: addMonths(displayed, -1) })} style={styles.arrow}><Text>‹</Text></Pressable>

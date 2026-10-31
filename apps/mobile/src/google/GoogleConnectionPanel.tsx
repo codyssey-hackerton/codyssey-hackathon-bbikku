@@ -12,6 +12,7 @@ const connections: { kind: GoogleConnectionKind; title: string; description: str
   { kind: 'calendar_write', title: 'Google 캘린더 동기화', description: '양방향 동기화에 필요한 별도 읽기·쓰기 권한입니다. 연결만으로 동기화하지 않습니다.' },
   { kind: 'gmail_send', title: 'Gmail 발송', description: '승인한 연락을 발송할 수 있습니다. 계정 연결만으로 메일을 보내지 않습니다.' },
   { kind: 'gmail_read', title: 'Gmail 회신 읽기', description: '처음 개인 계정을 연결할 때는 Gmail 발송을 먼저 연결한 뒤 회신 읽기를 연결해 주세요. 같은 Google 계정을 사용해야 합니다.' },
+  { kind: 'contacts', title: 'Google 연락처', description: '이름으로 연락처를 검색하고 선택한 전화번호를 확인합니다. 선택만으로 전화를 걸지 않습니다.' },
 ];
 type Load = { status: 'loading' } | { status: 'error'; error: unknown } | { status: 'success'; data: ConnectionStatus };
 type Start = { status: 'idle' | 'pending' | 'completing' | 'complete' } | { status: 'ready'; kind: GoogleConnectionKind } | { status: 'error'; error: unknown } | { status: 'completion_unknown' };
@@ -29,9 +30,9 @@ function Button({ label, onPress, disabled = false, primary = false }: { label: 
   return <ActionButton label={label} onPress={onPress} disabled={disabled} secondary={!primary} />;
 }
 
-export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient; onBack: () => void }) {
+export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImport }: { api: ApiClient; onBack: () => void; onOpenCalendarImport?: () => void }) {
   const client = useMemo(() => createGoogleClient(api), [api]);
-  const [statuses, setStatuses] = useState<Record<GoogleConnectionKind, Load>>({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
+  const [statuses, setStatuses] = useState<Record<GoogleConnectionKind, Load>>({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' }, contacts: { status: 'loading' } });
   const [attempt, setAttempt] = useState(0);
   const [start, setStart] = useState<Start>({ status: 'idle' });
   const [opened, setOpened] = useState(false);
@@ -43,7 +44,7 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
   const startGeneration = useRef(0);
   useEffect(() => {
     const current = ++generation.current;
-    setStatuses({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' } });
+    setStatuses({ calendar: { status: 'loading' }, calendar_write: { status: 'loading' }, gmail_send: { status: 'loading' }, gmail_read: { status: 'loading' }, contacts: { status: 'loading' } });
     for (const { kind } of connections) client.status(kind).then((data) => {
       if (generation.current === current) setStatuses((previous) => ({ ...previous, [kind]: { status: 'success', data } }));
     }, (error: unknown) => {
@@ -104,11 +105,12 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
     <Text accessibilityRole="header" style={styles.title}>Google 서비스 연결</Text>
     <Text style={styles.intro}>삐꾸 로그인과 Google 서비스 연결은 별도입니다. 현재 삐꾸 사용자에게 필요한 권한만 Google 동의 화면에서 직접 확인해 주세요.</Text>
     <View style={styles.notice}><Text style={styles.noticeTitle}>동의 없이 연결하지 않아요</Text>
-      <Text style={styles.detail}>캘린더와 Gmail 권한은 각각 연결합니다. 연결만으로 일정 변경이나 메일 발송이 이루어지지 않습니다.</Text></View>
+      <Text style={styles.detail}>캘린더·Gmail·연락처 권한은 각각 연결합니다. 연결만으로 일정 변경이나 메일 발송이 이루어지지 않습니다.</Text></View>
     <Text accessibilityRole="header" style={styles.section}>Google Calendar</Text>
     {connections.map(({ kind, title, description }) => {
       const status = statuses[kind];
       return <View key={kind}>
+      {kind === 'contacts' && <Text accessibilityRole="header" style={styles.section}>연락처</Text>}
       {kind === 'gmail_send' && <Text accessibilityRole="header" style={styles.section}>Gmail</Text>}
       <View style={styles.card}>
       <View style={styles.cardHeader}><Text accessibilityRole="header" style={styles.heading}>{title}</Text>
@@ -118,6 +120,8 @@ export default function GoogleConnectionPanel({ api, onBack }: { api: ApiClient;
       {status.status === 'error' && <Text accessibilityRole="alert" style={styles.error}>{message(status.error)}</Text>}
       {status.status === 'success' && status.data.status === 'available' && status.data.account && <Text style={styles.detail}>연결 계정: {status.data.account}</Text>}
       {status.status === 'success' && status.data.status === 'not_configured' && <Text style={styles.detail}>이 권한은 아직 연결되지 않았습니다.</Text>}
+      {kind === 'calendar' && status.status === 'success' && status.data.status === 'available' && onOpenCalendarImport &&
+        <Button label="캘린더 일정 가져오기" primary onPress={onOpenCalendarImport} disabled={start.status === 'pending' || start.status === 'completing'} />}
       <Button label={`${title} 연결 시작`} disabled={start.status === 'pending' || start.status === 'completing'} onPress={() => { void prepare(kind); }} />
     </View></View>; })}
     {start.status === 'pending' && <Text accessibilityLiveRegion="polite" style={styles.text}>Google 동의 화면을 준비하고 있습니다.</Text>}
