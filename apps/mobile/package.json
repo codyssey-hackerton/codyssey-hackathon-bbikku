@@ -1,0 +1,31 @@
+{
+  "name": "@pikku/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "dev": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "typecheck": "tsc --noEmit",
+    "export:ios": "expo export --platform ios --output-dir dist/ios",
+    "export:android": "expo export --platform android --output-dir dist/android",
+    "export": "npm run export:ios && npm run export:android",
+    "test": "tsx --test tests/*.test.ts src/schedule/*.test.mjs src/proposals/*.test.mjs src/memory/*.test.mjs"
+  },
+  "dependencies": {
+    "expo": "58.0.21",
+    "expo-font": "~58.0.11",
+    "expo-status-bar": "58.0.4",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "5.10.1"
+  },
+  "devDependencies": {
+    "@pikku/domain": "0.0.0",
+    "@types/react": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  }
+}

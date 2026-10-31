@@ -8,3 +8,15 @@
 !.env.example
 *.pem
 *.key
+
+# Development outputs
+node_modules/
+.expo/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.local/
+
+# Local key handoff notes
+/key.md
