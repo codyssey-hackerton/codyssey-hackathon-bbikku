@@ -1,6 +1,6 @@
 # 외부 제공자 연결 준비 — 서연님 인계
 
-기준일: 2026-10-31. **Gmail 발송 이후 회신 조회·사용자 확인·최종 반영과 제한된 양방향 음성 통화를 연결한다.** Calendar 읽기 증분은 유지하며 지도는 후순위다. 구현·계정 연결·실제 통화·배포 성공은 구분한다.
+기준일: 2026-10-31. **Gmail 발송 이후 회신 조회·사용자 확인·최종 반영과 제한된 양방향 음성 통화를 연결한다.** Calendar 읽기와 Kakao 장소·현재 시점 경로 조회를 연결한다. 구현·계정 연결·실제 통화·배포 성공은 구분한다.
 
 ## 이번 확인 범위
 
@@ -110,10 +110,10 @@ Gather/Say 턴 대화는 승인된 시간 대안 선택에 한정한다. 선택�
 
 ## 3. 지도·이동시간 — 카카오 계열 선택
 
-- **선택 상태:** 사용자는 지도 제공자로 카카오 계열을 선택했다. 장소 검색·지도 표시·길찾기는 서로 다른 기능이며 구체적인 SDK, 경로 API와 교통수단은 아직 결정하지 않았다. 카카오톡 공유·메시지 API와 구분한다. 입력된 REST 키의 직접 검색 HTTP200·1건과 신규 인증 API의 실제 검색 HTTP200·15개 및 좌표 정규화를 확인했다. 지도 화면·경로 API·이동시간 정확도와 공개 서버 설정은 미검증이다.
+- **선택 상태:** 사용자는 지도 제공자로 카카오 계열을 선택했다. 장소 검색·지도 표시·길찾기는 서로 다른 기능이며 교통수단은 사용자가 도보·대중교통·자동차를 직접 선택한다. 경로 API는 아래 구현을 사용하며 지도 SDK 화면은 별도다. 카카오톡 공유·메시지 API와 구분한다. 입력된 REST 키의 직접 검색 HTTP200·1건과 신규 인증 API의 실제 검색 HTTP200·15개 및 좌표 정규화를 확인했다. 세 수단의 경로 API를 실제 키와 독립 API 서버에서 검증했다. 지도 화면·실측 이동시간 정확도와 공개 서버 설정은 미검증이다.
 - **장소 검색:** Kakao Local의 키워드·카테고리 장소 검색과 주소/좌표 변환은 카카오디벨로퍼스 앱의 카카오맵 API 활성화와 REST API 키를 사용한다. 검색 결과만으로 이동시간을 산출하지 않는다. 앱별 활성화, 쿼터·과금 조건은 해당 프로젝트에서 확인한다. [카카오맵 사용 방법](https://developers.kakao.com/docs/ko/kakaomap/common) · [REST API](https://developers.kakao.com/docs/ko/kakaomap/rest-api)
 - **지도 화면과 설정:** 지도 Web SDK는 JavaScript 키와 해당 키의 JavaScript SDK 도메인을 사용한다. Android/iOS SDK는 네이티브 앱 키와 각 플랫폼 앱 정보가 필요하다. REST API 키는 지도 SDK 키가 아니다. REST 키에 호출 허용 IP를 설정하는 경우 실제 서버의 외부 출발 IP를 등록하고, 변경 가능성과 환경별 값을 확인한다. IP 제한은 설정 시에만 적용되므로 무조건 필수라고 가정하지 않는다. REST API 키는 서버 설정에서만 관리한다. [카카오맵 플랫폼 키](https://developers.kakao.com/docs/ko/kakaomap/common) · [앱 키와 IP 설정](https://developers.kakao.com/docs/ko/app-setting/app)
-- **경로와 이동시간:** 현재 공식 카카오맵 REST 문서는 도보·자전거·대중교통 경로 조회를 별도로 안내한다. 카카오모빌리티는 별도의 자동차 길찾기 API를 안내하며, 제휴 API 목록의 도보·자전거·대중교통 등은 별도 제휴 계약이 필요하다고 명시한다. 이들은 서로 다른 상품이므로 같은 이용 조건으로 단정하지 않는다. 선택할 교통수단, 상품별 사용 자격·쿼터·요금·실제 응답과 이용시간 기준을 확인한 뒤 이동시간 연결을 결정한다. [카카오맵 경로 REST](https://developers.kakao.com/docs/ko/kakaomap/rest-api) · [모빌리티 자동차 길찾기](https://developers.kakaomobility.com/guide/navi-api/directions) · [모빌리티 제휴 API](https://developers.kakaomobility.com/affiliate/)
+- **경로와 이동시간:** 현재 공식 카카오맵 REST 문서는 도보·자전거·대중교통 경로 조회를 별도로 안내한다. 카카오모빌리티는 별도의 자동차 길찾기 API를 안내하며, 제휴 API 목록의 도보·자전거·대중교통 등은 별도 제휴 계약이 필요하다고 명시한다. 이들은 서로 다른 상품이므로 같은 이용 조건으로 단정하지 않는다. 이번 구현은 사용자가 선택한 도보·대중교통·자동차만 다룬다. 문서상의 지원과 개별 계정 권한은 구분하며 실검증 결과는 아래에 기록한다. [카카오맵 경로 REST](https://developers.kakao.com/docs/ko/kakaomap/rest-api) · [모빌리티 자동차 길찾기](https://developers.kakaomobility.com/guide/navi-api/directions) · [모빌리티 제휴 API](https://developers.kakaomobility.com/affiliate/)
 
 서연님은 각 후보의 **프로젝트 계정 접근·활성화·테스트 사용자/번호·권한·제약·비용·읽기 전용 확인 결과와 미확인 사항**을 세진님에게 전달한다. 비밀값·개인 이메일 주소·전화번호·메일 내용은 문서나 로그에 기록하지 않는다. 제공자 확정과 실제 발송·발신은 이 조사로 완료된 것이 아니다.
 
@@ -121,4 +121,32 @@ Gather/Say 턴 대화는 승인된 시간 대안 선택에 한정한다. 선택�
 
 서버 환경에 `PIKKU_KAKAO_REST_API_KEY`를 제공하면 `GET /v1/places/search?query=...`가 활성화된다. 값은 `EXPO_PUBLIC_*`나 모바일 코드에 넣지 않는다. 로컬 `.local/kakao.env`에 입력한 값은 서버가 자동으로 읽지 않으므로 실행 시 명시적으로 환경 파일을 로드하거나 서버 비밀 설정으로 주입한다. 예: 새 코드를 실행하는 프로젝트 루트에서 `node --env-file-if-exists=.env.local --env-file=.local/kakao.env scripts/dev.mjs --api-only`를 사용하며 기존 프로세스의 포트·DB·세션과 충돌하지 않게 실행 환경을 먼저 확인한다. 별도 worktree는 원본의 파일을 자동으로 찾지 않는다. 이번 검증은 키를 명시 주입한 격리 API 검사이며 기존 실행 서버나 공개 배포를 변경한 것이 아니다.
 
-장소 검색은 첫 페이지 최대 15개이고 검색어가 Kakao에 전달된다. 사용자용 장소 선택 UI, 지도 SDK 표시, 자동 이동시간 계산은 별도 구현이다. 기존 `integrations.travel`은 `not_configured`를 유지한다.
+장소 검색은 첫 페이지 최대 15개이고 검색어가 Kakao에 전달된다. 준비계획 폼에 출발/도착 장소 선택과 교통수단 선택을 연결했다. 지도 SDK 표시는 미구현이다. `integrations.travel`은 키와 어댑터가 구성되면 available이며 해당 호출 성공을 보장하지 않는다.
+
+
+### 경로 API와 실제 서버 검증 — 2026-10-31
+
+`GET https://dapi.kakao.com/v2/routing/walk` 및 `/v2/routing/publictraffic`, `GET https://apis-navi.kakaomobility.com/v1/directions`를 서버 REST 키로 호출한다. 현재 시점 조회이며 출발시각 지정은 지원하지 않는다. 사용자는 수단을 선택하고 조회된 분 수를 확인한 뒤 입력에 적용한다. [Kakao Map 공식 REST](https://developers.kakao.com/docs/ko/kakaomap/rest-api) · [자동차 공식 API](https://developers.kakaomobility.com/guide/navi-api/directions)
+
+공식 문서의 예제 좌표로 실제 3종 직접 호출과 어댑터를 확인했다. 이어서 별도 임시 PostgreSQL·임의 loopback 포트에서 실제 server.ts를 시작하고 인증 HTTP 경유 도보 67분·대중교통 38분·자동차 12분(각 HTTP200)을 확인했다. 직접 호출 때 자동차 13분과 차이가 있어 현재 교통에 따라 변하는 값임을 보존한다. 장소 검색 15건, Calendar 목록 3개/기간 일정 0건 HTTP200, Gmail 발송·회신 경로 구성 상태를 확인했다. 별도 실제 Gmail 스레드 재조회는 회신 0건이다. 메일 재발송·캘린더 쓰기·기존 서버 변경은 없었고 검사 서버와 임시 DB만 정리했다.
+
+### 별도 worktree의 Google 자격 경로
+
+신뢰된 서버 환경의 `PIKKU_GOOGLE_CREDENTIAL_DIR`에 기존 개인 자격 디렉터리의 절대경로를 명시하면 `gmail-connection.json`, `gmail-replies-connection.json`, `calendar-connection.json`을 그곳에서 읽는다. 미지정/빈 값은 기존 worktree 상대 기본 경로를 유지하며 상대경로는 거절한다. 파일을 복제하거나 토큰 내용을 출력하지 않는다. 기존 파일 owner·디렉터리 권한·0600·O_NOFOLLOW 검사 및 발송/회신 계정 일치는 그대로 적용한다. Google client ID/secret은 서버 env에 별도로 제공한다. 기본은 로컬 개발 사용자 연결이다. 공개 preview의 제한된 소유자 바인딩은 아래 §5를 따르며 정식 다중 사용자 OAuth를 구현한 것은 아니다. 실행 중 서버에는 자동 적용되지 않는다.
+
+
+## 4. Open-Meteo·서울 지하철 — 2026-10-31 추가
+
+Open-Meteo는 키 없이 목적지 좌표·약속 시각을 전달해 시간별 예보를 읽는다. `Asia/Seoul`, 섭씨·mm·km/h를 사용한다. 무료 API는 비상업적 용도이며 일 10,000회 미만·시간 5,000회·분 600회 한도와 CC BY 4.0 출처 표시 조건을 확인했다. 화면에서 Open-Meteo/라이선스를 연결한다. 앱 캐시는 한도 준수 보조이며 여러 프로세스를 합친 전역 quota 보장은 없다. 상업적 사용 전 별도 플랜/조건 확인이 필요하다. [예보 공식 문서](https://open-meteo.com/en/docs) · [이용 조건](https://open-meteo.com/en/terms) · [라이선스](https://open-meteo.com/en/licence)
+
+서울 OA-12764 realtimeStationArrival은 서버 비밀 `SEOUL_SUBWAY_API_KEY`를 사용한다. `SEOUL_SUBWAY_TRANSPORT` 미지정은 https, 명시 http/https 외 값은 not_configured다. 공식 예제는 HTTP이며 이 환경의 HTTPS 공개 sample은 timeout, HTTP sample과 실키 어댑터는 성공했다. HTTPS 미지원으로 확정하지 않는다. 이번 연결은 **명시 http**로 검증했다. 이 상류 구간의 키·역명은 암호화되지 않으며 도청·변조 위험이 있다. 앱→삐꾸 공개 API의 HTTPS와 구분한다. 자동 다운그레이드/redirect는 없다. [서울 공식 API](https://data.seoul.go.kr/dataList/openApiView.do?infId=OA-12764&srvType=A)
+
+실제 인증 API 경유 날씨 HTTP200·시간별 예보, 지하철 HTTP200·도착 목록을 확인했다. 역 도착 정보는 여정 ETA가 아니며 응답이 오래됐으면 표시한다. 구현된 한도·캐시·TTL·오류 계약은 CONTRACTS §12를 따른다. 키 값은 문서·앱·저장소에 넣지 않는다.
+
+## 5. 실제 회신·Calendar 가져오기 및 공개 연결 준비
+
+승인된 테스트 계정 사이에서 원본 메일에 실제 답장한 뒤 앱의 스레드/참조 검증으로 회신을 읽었다. 30분이 지난 최초 제안은 changed=false/needs_user_review로 차단했다. 새 승인 테스트의 실제 회신을 확인하고 허용 대안을 선택하자 격리 PostgreSQL의 가상 약속만 변경됐다(HTTP200, applied, revision2). 저장된 성공 응답 재조회와 추가 반복 요청에서 의미상 동일한 결과·일정 버전 유지가 확인됐다. 바이트 문자열 비교는 JSONB 필드 순서에 영향을 받으므로 파싱된 JSON 전체를 비교한다. 기존 사용자 일정·Google 원본은 변경하지 않았다.
+
+사용자 승인으로 참석자 없는 비공개 Google 테스트 일정 1건을 생성하고, 실제 앱 어댑터로 읽어 격리 DB에 선택 가져오기 HTTP200을 확인했다. 같은 멱등키 재요청은 같은 결과이며 중복 추가되지 않았다. 최종 격리 DB는 가상 약속+가져온 일정 2건/revision3이다. 원본 테스트 일정은 캘린더에 남겨뒀다. 일반 종일/반복 일정이나 연속 동기화 검증은 아니다.
+
+공개 시연은 `PIKKU_GOOGLE_CONNECTION_USER_ID`에 지정된 등록 멤버 한 명과 서버 private 자격 디렉터리에만 Google 연결을 바인딩한다. 다른 멤버의 연결 상태는 not_configured이며 포트 접근을 거절한다. 파일 0600·디렉터리 0700·서비스 사용자 소유 및 기존 자격 검사를 유지한다. 발송/읽기/Calendar 권한을 합치거나 정식 다중 사용자 OAuth로 설명하지 않는다. 최신 배포 완료 여부는 IMPLEMENTATION_PLAN의 배포 기록을 확인한다.

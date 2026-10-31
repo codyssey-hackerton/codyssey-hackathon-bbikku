@@ -32,7 +32,7 @@ export function createPlanningTools(service: PlanningService, baseline: Awaited<
       return calculateTiming({ appointmentStart: input.appointmentStart ?? undefined, preparationMinutes: input.preparationMinutes ?? undefined,
         travelMinutes: input.travelMinutes ?? undefined, bufferMinutes: input.bufferMinutes ?? undefined });
     } },
-    { name: 'validate_changes', description: '현재 서버 일정과 맥락으로 변경안을 검증합니다.', input: validateInput, async run(value, userId) {
+    { name: 'validate_changes', description: '현재 일정 기준으로 변경안의 일정 충돌, 마감, 소요시간, 고정·완료 일정 보호와 버전을 검증합니다. 준비·이동 시간과 약속 사이의 관계, 실제 경로 및 이동시간은 검증하지 않습니다.', input: validateInput, async run(value, userId) {
       scoped(userId); return service.validateTool(baseline, validateInput.parse(value).changeSet);
     } },
   ];

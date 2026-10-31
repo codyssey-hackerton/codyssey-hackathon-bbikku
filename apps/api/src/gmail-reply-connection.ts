@@ -5,7 +5,7 @@ import { PlanningError } from './planning-service.ts';
 
 const READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const unavailable = () => new PlanningError(503, 'provider_unavailable', '이메일 회신 연결을 확인해 주세요.');
-export async function getGmailReplyConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; sendCredentialPath?: string; fetcher?: typeof fetch }) {
+export async function getGmailReplyConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; sendCredentialPath?: string; fetcher?: typeof fetch; userId?: string }) {
   const clientId = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_ID?.trim(); const clientSecret = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
   if (!!clientId !== !!clientSecret) throw unavailable();
   const path = options.credentialPath ?? fileURLToPath(new URL('../../../.local/gmail-replies-connection.json', import.meta.url));
@@ -37,5 +37,5 @@ export async function getGmailReplyConnection(options: { env: NodeJS.ProcessEnv;
       } catch { throw unavailable(); }
     },
   });
-  return { userId: 'local-developer' as const, senderAddress: saved.senderAddress, checkReplies: replies.checkReplies };
+  return { userId: options.userId ?? 'local-developer', senderAddress: saved.senderAddress, checkReplies: replies.checkReplies };
 }

@@ -217,4 +217,38 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 04 어댑터·06 API·00이 합의한 서버 읽기 계약이다. 인증된 `GET /v1/places/search?query=...`는 공백 제거 후 1~100자의 검색어만 받으며 추가/중복 쿼리 항목은 거절한다. 정상 data는 `{places: [{id, name, address, roadAddress, longitude, latitude}]}`다. Kakao 기본 첫 페이지 최대 15개이며 페이지네이션은 제공하지 않는다.
 
-검색어는 Kakao에 전달하고 REST 키는 서버 `PIKKU_KAKAO_REST_API_KEY`에서만 읽는다. 400 `invalid_request`, 미설정 503 `not_configured`, 시간 초과·제공자 오류·잘못된 응답은 503 `provider_unavailable`이며 원문 오류·키를 반환하지 않는다. PostgreSQL 저장이나 일정 변경은 없고 기존 capabilities 형식은 유지한다. 이 결과는 장소·좌표이며 이동시간, 경로, 지도 SDK 화면 또는 일정 장소 저장 계약이 아니다. 앱의 장소 선택 UI는 후속 연결한다.
+검색어는 Kakao에 전달하고 REST 키는 서버 `PIKKU_KAKAO_REST_API_KEY`에서만 읽는다. 400 `invalid_request`, 미설정 503 `not_configured`, 시간 초과·제공자 오류·잘못된 응답은 503 `provider_unavailable`이며 원문 오류·키를 반환하지 않는다. PostgreSQL 저장이나 일정 변경은 없고 기존 capabilities 형식은 유지한다. 이 결과는 장소·좌표이며 이동시간, 경로, 지도 SDK 화면 또는 일정 장소 저장 계약이 아니다. 준비계획 폼에서 출발/도착 장소를 선택해 §11의 경로를 조회한다. 선택 장소를 일정 자체에 저장하지 않는다.
+
+
+## 11. 사용자 선택 교통수단과 현재 시점 이동시간
+
+00·02·03·04 합의: 인증된 `POST /v1/travel/estimate`는 읽기 전용이며 `{origin:{longitude,latitude}, destination:{longitude,latitude}, mode:"walk"|"transit"|"car"}`를 받는다. 좌표는 WGS84 범위 내 숫자, 객체는 추가 필드를 허용하지 않는다. 요청 ID·멱등키로 저장/발송하지 않으며 일정 변경도 없다. 미지원 수단이나 `departureAt` 지정은 422 `unsupported`, 잘못된 좌표/본문은 400 `invalid_request`다.
+
+성공 data는 `{durationMinutes, provider:"kakao", fetchedAt, expiresAt, mode}`다. 제공자 초를 정수 분으로 올림한다. 도보/대중교통은 Kakao Map, 자동차는 Kakao Mobility의 현재 시점 경로를 사용하며 미래 출발 시각의 교통/운행을 보장하지 않는다. 응답 expiresAt은 조회 완료 후 5분이라는 앱의 재사용 정책이며 제공자의 정확도 보증이 아니다. 미설정 503 `not_configured`, 경로 없음 404 `no_route`, 제공자/타임아웃/형태 오류는 503 `provider_unavailable`이다. 다른 수단/제공자로 자동 대체하지 않는다.
+
+사용자가 교통수단을 직접 선택하고 결과의 ‘이동시간에 사용’을 눌러야 준비계획 입력에 들어간다. 장소/수단 변경·만료·앱 비활성화는 해당 경로값을 무효화하며 수동 입력은 유지한다. 클라이언트는 서버의 fetchedAt/expiresAt 차이(최대 5분)를 요청 시작의 단조시계 경과시간으로 소비해 기기 wall clock 차이와 응답 지연에 따른 연장을 막는다. 적용과 제안 전송 직전에 다시 확인한다. 검색어와 조회 좌표가 Kakao에 전달됨을 안내한다. 준비 제안 서버는 현재 숫자 입력을 검증하므로 경로 출처/유효기간의 영속 증명이나 전체 일정의 준비·이동 관계 검증을 보장하지 않는다. 서버가 조회해 저장한 경로 제약과 승인 시 재검증은 후속 계약이다.
+
+기존 공개 capabilities의 형태는 유지하고 travel은 서버 어댑터/키가 구성되면 available, 아니면 not_configured다. 이는 개별 호출 성공 증거가 아니다. 모델 내부 `context.capabilities`는 calendar/email/emailReplies/phone/places/travelTime/scheduler의 사용자별 구성 상태를 전달한다. 내부 표현 configured는 앱 실행 경로 구성만 뜻하며 모델 도구나 승인 권한을 추가하지 않는다. chat과 scheduler가 같은 runner를 사용하고 클라이언트가 이 상태를 지정할 수 없다.
+
+
+## 12. 약속 장소 예보·현재 지하철 도착 조회
+
+01·02·03·04와 MAIN이 합의한 읽기 전용 인증 API다. 일반 응답 `{requestId,data}`를 유지하며 일정 변경·승인·연락 실행을 만들지 않는다. 날씨와 역 도착 정보는 현재 준비계획 화면의 참고 자료이며 LLM의 새 Tool 또는 전체 여정 ETA를 의미하지 않는다.
+
+### 날씨
+
+`POST /v1/weather/forecast` 입력은 `{destination:{latitude,longitude},appointmentAt}`이며 appointmentAt은 UTC offset이 있는 ISO 시각이다. 과거 시각 및 서울 기준 오늘부터 16일 범위 밖은 지원하지 않는다. 성공 data는 `{provider:'open-meteo',timezone:'Asia/Seoul',forecastTime,temperatureC,apparentTemperatureC,precipitationMm,precipitationProbabilityPercent,windSpeedKmh,fetchedAt,expiresAt,remainingTtlMs,sourceUrl,licenseUrl}`다. 기온·체감온도·강수량·강수확률·풍속의 누락은 null이며 0으로 대체하지 않는다. forecastTime은 선택 시각이 속한 정시(+09:00)다. 기온·풍속은 해당 시각, 강수는 앞선 1시간 구간의 값이며 야외 활동 안전 보증이 아니다.
+
+5분 캐시와 동시 요청 합치기를 적용한다. remainingTtlMs는 서버 반환 시 남은 수명(0..300000)이고 캐시 히트에도 expiresAt을 연장하지 않는다. 클라이언트는 요청 시작부터의 단조시계 경과를 차감하며 만료·장소/시각 변경·앱 비활성화 후 이전 결과 사용을 막는다. 오류는 400 invalid_request, 422 unsupported_range, 504 timeout, 503 unavailable, 502 invalid_response다. sourceUrl/표시 출처는 `https://open-meteo.com/`, licenseUrl은 `https://open-meteo.com/en/licence`다.
+
+### 서울 지하철
+
+`POST /v1/subway/arrivals` 입력 `{stationName}`. 성공 data는 `{provider:'seoul',stationName,fetchedAt,arrivals:[{lineId,direction,destination,arrivalSeconds,message,detailMessage,observedAt,stale,staleInMs}]}`다. INFO-200은 정상 빈 배열이다. observedAt은 서울 원본 recptnDt를 한국시간으로 해석한 UTC ISO, fetchedAt은 상류 응답을 읽은 시각이다. arrivalSeconds는 `max(0, 원본 barvlDt - floor((반환시각-recptnDt)/1000))`이며 매 반환에 재계산한다. staleInMs는 생성시각 기준 120초까지 남은 값(0..120000), stale은 `staleInMs===0`이다. 캐시 적중은 fetchedAt을 바꾸지 않는다. 클라이언트는 응답 지연/단조시계 경과를 차감하고 15초 표시 유효기간 및 앱 비활성화·입력 변경을 처리한다. 자동 polling은 없다.
+
+15초 메모리 캐시·동시 중복 합치기, 분당 20회/일 900회 호출 제한, 5초 timeout, 원본 선두 100행까지만 조회한다. 한도와 캐시는 프로세스 로컬이며 재시작 후 유지되거나 여러 인스턴스 간 공유되지 않는다. 오류는 400 invalid_request, 503 not_configured/unavailable, 504 timeout, 502 invalid_response, 429 rate_limited다. 이 정보는 현재 역의 열차 도착 안내이며 사용자의 전체 이동시간·환승·약속 시각 예측이 아니다.
+
+상류 transport는 미지정 시 https, 명시 http/https만 허용하고 나머지는 not_configured다. 고정 공식 host만 사용하고 redirect/자동 HTTP 다운그레이드를 하지 않는다. 실제 HTTP 설정의 키·역명은 상류 구간에서 암호화되지 않는다. 서버 키를 앱이나 API 응답으로 보내지 않는다.
+
+## 13. 공개 시연 Google 연결 소유자
+
+신뢰된 서버 설정 `PIKKU_GOOGLE_CONNECTION_USER_ID`와 명시적 절대 자격 디렉터리로 기존 Google 발송·회신·Calendar 포트를 하나의 등록된 preview 멤버에만 연결한다. 소유자는 목록에서 정확히 한 번 존재해야 하며 잘못된 지정은 시작 실패로 처리한다. 다른 멤버는 연결 상태 not_configured 및 접근 거절을 받는다. 개발 인증의 기본 local-developer 동작은 유지한다. 이 설정은 정식 다중 사용자 OAuth 가입 기능이 아니며 개인 연결을 팀 전체에 공유하지 않는다. 기존 `/v1/capabilities` 응답 구조는 유지한다.
