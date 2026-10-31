@@ -282,7 +282,11 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   const locked = state.status === 'pending' || state.status === 'error';
   const shown = state.status === 'success' ? state.result.proposal : current.status === 'success' ? current.data : null;
   if (contactProposal) return <ContactPanel api={api} proposalClient={client} proposal={contactProposal}
-    renderProposal={(item) => <ProposalContent proposal={item} />} onScheduleChanged={onScheduleChanged} onBack={() => setContactProposal(null)} />;
+    renderProposal={(item) => <ProposalContent proposal={item} />} onScheduleChanged={onScheduleChanged} onBack={() => {
+      setContactProposal(null);
+      if (mutation.state.status === 'success') mutation.reset();
+      setAttempt((value) => value + 1);
+    }} />;
   return <ScrollView contentContainerStyle={styles.container}>
     <View style={styles.row}>
       <Text style={styles.title} accessibilityRole="header">제안 상세</Text>
@@ -318,8 +322,8 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
         </View>
       </> : <Button label="제안 다시 조회" onPress={reload} secondary />}
     </>}
-    {shown && !locked && shown.mode === 'coordination' && (shown.status === 'pending' || shown.status === 'awaiting_contact') &&
-      <Button label="연락 준비" onPress={() => setContactProposal(shown)} />}
+    {shown && !locked && shown.mode === 'coordination' && ['pending', 'awaiting_contact', 'applied', 'stale'].includes(shown.status) &&
+      <Button label={shown.status === 'applied' || shown.status === 'stale' ? '연락 내역' : '연락 준비'} onPress={() => setContactProposal(shown)} />}
   </ScrollView>;
 }
 

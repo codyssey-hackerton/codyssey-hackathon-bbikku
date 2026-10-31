@@ -34,6 +34,7 @@ function Choices<T extends string>({
           return (
             <Pressable key={option.value} accessibilityRole="radio"
               accessibilityLabel={`${label}: ${option.label}`}
+              aria-checked={selected}
               accessibilityState={{ checked: selected, disabled: unavailable }}
               disabled={unavailable} onPress={() => onChange(option.value)}
               style={[styles.choice, selected && styles.selectedChoice, unavailable && styles.disabled]}>

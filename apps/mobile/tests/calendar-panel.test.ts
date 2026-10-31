@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { Pressable as WebPressable, Text as WebText } from 'react-native-web';
 import { ApiError, createApiClient } from '../src/api/http';
 import { createMutationMachine, type Mutation } from '../src/api/mutation';
 import { createOperationGuard } from '../src/api/operationGuard';
@@ -221,7 +224,7 @@ function createHarness() {
 
 const harness = createHarness();
 const panelModule = build({
-  stdin: { contents: `export { default as Panel } from '../src/calendar/CalendarImportPanel'; export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
+  stdin: { contents: `export { default as Panel } from '../src/calendar/CalendarImportPanel'; export { ScheduleForm } from '../src/schedule/ScheduleForm'; export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   plugins: [{ name: 'mock-native-calendar', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'calendar-native' }));
@@ -242,6 +245,16 @@ function nodes(root: any): any[] {
   if (Array.isArray(root)) return root.flatMap(nodes);
   if (typeof root !== 'object') return [];
   return [root, ...nodes(root.children)];
+}
+
+function assertWebChecked(node: any, checked: boolean) {
+  assert.equal(node.props.accessibilityState.checked, checked);
+  assert.equal(node.props['aria-checked'], checked);
+  const markup = renderToStaticMarkup(React.createElement(WebPressable, {
+    accessibilityRole: node.props.accessibilityRole, 'aria-checked': node.props['aria-checked'],
+  }, React.createElement(WebText, null, '선택')));
+  assert.match(markup, new RegExp(`aria-checked="${checked}"`));
+  assert.match(markup, new RegExp(`role="${node.props.accessibilityRole}"`));
 }
 function textOf(root: any): string {
   if (root === null || root === undefined) return '';
@@ -274,6 +287,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+test('일정 폼 라디오는 선택 전후 네이티브 상태와 웹 aria-checked를 함께 갱신한다', async t => {
+  const { ScheduleForm } = await panelModule;
+  const view = harness.renderer(ScheduleForm, { item: null, timezone: 'Asia/Seoul', disabled: false, cancelDisabled: false, onCancel() {}, onSave() {} });
+  t.after(() => view.unmount());
+  const find = (label: string) => nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assertWebChecked(find('종류: 일정'), true); assertWebChecked(find('종류: 할 일'), false);
+  press(view, '종류: 할 일');
+  assertWebChecked(find('종류: 일정'), false); assertWebChecked(find('종류: 할 일'), true);
+  assertWebChecked(find('참여: 개인'), true); press(view, '참여: 공동');
+  assertWebChecked(find('참여: 개인'), false); assertWebChecked(find('참여: 공동'), true);
+});
+
 
 test('panel treats an incomplete success as uncertain and retries the same import without claiming success', async () => {
   const { Panel, operationGuard } = await panelModule;
@@ -297,14 +322,19 @@ test('panel treats an incomplete success as uncertain and retries the same impor
   const view = harness.renderer(Panel, { api, timezone: 'Asia/Seoul', scheduleClient: { list: () => revision.promise }, onBack: () => { backs += 1; }, onScheduleChanged: () => { changed += 1; } });
   assert.equal(reads, 0);
   press(view, '연결 및 캘린더 조회'); await view.settle();
+  const calendarChoice = () => nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'radio');
+  assertWebChecked(calendarChoice(), false);
   press(view, '예시');
+  assertWebChecked(calendarChoice(), true);
   enter(view, '조회 시작', from); enter(view, '조회 종료', to);
   press(view, '이 기간 일정 조회'); await view.settle();
   assert.match(textOf(view.tree), /지원하지 않는 일정 2개/);
   assert.equal(requests.length, 0);
   assert.equal(button(view, '선택한 0개 가져오기').props.disabled, true);
   const choice = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'checkbox' && textOf(node.children).includes('예시 일정'));
+  assertWebChecked(choice, false);
   choice.props.onPress(); view.flush();
+  assertWebChecked(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'checkbox' && textOf(node.children).includes('예시 일정')), true);
   press(view, '선택한 1개 가져오기');
   assert.equal(button(view, '뒤로').props.disabled, true);
   (globalThis as any).__calendarBack(); assert.equal(backs, 0);

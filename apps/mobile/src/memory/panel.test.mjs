@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { Pressable as WebPressable, Text as WebText } from 'react-native-web';
 
 // A small host renderer exercises our actual hooks and event handlers without a native device.
 // React Native Testing Library / react-test-renderer are not installed in this worktree.
@@ -176,6 +179,21 @@ function deferred() {
 const fact = (key, value) => ({
   id: key, revision: 1, kind: 'preference', key, value, source: { type: 'user', ref: 'u' },
   recordedAt: '2026-10-31T00:00:00Z', validUntil: null,
+});
+
+test('선호 종류 선택은 네이티브 checked와 웹 aria-checked를 함께 갱신한다', async () => {
+  const api = { get: async () => ({ facts: [], contextRevision: 1 }), post: async () => { throw new Error('unexpected'); } };
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+  await view.settle();
+  const radio = (label) => nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'radio' && textOf(node.children) === label);
+  const check = (label, checked) => {
+    const item = radio(label);
+    assert.equal(item.props.accessibilityState.checked, checked); assert.equal(item.props['aria-checked'], checked);
+    const markup = renderToStaticMarkup(React.createElement(WebPressable, { accessibilityRole: 'radio', 'aria-checked': item.props['aria-checked'] }, React.createElement(WebText, null, label)));
+    assert.match(markup, new RegExp(`aria-checked="${checked}"`)); assert.match(markup, /role="radio"/);
+  };
+  check('명시 선호', true); check('일시 상황', false); press(view, '일시 상황');
+  check('명시 선호', false); check('일시 상황', true);
 });
 
 test('a hidden panel retains its draft, while a connection change clears it and ignores an old save', async () => {
