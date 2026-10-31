@@ -23,6 +23,7 @@ import CalendarScreen from './src/screens/CalendarScreen';
 import CalendarImportPanel from './src/calendar/CalendarImportPanel';
 import PhoneConnectionPanel from './src/contacts/PhoneConnectionPanel';
 import GoogleConnectionPanel from './src/google/GoogleConnectionPanel';
+import HealthPanel from './src/health/HealthPanel';
 import DayScreen from './src/screens/DayScreen';
 import { createScheduleClient } from './src/schedule/client';
 import { civilDate, formatCivilDate } from './src/schedule/dates';
@@ -123,6 +124,9 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const [tokenDraft, setTokenDraft] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
   const [showSettings, setShowSettings] = useState(Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true');
+  const [showConnections, setShowConnections] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
+  const [healthMounted, setHealthMounted] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const timezone = useMemo(deviceTimezone, []);
@@ -187,6 +191,11 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       </View>
       {showSettings && (
         <View style={styles.settings}>
+          <Pressable accessibilityRole="button" accessibilityLabel="연결" accessibilityState={{ expanded: showConnections }}
+            onPress={() => setShowConnections((value) => !value)} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>연결</Text></Pressable>
+          {showConnections && <Pressable accessibilityRole="button" accessibilityLabel="건강 데이터" onPress={() => {
+            setHealthMounted(true); setHealthOpen(true); setShowSettings(false);
+          }} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>건강 데이터</Text></Pressable>}
           <Text style={styles.settingLabel}>API 서버 주소</Text>
           <TextInput accessibilityLabel="API 서버 주소" value={urlDraft} onChangeText={(value) => { setUrlDraft(value); setTokenEdited(false); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
           <Text style={styles.settingLabel}>{Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' ? '팀 참여 코드' : '개발 세션 Bearer 토큰'}</Text>
@@ -196,7 +205,8 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Pressable accessibilityRole="button" onPress={applySettings} style={styles.apply}><Text style={styles.applyText}>설정 적용</Text></Pressable>
         </View>
       )}
-      <ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} />
+      <Scene visible={!healthOpen}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} /></Scene>
+      {healthMounted && <Scene visible={healthOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen} onBack={() => setHealthOpen(false)} /></Scene>}
     </SafeAreaView>
   );
 }

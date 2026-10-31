@@ -291,3 +291,13 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 사용자가 원래 앱에 확인 코드를 입력하면 인증된 `POST /v1/google/oauth/complete`에 `{completionSecret, confirmationCode}`를 보내고 성공 시 `{requestId, data: {status: 'connected'}}`를 받는다. 두 값은 43자 base64url이며 시작부터 10분 안에 같은 사용자에게서 함께 확인돼야 한다. 만료·불일치·재사용은 일반 400 오류다. 완료 요청은 한 번만 시도한다. 응답을 잃으면 자동 재시도하지 않고 연결 상태를 새로 조회하며, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 이미 있었다면 상태가 연결됨이어도 새 계정으로 변경됐는지는 확인할 수 없다. 취소·화면 이탈·계정 전환 시 앱의 비밀값을 지운다. 재시작 시 진행 중인 상태는 사라진다.
 
 계정·권한 확인 후 사용자별 0700 디렉터리에 자격 파일을 0600으로 저장한다. 진행 중인 OAuth 상태는 단일 프로세스 메모리에 있으며 다중 인스턴스에서 공유되지 않는다. Gmail 회신 계정은 같은 사용자의 발송 계정과 일치해야 한다. 인증코드·access/refresh token은 앱 응답에 반환하지 않으며, OAuth 동의는 메일 발송 승인이 아니다. 이 흐름은 기존 앱 사용자의 외부 Google 연결이며 회원가입이나 Google 계정으로 앱에 로그인하는 기능이 아니다. 실제 Google 동의·공개 배포 검증은 별도로 기록한다.
+
+## 15. 건강 데이터 로컬 전용 계약
+
+00·01~05가 맞춘 모바일 내부 계약이다. **HTTP·DB·Agent Tool 계약은 추가하지 않는다.** 정본 타입은 `apps/mobile/src/health/types.ts`, 동작 의미는 [건강 연결 기록](WEARABLE_INTEGRATION.md)을 따른다.
+
+- `HealthSelection {steps,workouts}`는 각각 boolean, 초기값 false다. `HealthAdapter`의 `availability()`는 지원 여부만, `connect(selection)`은 선택 항목의 읽기 권한 요청, `read({now,timezone,selection})`은 수동 조회, `openSettings()`는 사용자 설정 이동이다. iOS 설정 이동은 건강 권한 화면 직행이 아니다.
+- `HealthReadResult`는 `source:'apple_health'|'health_connect'`, `lastSyncedAt`, `timezone`, `selection`, `status:'ok'|'partial'|'no_data_or_access'`, `truncated`, `workoutsAvailability`, `stepsByDay`, `workouts`를 제공한다. 날짜별 걸음 `null`은 미확인이다. iOS 읽기 권한은 `unknown`이며 빈 결과로 거부를 단정하지 않는다.
+- 운동은 `{source,id,startAt,endAt,kind}`다. 출처+ID로 중복을 제거하고 충돌·불완전·잘림을 표시한다. `summarizeHealth`는 선택 시간대의 오늘 포함 7일로 자르고 겹치는 기록 구간을 한 번만 더한다. `exerciseMinutes`는 일시정지 포함 기록 구간 시간이며 활동 시간 보증이 아니다.
+- `HealthSummary`는 출처·조회시각·상태·선택·날짜별 값·기록·`signals`·`stale`을 갖는다. 신호 `{kind,value,sampleDays,source,calculatedAt,expiresAt}`는 완전한 결과에서만 생성하고 마지막 조회부터 5분 뒤 만료한다. 장기 선호/건강 판단을 생성하지 않는다.
+- 결과는 화면 메모리에만 보관한다. 선택/시간대 변경 시 이전 결과를 폐기하며 연결해제·앱 프로세스 종료 시 지운다. 화면만 숨긴 동안은 메모리에 유지하고 복귀 시 만료를 확인한다. OS 권한 철회와 앱 연결해제는 별개다. 서버/AI 활용을 원하는 후속 단계에서는 별도 전송·동의·삭제 계약부터 합의한다.

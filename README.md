@@ -14,6 +14,7 @@
 
 ## 문서
 
+- [워치 건강 데이터 연결](docs/WEARABLE_INTEGRATION.md): 최근 7일 걸음·운동의 선택적 기기 내 읽기, 개발 빌드·권한·실기기 미검증 범위.
 - [실행 Agent 프롬프트](docs/AGENT_PROMPT.md): 팀원 원문을 현재 계약/실제 기능에 맞게 반영한 한국어 정본.
 
 - [회의 맥락 정렬](docs/MEETING_ALIGNMENT.md): 자료 출처, 논의와 미결정 사항.

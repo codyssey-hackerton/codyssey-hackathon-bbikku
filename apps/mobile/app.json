@@ -6,10 +6,28 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.codyssey.pikku.dev"
+    },
+    "android": {
+      "package": "com.codyssey.pikku.dev",
+      "permissions": [
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.READ_EXERCISE"
+      ]
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "최근 7일의 걸음 수와 운동 기록을 기기에서 확인하기 위해 건강 데이터 읽기 권한이 필요합니다.",
+          "NSHealthUpdateUsageDescription": false,
+          "background": false
+        }
+      ],
+      "./plugins/with-health-connect-rationale.cjs",
+      "react-native-health-connect"
     ]
   }
 }
