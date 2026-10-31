@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "PIKKU",
+    "slug": "pikku-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": { "supportsTablet": true }
+  }
+}
