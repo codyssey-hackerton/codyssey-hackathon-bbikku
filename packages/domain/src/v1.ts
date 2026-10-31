@@ -208,6 +208,82 @@ function coordinationAlternativeKeepsOtherFields(before: ScheduleItem, change: C
     next.involvement === before.involvement && next.completion === before.completion;
 }
 
+// Explicit relationships only: the server must never infer a link from a task title.
+function validateTimingConstraints(
+  changeSet: ChangeSet, current: Map<string, { item: ScheduleItem; interval: Interval | null }>,
+  changedTargets: Set<string>, validation: ValidationResult,
+): void {
+  const constraints: unknown = changeSet.timingConstraints;
+  if (constraints === undefined) return;
+  if (!Array.isArray(constraints) || constraints.length > 100) {
+    validation.conflicts.push({ targetIds: [], reason: "invalid_timing_constraints" });
+    return;
+  }
+  const used = new Set<string>();
+  const windows: Interval[] = [];
+  for (const [index, entry] of constraints.entries()) {
+    const path = `timingConstraints[${index}]`;
+    const fail = (reason: string) => validation.conflicts.push({ targetIds: [], reason: `${reason}:${path}` });
+    if (!isRecord(entry) || !isRecord(entry.appointment) || !isRecord(entry.segments)) { fail("invalid_timing_constraint"); continue; }
+    const { appointment } = entry;
+    let event: ScheduleFields | undefined;
+    if (appointment.kind === "existing" && isId(appointment.id) && isRevision(appointment.expectedRevision, 1)) {
+      const target = current.get(appointment.id);
+      if (!target || target.item.revision !== appointment.expectedRevision || changedTargets.has(appointment.id)) {
+        fail("stale_timing_appointment"); continue;
+      }
+      event = target.item;
+    } else if (appointment.kind === "change" && isId(appointment.changeId)) {
+      const target = changeSet.changes.find(change => change.changeId === appointment.changeId);
+      if (target && target.operation !== "delete") event = target.after;
+    }
+    if (!event || event.kind !== "event" || !event.timeSlot || event.completion === "completed") {
+      fail("invalid_timing_appointment"); continue;
+    }
+    if (compareInstant(parseInstant(event.timeSlot.startsAt)!, parseInstant(validation.checkedAt)!) < 0) {
+      fail("past_timing_appointment"); continue;
+    }
+    const names = ["preparationMinutes", "travelMinutes", "bufferMinutes"] as const;
+    const missing = names.filter(name => entry[name] == null);
+    if (missing.length) { validation.missingFields.push(...missing.map(name => `${path}.${name}`)); continue; }
+    if (names.some(name => typeof entry[name] !== "number" || !Number.isFinite(entry[name]) || (entry[name] as number) < 0 || !Number.isSafeInteger((entry[name] as number) * 60_000))) {
+      fail("invalid_timing_minutes"); continue;
+    }
+    const preparationMinutes = entry.preparationMinutes as number, travelMinutes = entry.travelMinutes as number, bufferMinutes = entry.bufferMinutes as number;
+    const timing = calculateTiming({ appointmentStart: event.timeSlot.startsAt, preparationMinutes, travelMinutes, bufferMinutes });
+    const arrival = calculateTiming({ appointmentStart: event.timeSlot.startsAt, preparationMinutes: 0, travelMinutes: 0, bufferMinutes });
+    if (!timing.ready || !arrival.ready) { fail("invalid_timing_calculation"); continue; }
+    const expected = [
+      { id: entry.segments.preparation, minutes: preparationMinutes, start: timing.preparationStartAt, end: timing.departureAt },
+      { id: entry.segments.travel, minutes: travelMinutes, start: timing.departureAt, end: arrival.departureAt },
+      { id: entry.segments.buffer, minutes: bufferMinutes, start: arrival.departureAt, end: event.timeSlot.startsAt },
+    ];
+    if (expected.some(part => part.minutes === 0 ? part.id !== null : !isId(part.id))) {
+      fail("invalid_timing_segments"); continue;
+    }
+    const segments = expected.filter(part => part.minutes > 0);
+    const ids = segments.map(part => part.id as string);
+    if (new Set(ids).size !== ids.length || ids.some(id => used.has(id))) { fail("invalid_timing_segments"); continue; }
+    let valid = true;
+    for (const part of segments) {
+      const id = part.id as string;
+      const segment = changeSet.changes.find(change => change.changeId === id);
+      if (!segment || segment.operation === "delete" || segment.after.kind !== "task" || segment.after.involvement !== "personal" ||
+          segment.after.completion === "completed" || !segment.after.timeSlot) { valid = false; break; }
+      const start = parseInstant(segment.after.timeSlot.startsAt), end = parseInstant(segment.after.timeSlot.endsAt);
+      if (!start || !end || compareInstant(start, parseInstant(part.start)!) !== 0 ||
+          compareInstant(end, parseInstant(part.end)!) !== 0 || segment.after.durationMinutes !== part.minutes) { valid = false; break; }
+    }
+    if (!valid) { fail("invalid_timing_segments"); continue; }
+    const window: Interval = { start: parseInstant(timing.preparationStartAt)!, end: parseInstant(event.timeSlot.startsAt)! };
+    if (compareInstant(window.start, window.end) < 0 && windows.some(other => compareInstant(window.start, other.end) < 0 && compareInstant(other.start, window.end) < 0)) {
+      fail("overlapping_timing_constraints"); continue;
+    }
+    ids.forEach(id => used.add(id));
+    if (compareInstant(window.start, window.end) < 0) windows.push(window);
+  }
+}
+
 /**
  * This is a pure check, not authentication, approval, application or a lock.
  * The caller supplies a server-fetched snapshot and must revalidate atomically
@@ -345,6 +421,8 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
     validation.conflicts.push({ targetIds: [selected.id], reason: "coordination_target_unchanged" });
   }
   if (validation.conflicts.length || validation.missingFields.length || validation.protectedTargets.length) return invalidAssessment();
+  validateTimingConstraints(input.changeSet, current, changedTargets, validation);
+  if (validation.conflicts.length || validation.missingFields.length) return invalidAssessment();
   if (input.purpose === "ai_proposal" && !effectiveChange) {
     validation.conflicts.push({ targetIds: [...changedTargets], reason: "no_effective_change" });
     return invalidAssessment();

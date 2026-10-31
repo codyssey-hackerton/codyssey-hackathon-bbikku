@@ -198,7 +198,8 @@ async function main() {
     assert.equal(reports[0]!.contentReview.indicators.contextMentioned, true);
     const negative = await runScenario(scenarios[0]!, selfTestModel(scenarios[0]!, true));
     assert.equal(negative.status, 'failed');
-    assert.equal(negative.checks.noNewProposal, false);
+    assert.equal(negative.resultKind, 'failure');
+    assert.equal(negative.checks.noNewProposal, true);
     const base = selfTestModel(scenarios[0]!);
     const opposition = await runScenario(scenarios[0]!, { async decide(input) {
       return input.observations.length ? { kind: 'answer', text: '지연됐으므로 기존 일정을 그대로 유지하지 마세요.' } : base.decide(input);

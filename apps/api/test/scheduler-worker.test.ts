@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { buildApp } from '../src/app.ts';
+import { PlanningService } from '../src/planning-service.ts';
+import { MemoryPlanningStore } from '../src/planning-store.ts';
 import { buildReviewEvents, defaultReviewSchedule, startReviewScheduler } from '../src/scheduler.ts';
 import type { ReviewBoss, ReviewSchedule, ReviewSchedulerRuntime, TriggerEvent } from '../src/scheduler.ts';
 
@@ -200,6 +203,28 @@ test('redelivery relies on the runtime durable claim, not queue uniqueness', asy
   assert.deepEqual(await env.boss.deliver(event), { status: 'skipped' });
   assert.equal(agentRuns, 1);
   await scheduler.stop();
+});
+
+test('redelivery invokes the real review runtime once with an in-memory ledger', async () => {
+  let now = new Date('2030-01-01T08:59:00.000Z');
+  let modelCalls = 0;
+  const store = new MemoryPlanningStore();
+  const service = new PlanningService(store, () => now);
+  const app = buildApp({ store, clock: () => now, model: { async decide() {
+    modelCalls++; return { kind: 'answer', text: '일정을 확인했습니다.' };
+  } } });
+  const boss = new FakeBoss();
+  await service.saveReviewSchedule('user-1', { expectedRevision: 0, timezone: 'UTC',
+    morning: { enabled: true, localTime: '09:00' }, evening: { enabled: false, localTime: null } });
+  const scheduler = await startReviewScheduler({ connectionString: 'postgres://fixture', boss, runtime: app.reviewRuntime, now: () => now });
+  try {
+    const event = [...boss.jobs.values()][0]!.event;
+    now = new Date(event.scheduledFor);
+    assert.deepEqual(await boss.deliver(event), { status: 'completed' });
+    assert.deepEqual(await boss.deliver(event), { status: 'completed' });
+    assert.equal(modelCalls, 1);
+    assert.equal((await store.read('user-1')).reviewLedger.size, 1);
+  } finally { await scheduler.stop(); await app.close(); }
 });
 
 test('empty database URL fails explicitly and a stopped scheduler cannot reconcile', async () => {

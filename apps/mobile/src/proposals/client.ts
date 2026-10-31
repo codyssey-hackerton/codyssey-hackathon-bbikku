@@ -109,12 +109,25 @@ function isStrings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isTimingConstraint(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.appointment) || !isRecord(value.segments)) return false;
+  const appointment = value.appointment;
+  if (appointment.kind === 'existing' ? !isId(appointment.id) || !isRevision(appointment.expectedRevision, 1) :
+      appointment.kind === 'change' ? !isId(appointment.changeId) : true) return false;
+  const minutes = (item: unknown) => item === null || (typeof item === 'number' && Number.isFinite(item) && item >= 0 && Number.isSafeInteger(item * 60_000));
+  const segment = (item: unknown) => item === null || isId(item);
+  return minutes(value.preparationMinutes) && minutes(value.travelMinutes) && minutes(value.bufferMinutes) &&
+    segment(value.segments.preparation) && segment(value.segments.travel) && segment(value.segments.buffer);
+}
+
 function isProposal(value: unknown): value is Proposal {
   if (!isRecord(value) || !isId(value.id) || !isRevision(value.revision, 1) ||
       (value.mode !== 'personal' && value.mode !== 'coordination') ||
       !isRevision(value.baseScheduleRevision, 0) || !isRevision(value.baseContextRevision, 0) ||
       !isRecord(value.changeSet) || !Array.isArray(value.changeSet.changes) ||
-      !value.changeSet.changes.every(isChange) || !Array.isArray(value.beforeItems) ||
+      !value.changeSet.changes.every(isChange) ||
+      !(value.changeSet.timingConstraints === undefined || (Array.isArray(value.changeSet.timingConstraints) &&
+        value.changeSet.timingConstraints.length <= 100 && value.changeSet.timingConstraints.every(isTimingConstraint))) || !Array.isArray(value.beforeItems) ||
       !value.beforeItems.every(isItem) || typeof value.reason !== 'string' || !isStrings(value.evidenceRefs) ||
       !isTimestamp(value.createdAt) || !(value.expiresAt === null || isTimestamp(value.expiresAt)) ||
       !['pending', 'awaiting_contact', 'applied', 'rejected', 'stale', 'expired', 'failed'].includes(value.status as string)) return false;

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ModelPort } from './agent.ts';
 import { PLANNING_PROMPT } from './planning-prompt.ts';
+import { changeSet } from './planning-schemas.ts';
 
 export const MODEL_ID = 'gpt-6.1-terra';
 export const REASONING_EFFORT = 'high';
@@ -10,26 +11,10 @@ export const REASONING_EFFORT = 'high';
 const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes']);
 const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authorization', 'permissions', 'coordinationTarget']);
 
-const TimeSlot = z.strictObject({ startsAt: z.string(), endsAt: z.string(), timezone: z.string() });
-const ScheduleFields = z.strictObject({
-  kind: z.enum(['event', 'task']),
-  title: z.string(),
-  timeSlot: TimeSlot.nullable(),
-  durationMinutes: z.number().nullable(),
-  deadline: z.string().nullable(),
-  flexibility: z.enum(['fixed', 'flexible']),
-  involvement: z.enum(['personal', 'shared']),
-  completion: z.enum(['pending', 'completed', 'incomplete', 'unknown']),
-});
-const Change = z.discriminatedUnion('operation', [
-  z.strictObject({ changeId: z.string(), operation: z.literal('create'), after: ScheduleFields }),
-  z.strictObject({ changeId: z.string(), operation: z.literal('update'), targetId: z.string(), expectedRevision: z.number().int().positive(), after: ScheduleFields }),
-  z.strictObject({ changeId: z.string(), operation: z.literal('delete'), targetId: z.string(), expectedRevision: z.number().int().positive() }),
-]);
 const FinalDecision = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('answer'), text: z.string().min(1) }),
   z.strictObject({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
-  z.strictObject({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.strictObject({ changes: z.array(Change) }), evidenceRefs: z.array(z.string()) }),
+  z.strictObject({ kind: z.literal('proposal'), reason: z.string(), changeSet, evidenceRefs: z.array(z.string()) }),
 ]);
 const Response = z.object({
   status: z.literal('completed'),

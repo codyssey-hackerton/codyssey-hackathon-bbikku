@@ -22,6 +22,7 @@ import ReviewPanel from './src/review/ReviewPanel';
 import CalendarScreen from './src/screens/CalendarScreen';
 import CalendarImportPanel from './src/calendar/CalendarImportPanel';
 import PhoneConnectionPanel from './src/contacts/PhoneConnectionPanel';
+import GoogleConnectionPanel from './src/google/GoogleConnectionPanel';
 import DayScreen from './src/screens/DayScreen';
 import { createScheduleClient } from './src/schedule/client';
 import { civilDate, formatCivilDate } from './src/schedule/dates';
@@ -51,7 +52,7 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 
 function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: string }) {
   const [tab, setTab] = useState<Tab>('chat');
-  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection'>('main');
+  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection'>('main');
   const [reviewOpened, setReviewOpened] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [coordinationTarget, setCoordinationTarget] = useState<(CoordinationTarget & { title: string }) | undefined>();
@@ -70,6 +71,9 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
 
   return <>
     <View style={styles.screenContainer}>
+      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="Google 연결" onPress={() => setPanel('googleConnection')} style={styles.importButton}>
+        <Text style={styles.settingsToggleText}>Google 연결</Text>
+      </Pressable>}
       {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="전화 외부 연결" onPress={() => setPanel('phoneConnection')} style={styles.importButton}>
         <Text style={styles.settingsToggleText}>전화 외부 연결</Text>
       </Pressable>}
@@ -93,12 +97,13 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
       <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={(proposal) => {
         const target = proposal.coordinationTarget;
         setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
-          text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
+          text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
           coordinationTarget: target ? { ...target, title: proposal.beforeItems.find((item) => item.id === target.id)?.title ?? target.id } : undefined });
         setTab('chat'); setPanel('main');
       }} /></Scene>
       {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
+      {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
     </View>

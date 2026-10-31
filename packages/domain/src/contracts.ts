@@ -81,8 +81,17 @@ export type Change =
     }
   | { changeId: string; operation: "delete"; targetId: string; expectedRevision: number };
 
+export interface TimingConstraint {
+  appointment: { kind: "existing"; id: string; expectedRevision: number } | { kind: "change"; changeId: string };
+  preparationMinutes: number | null;
+  travelMinutes: number | null;
+  bufferMinutes: number | null;
+  segments: { preparation: string | null; travel: string | null; buffer: string | null };
+}
+
 export interface ChangeSet {
   changes: Change[];
+  timingConstraints?: TimingConstraint[];
 }
 
 export type ProposalMode = "personal" | "coordination";

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { AgentExecutionFailure, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
 import type { SessionResolver } from './auth.ts';
+import type { createGoogleOAuth } from './google-oauth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
 import { MODEL_ID, REASONING_EFFORT } from './model.ts';
 import { PlanningError, PlanningService } from './planning-service.ts';
@@ -88,7 +89,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -102,7 +103,6 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   const planning = new PlanningService(store, options.clock);
   const contacts = new ContactService(store, planning, options.clock);
   const contactResponses = new ContactResponseService(store, planning, options.clock);
-  const contactDispatch = new ContactDispatch(store, planning, options.gmailContact, options.clock);
   let voiceTokens: VoiceTokens | undefined; let voiceWebhook: VoiceWebhook | undefined;
   if (store.durable && options.phoneConnections && options.voice && typeof options.voice.model?.classify === 'function') {
     try {
@@ -112,18 +112,25 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     } catch { voiceTokens = undefined; voiceWebhook = undefined; }
   }
   const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens) : undefined;
-  const gmailRepliesFor = (userId: string) => {
-    const connection = options.gmailReplyConnection;
+  const googleFor = async (userId: string) => {
+    const current = await options.googleOAuth?.connections(userId) ?? {};
+    return { gmailContact: current.gmailContact ?? (!current.blocked?.gmailContact && options.gmailContact?.userId === userId ? options.gmailContact : undefined),
+      gmailReplyConnection: current.gmailReplyConnection ?? (!current.blocked?.gmailReplyConnection && !current.gmailContact && options.gmailReplyConnection?.userId === userId ? options.gmailReplyConnection : undefined),
+      calendarConnection: current.calendarConnection ?? (!current.blocked?.calendarConnection && options.calendarConnection?.userId === userId ? options.calendarConnection : undefined) };
+  };
+  const gmailRepliesFor = async (userId: string) => {
+    const connection = (await googleFor(userId)).gmailReplyConnection;
     return store.durable && connection?.userId === userId && typeof connection.checkReplies === 'function' &&
       z.email().max(254).safeParse(connection.senderAddress).success ? connection : undefined;
   };
   const feature = (configured: boolean) => ({ status: configured ? 'configured' as const : 'not_configured' as const, access: 'app' as const });
   const agentCapabilities = async (userId: string) => {
     const schedulerStatus = options.schedulerStatus?.();
+    const google = await googleFor(userId);
     return {
-    calendar: feature(options.calendarConnection?.userId === userId),
-    email: feature(gmailAvailable(store, options.gmailContact, userId)),
-    emailReplies: feature(!!gmailRepliesFor(userId)),
+    calendar: feature(google.calendarConnection?.userId === userId),
+    email: feature(gmailAvailable(store, google.gmailContact, userId)),
+    emailReplies: feature(!!await gmailRepliesFor(userId)),
     phone: feature(!!voiceWebhook && !!voiceTokens && (await options.phoneConnections?.status(userId))?.status === 'available'),
     places: feature(!!options.places && options.placesConfigured === true),
     travelTime: { ...feature(!!options.travel && options.travelConfigured === true), modes: ['walk', 'transit', 'car'] as Array<'walk' | 'transit' | 'car'>,
@@ -231,6 +238,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   });
   app.addHook('preHandler', async request => {
     if (request.routeOptions.url === '/health') return;
+    if (request.method === 'GET' && request.routeOptions.url === '/v1/google/oauth/callback') return;
     // This single provider route authenticates with Twilio's signature and bound call SID.
     if (request.method === 'POST' && request.routeOptions.url === '/v1/voice/twilio/:token') return;
     const authorization = request.headers.authorization;
@@ -270,28 +278,52 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     data: {
       storage: { mode: planning.store.mode, durable: planning.store.durable },
       model: { id: MODEL_ID, reasoningEffort: REASONING_EFFORT, status: modelStatus },
-      integrations: { calendar: options.calendarConnection?.userId === authenticated.get(request) ? 'available' : 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: options.travel && options.travelConfigured === true ? 'available' : 'not_configured' },
+      integrations: { calendar: (await googleFor(authenticated.get(request)!)).calendarConnection ? 'available' : 'not_configured', email: gmailAvailable(store, (await googleFor(authenticated.get(request)!)).gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: options.travel && options.travelConfigured === true ? 'available' : 'not_configured' },
       scheduler: { status: options.schedulerStatus?.() ?? 'not_configured' },
     },
   }));
   app.get('/v1/email-connection', async request => {
-    const available = gmailAvailable(store, options.gmailContact, authenticated.get(request)!);
-    return { requestId: request.id, data: { status: available ? 'available' : 'not_configured', senderAddress: available ? options.gmailContact!.senderAddress : null } };
+    const connection = (await googleFor(authenticated.get(request)!)).gmailContact;
+    const available = gmailAvailable(store, connection, authenticated.get(request)!);
+    return { requestId: request.id, data: { status: available ? 'available' : 'not_configured', senderAddress: available ? connection.senderAddress : null } };
   });
   app.get('/v1/email-reply-connection', async request => {
-    const connection = gmailRepliesFor(authenticated.get(request)!);
+    const connection = await gmailRepliesFor(authenticated.get(request)!);
     return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', senderAddress: connection?.senderAddress ?? null } };
   });
-  const calendarFor = (userId: string) => {
-    if (!options.calendarConnection || options.calendarConnection.userId !== userId) throw new ApiError(503, 'not_configured', '캘린더 연결이 설정되지 않았습니다.');
-    return options.calendarConnection;
+  const calendarFor = async (userId: string) => {
+    const connection = (await googleFor(userId)).calendarConnection;
+    if (!connection || connection.userId !== userId) throw new ApiError(503, 'not_configured', '캘린더 연결이 설정되지 않았습니다.');
+    return connection;
   };
   app.get('/v1/calendar-connection', async request => {
-    const connection = options.calendarConnection?.userId === authenticated.get(request) ? options.calendarConnection : undefined;
+    const connection = (await googleFor(authenticated.get(request)!)).calendarConnection;
     return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', accountLabel: connection?.accountLabel ?? null } };
   });
-  app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listCalendars() }));
-  app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listEvents(parse(calendarQuery, request.query)) }));
+  app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listCalendars() }));
+  app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listEvents(parse(calendarQuery, request.query)) }));
+  app.post('/v1/google/oauth/start', async (request, reply) => {
+    const body = parse(z.object({ kind: z.enum(['calendar', 'gmail_send', 'gmail_read']) }).strict(), request.body);
+    let result: Awaited<ReturnType<NonNullable<typeof options.googleOAuth>['start']>>;
+    try { result = await options.googleOAuth?.start(authenticated.get(request)!, body.kind); }
+    catch { throw new ApiError(503, 'not_configured', 'Google 연결이 설정되지 않았습니다.'); }
+    if (!result) throw new ApiError(503, 'not_configured', 'Google 연결이 설정되지 않았습니다.');
+    reply.header('Cache-Control', 'no-store');
+    return { requestId: request.id, data: result };
+  });
+  app.get('/v1/google/oauth/callback', async (request, reply) => {
+    const query = z.object({ state: z.string().regex(/^[A-Za-z0-9_-]{43}$/), code: z.string().max(2048).optional() }).safeParse(request.query);
+    const confirmationCode = query.success ? await options.googleOAuth?.callback(query.data.state, query.data.code ?? '') : undefined;
+    return reply.code(confirmationCode ? 200 : 400).header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer')
+      .header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'").type('text/plain; charset=utf-8')
+      .send(confirmationCode ? `앱으로 돌아가 아래 연결 확인 코드를 입력해 주세요.\n\n${confirmationCode}` : 'Google 연결을 완료하지 못했습니다. 앱에서 다시 시도해 주세요.');
+  });
+  app.post('/v1/google/oauth/complete', async (request, reply) => {
+    const body = parse(z.object({ completionSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/), confirmationCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict(), request.body);
+    if (!await options.googleOAuth?.complete(authenticated.get(request)!, body.completionSecret, body.confirmationCode)) throw invalidRequest();
+    reply.header('Cache-Control', 'no-store');
+    return { requestId: request.id, data: { status: 'connected' } };
+  });
   app.get('/v1/places/search', async request => {
     const { query } = parse(placesQuery, request.query);
     if (!options.places) throw new ApiError(503, 'not_configured', '장소 검색이 설정되지 않았습니다.');
@@ -375,7 +407,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   app.post('/v1/calendar/import', async (request, reply) => {
     const result = await runIdempotent(request, 'calendar_import', async (_requestBody, control) => {
       const body = parse(calendarImportBody, request.body); const userId = authenticated.get(request)!;
-      const service = new CalendarImportService(store, calendarFor(userId));
+      const service = new CalendarImportService(store, await calendarFor(userId));
       const prepared = await service.prepareSelected({ ...body, userId });
       return control.finalize(async () => ({ status: 200, body: { requestId: body.requestId, data: await service.commitPrepared(prepared) } }));
     });
@@ -536,7 +568,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   app.post('/v1/contact-requests/:id/check-replies', async (request, reply) => {
     const { id } = parse(z.object({ id: identifier }).strict(), request.params);
     const body = parse(checkRepliesBody, request.body); const userId = authenticated.get(request)!;
-    const connection = gmailRepliesFor(userId);
+    const connection = await gmailRepliesFor(userId);
     if (!connection) throw new ApiError(503, 'not_configured', '이메일 회신 연결이 필요합니다.');
     const result = await runIdempotent(request, 'contact_reply_check', async (_requestBody, control) => {
       const snapshot = (await store.read(userId)).contactRequests.get(id);
@@ -585,7 +617,9 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     const body = parse(contactSendBody, request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
-    const result = await contactDispatch.send(authenticated.get(request)!, id, body, key);
+    const userId = authenticated.get(request)!;
+    const contactDispatch = new ContactDispatch(store, planning, (await googleFor(userId)).gmailContact, options.clock);
+    const result = await contactDispatch.send(userId, id, body, key);
     return reply.code(result.status).send(result.body);
   });
   });

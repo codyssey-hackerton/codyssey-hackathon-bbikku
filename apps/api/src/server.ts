@@ -6,7 +6,7 @@ import { assertDevelopmentBinding } from './development.ts';
 import pg from 'pg';
 import { PostgresPlanningStore } from './postgres-store.ts';
 import { startReviewScheduler, type ReviewScheduler } from './scheduler.ts';
-import { getGmailConnection } from './gmail-connection.ts';
+import { GMAIL_CREDENTIAL_PATH, getGmailConnection } from './gmail-connection.ts';
 import { getGmailReplyConnection } from './gmail-reply-connection.ts';
 import { getCalendarConnection } from './google-calendar.ts';
 import { createKakaoPlaces } from './kakao-places.ts';
@@ -15,6 +15,7 @@ import { createOpenMeteo } from './open-meteo.ts';
 import { createSeoulSubway } from './seoul-subway.ts';
 import { resolveGoogleCredentialPaths } from './google-credential-paths.ts';
 import { resolveGoogleConnectionOwner } from './google-connection-owner.ts';
+import { createGoogleOAuth } from './google-oauth.ts';
 import { PhoneConnections } from './phone-connection.ts';
 import { createVoiceResponsesModel } from './voice-model.ts';
 
@@ -41,6 +42,7 @@ let calendarConnection: Awaited<ReturnType<typeof getCalendarConnection>>;
 const googlePaths = resolveGoogleCredentialPaths(process.env.PIKKU_GOOGLE_CREDENTIAL_DIR);
 const googleUserId = resolveGoogleConnectionOwner({ developmentAuth, previewAuth, previewMembers,
   configuredUserId: process.env.PIKKU_GOOGLE_CONNECTION_USER_ID, credentialDirectory: process.env.PIKKU_GOOGLE_CREDENTIAL_DIR });
+const googleOAuth = createGoogleOAuth({ env: process.env, legacyGmail: googleUserId ? { userId: googleUserId, credentialPath: googlePaths.gmailPath ?? GMAIL_CREDENTIAL_PATH } : undefined });
 if (googleUserId) {
   try { gmailContact = await getGmailConnection({ env: process.env, credentialPath: googlePaths.gmailPath, userId: googleUserId }); }
   catch { process.emitWarning('Gmail 연결 설정을 확인해 주세요.'); }
@@ -80,7 +82,7 @@ for (const origin of webOrigins) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PIKKU_WEB_ORIGINS must contain exact HTTP(S) origins');
 }
-const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, places, travel, weather, subway, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
+const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }

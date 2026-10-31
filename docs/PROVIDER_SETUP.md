@@ -16,6 +16,14 @@
 3. 외부 앱의 Testing 상태는 등록한 테스트 사용자만 접근하며 Calendar/Gmail 범위의 테스트 동의·refresh token은 7일 만료 조건을 확인한다. **Expo Go는 OAuth 리디렉션 로컬 테스트에 사용할 수 없으므로 개발 빌드를 검토**한다. Google Android 클라이언트의 임의 custom URI scheme과 모바일 loopback 제한도 있어 개발 빌드만으로 인증 호환을 단정하지 않는다. [테스트 사용자](https://support.google.com/cloud/answer/15549945?hl=en) · [Expo OAuth](https://docs.expo.dev/guides/authentication/) · [Google 리디렉션](https://developers.google.com/identity/protocols/oauth2/native-app) · [모바일 loopback](https://developers.google.com/identity/protocols/oauth2/resources/loopback-migration)
 4. 이미 부여된 읽기 권한이 있는 경우에만 테스트 계정의 Calendar 목록/일정을 최소 조회하고 결과 상태만 기록한다. Gmail `users.getProfile`은 `gmail.send`만으로 조회할 수 없으므로 확인을 위해 읽기 권한을 임의로 추가하지 않는다. 실제 발송·수정과 회신 검증은 별도 승인된 테스트에서 다룬다. [Gmail 프로필의 허용 범위](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)
 
+### 사용자별 수동 확인 코드 연결 — 통합 중
+
+서버에는 `PIKKU_GOOGLE_OAUTH_CLIENT_ID`, `PIKKU_GOOGLE_OAUTH_CLIENT_SECRET`, `PIKKU_GOOGLE_USER_CREDENTIAL_DIR`, `PIKKU_GOOGLE_OAUTH_REDIRECT_URI`를 비밀 설정으로 제공한다. 자격 디렉터리는 서버 프로세스 소유의 절대 경로·0700이어야 한다. 현재 기존 Quick Tunnel의 등록 대상 URI는 `https://establish-cause-transcript-floor.trycloudflare.com/v1/google/oauth/callback`이며 `PIKKU_GOOGLE_OAUTH_REDIRECT_URI`와 Google Cloud 웹 OAuth 클라이언트에 정확히 같은 URI를 설정해야 한다. Quick Tunnel 주소는 영구 고정이 아니므로 변경 시 두 설정을 함께 갱신한다. 설정 이름이나 파일 준비만으로 동의·연결 성공을 뜻하지 않는다.
+
+인증된 사용자가 앱에서 Calendar, Gmail 발송 또는 Gmail 회신 읽기를 선택해 외부 브라우저의 Google 동의를 진행한다. 동의 후 브라우저에 표시되는 별도 **연결 확인 코드**를 원래 앱에 입력해야 서버가 앱 메모리의 일회 비밀값과 사용자 세션을 함께 확인하고 자격을 저장한다. 인증코드·토큰을 앱에 복사하거나 공유하지 않는다. Gmail 회신 읽기는 같은 사용자의 발송 Google 계정과 일치해야 한다. 완료 결과를 받지 못하면 자동 재전송하지 않고 연결 상태를 확인한 뒤, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 있었다면 연결 상태만으로 새 계정으로 바뀌었는지는 알 수 없다. 취소·계정 전환·연결 화면 이탈 또는 서버 재시작 후에도 다시 시작한다. 이 수동 브라우저 복귀 방식과 위의 네이티브 리디렉션 제약은 구분하며, 실제 기기 호환성은 별도 확인이 필요하다.
+
+사용자별 파일은 0600으로 저장하며 OAuth 진행 상태는 단일 프로세스 메모리에서만 유지된다. 필수 설정이 없으면 새 연결은 사용할 수 없고 기존 시연 소유자 연결은 유지된다. 구현·설정·합성 테스트·실제 사용자 Google 동의 및 공개 배포 검증은 별개다. 기존 공개 시연 소유자 연결은 새 사용자별 연결 검증을 대신하지 않는다. Google 계정 접근 동의만으로 메일 발송이 승인되는 것은 아니다. 구체적인 통합 계약은 [CONTRACTS §14](CONTRACTS.md#14-사용자별-google-oauth--통합-중인-계약)를 따른다.
+
 ### Calendar 로컬 개발 연결
 
 2026-10-31 실제 진행: Gmail과 같은 계정의 Calendar 목록/일정 읽기 동의를 완료하고 원본 로컬 프로젝트의 별도 0600 파일에 저장했다. 토큰 갱신과 계정 확인은 HTTP200이었다. 초기 Calendar 목록 조회 HTTP403 `accessNotConfigured`/`SERVICE_DISABLED`는 API 활성화 후 해소됐으며 목록 HTTP200·3개, 2026-10-31 00:00~11-07 00:00 한국시간의 일정 조회 성공(지원 일정 0건·미지원 0건)을 확인했다. 실제 항목 가져오기와 외부 쓰기는 실행하지 않았다.

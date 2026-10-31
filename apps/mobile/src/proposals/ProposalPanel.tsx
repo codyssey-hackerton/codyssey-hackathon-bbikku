@@ -204,6 +204,18 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
     <Text style={styles.text}>{proposal.reason || '이유가 제공되지 않았습니다.'}</Text>
     <Text style={styles.text}>근거 참조: {proposal.evidenceRefs.length === 0 ? '없음' : proposal.evidenceRefs.join(', ')}</Text>
 
+    {!!proposal.changeSet.timingConstraints?.length && <>
+      <Text style={styles.sectionTitle} accessibilityRole="header">제안된 준비·이동 관계</Text>
+      <Text style={styles.text}>아래 시간은 제안에 포함된 값입니다. 실제 경로와 사용자 확인 여부를 별도로 확인해 주세요.</Text>
+      {proposal.changeSet.timingConstraints.map((timing, index) => <View style={styles.card} key={index}>
+        <Text style={styles.text}>{timing.appointment.kind === 'existing'
+          ? `기준 약속: ${timing.appointment.id} · 버전 ${timing.appointment.expectedRevision}`
+          : `기준 약속 변경 ID: ${timing.appointment.changeId}`}</Text>
+        <Text style={styles.text}>제안된 시간: 준비 {timing.preparationMinutes === null ? '미확인' : `${timing.preparationMinutes}분`} · 이동 {timing.travelMinutes === null ? '미확인' : `${timing.travelMinutes}분`} · 여유 {timing.bufferMinutes === null ? '미확인' : `${timing.bufferMinutes}분`}</Text>
+        <Text style={styles.muted}>연결된 변경 ID: 준비 {timing.segments.preparation ?? '없음'} · 이동 {timing.segments.travel ?? '없음'} · 여유 {timing.segments.buffer ?? '없음'}</Text>
+      </View>)}
+    </>}
+
     <Text style={styles.sectionTitle} accessibilityRole="header">전체 변경 내용</Text>
     {proposal.changeSet.changes.length === 0 && <Text style={styles.text}>변경 내용이 없습니다.</Text>}
     {proposal.changeSet.changes.map((change, index) => {
