@@ -2,6 +2,16 @@
 
 2026-10-31 · 00 MAIN. 기준: PRD §2 / ADR v1 / CONTRACTS v1. 문서 PR #1은 병합됐으며 이 계획은 그 기준의 개발·검증 진행을 기록한다. 아키텍처를 다시 선택하지 않는다.
 
+## 건강 데이터 로컬 읽기 — 2026-11-01 최신 증분
+
+설정 → 건강 데이터에 최근 7일 걸음 수·운동 기록의 항목별 선택, OS 읽기 동의, 수동 조회·재조회·해제를 연결했다. HealthKit/Health Connect 어댑터와 날짜·중복·누락 집계는 플랫폼별로 분리하고 기존 메인 Agent·DB·서버 계약은 유지했다. 데이터는 화면 메모리에만 있으며 서버·LLM·연락으로 전송하지 않는다. 운동시간은 일시정지를 포함한 기록 구간이며 실제 활동 시간과 구분한다.
+
+**빌드 확인:** 최종 의존성으로 Android prebuild·Manifest/Kotlin·Debug APK, iOS fresh prebuild·Pods·개발 scheme 포함 unsigned simulator Debug 빌드에 성공했다. 읽기 권한만 설정했고 백그라운드 건강 접근은 없다. Android 앱 최소 API는 26으로 변경됐고 건강 기능은 API 28 이상이다. Expo Go/웹은 미지원 안내를 표시한다. 실기기 설치·OS 동의·Watch 동기화·실제 건강 데이터는 아직 검증하지 않았다. 무료 Apple 계정 Personal Team도 테스트 가능하며 현재 Mac에는 서명/연결 iPhone이 없다.
+
+**자동 검사:** 최종 공통 집계·iOS·Android·건강 UI·앱 통합 5개 파일의 합성 테스트 55/55(fail/skip 0), API/mobile/domain workspace typecheck, 웹 export 및 diff 공백 검사가 통과했다. 실제 모델·DB·건강 조회를 실행한 결과가 아니다.
+
+**후속:** 사용자가 Android 또는 iPhone 개발 빌드에서 선택 허용·조회·일부 철회·해제를 확인한다. 실제 값/캡처는 AI에 전달하지 않는다. 건강 데이터 서버 저장·AI 개인화는 별도 계약 전까지 포함하지 않는다. [설치·로컬 계약·검증 범위](WEARABLE_INTEGRATION.md)
+
 **2026-11-01 단일 복구 사례:** 04는 격리 메모리의 합성 일정에서 실제 Terra/high로 영향 없는 지연 `delay_no_impact` 한 건을 검증했다. 모델 호출 2회와 `read_schedule` 1회 후 답변했으며 일정·revision·제안·승인이 모두 유지됐다. 구조 검사는 통과했고 자동 판정은 `review_required`(exit 2)였다. 04 AI 작업자는 답변이 내용상 일정 유지 기준에 부합한다고 판단했으나 이는 사람의 최종 검토를 대체하지 않는다. 실제 DB나 운영 예약 실행 검증은 아니다.
 
 **2026-11-01 사용자별 Google 연결:** 00은 기존 시연 소유자와 다른 현재 앱 사용자의 실제 세션에서 Calendar·Gmail 발송·Gmail 회신 읽기 세 연결이 완료된 화면과 Calendar 목록 조회를 확인했다. 회신 읽기 동의 중 한 차례 `redirect_uri_mismatch`가 발생했으나 등록값 변경 없이 새 OAuth 시도로 성공했으며, 오류 원인은 확정하지 않았다. 다른 사용자는 각자 동의해야 하며 이번 확인에서 메일 발송이나 일정 변경은 하지 않았다.

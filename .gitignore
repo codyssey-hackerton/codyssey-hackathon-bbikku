@@ -18,5 +18,9 @@ coverage/
 .DS_Store
 .local/
 
+# Expo prebuild outputs; native settings are maintained in app.json and plugins.
+/apps/mobile/ios/
+/apps/mobile/android/
+
 # Local key handoff notes
 /key.md

@@ -654,3 +654,17 @@ test('web team preview shows the participation code connection without changing 
     if (oldPreview === undefined) delete process.env.EXPO_PUBLIC_PREVIEW_ONLY; else process.env.EXPO_PUBLIC_PREVIEW_ONLY = oldPreview;
   }
 });
+
+test('설정의 연결 메뉴에서 건강 화면을 열고 돌아와도 네트워크 요청을 추가하지 않는다', async () => {
+  const { App } = await components; let requests = 0;
+  globalThis.fetch = async () => { requests += 1; return response([]); };
+  const view = harness.renderer(App);
+  await view.settle(); const before = requests;
+  press(view, '개발 연결 설정'); press(view, '연결'); press(view, '건강 데이터');
+  await view.settle();
+  assert.match(textOf(view.tree), /최근 7일의 걸음 수와 기록된 운동/);
+  assert.match(textOf(view.tree), /웹에서도 사용할 수 없습니다/);
+  press(view, '나중에'); await view.settle();
+  assert.ok(chat(view)); assert.equal(requests, before);
+  view.unmount();
+});

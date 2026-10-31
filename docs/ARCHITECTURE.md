@@ -133,3 +133,7 @@ Terra는 음성 입출력을 직접 지원하지 않으므로 일정 판단용 `
 2026-10-31 프로젝트 준비 상태 점검: 프로젝트 안에서 실제 자격증명 설정이나 완성된 제공자 연동을 확인하지 못했다. Calendar/Gmail·Twilio·Kakao/TMAP은 candidate/not_configured, Terra/high는 selected/not_configured이며 인증된 외부 호출은 수행하지 않았다. 팀은 프로젝트용 API 접근 수단, Google OAuth 테스트 계정/범위, 전화 계정·발신번호/음성 제공자, 시연 이동수단을 준비한다. 키는 저장소·채팅·보고서에 넣지 않고 프로젝트 비밀 설정으로 전달한다. 이는 당시 로컬 조사이며 별도 배포 환경의 상태를 단정하지 않는다.
 
 후속 상태(2026-10-31): 실제 Terra/high 추천·예약·승인을 합성 일정으로 검증했다. 사용자는 로컬 Gmail 발송 작업·확인을 완료했다고 보고했다. Calendar 읽기·선택 가져오기에 이어 Gmail 회신 읽기·사용자 확인, 제한된 Twilio 음성 선택 대화·명시적 번호 확인·조건부 내부 일정 반영을 코드·UI·합성 제공자/실제 PostgreSQL로 연결했다. Twilio 키의 실제 읽기 인증은 성공했으나 앱이 요구하는 소유 발신번호가 없으며 실통화는 하지 않았다. Gmail 회신 읽기 동의·profile HTTP200은 로컬에서 확인했으며, 실제 회신 조회와 Calendar 동의/조회·새 코드 배포는 별도다. 최신 검증은 [구현 계획](IMPLEMENTATION_PLAN.md)과 [제공자 설정](PROVIDER_SETUP.md)을 따른다.
+
+## 8. 선택적 건강 데이터 — 기기 내 읽기
+
+2026-11-01 증분은 `HealthPanel → HealthAdapter(HealthKit/Health Connect) → 공통 7일 집계 → 화면 메모리` 경로다. 사용자가 항목을 선택하고 연결/재조회할 때만 읽는다. 최근 걸음 수와 운동 기록을 표시하며 서버·DB·메인 Agent·외부 연락으로 전달하지 않는다. 따라서 기존 S LLM·Tool·검증·승인 구조에 건강 입력 권한을 추가하지 않는다. Expo Go/웹은 미지원 안내를 표시하고 실제 건강 연결은 네이티브 개발 빌드에서 확인한다. [ADR-013](ADR.md#adr-013--워치-건강-데이터의-선택적-로컬-읽기) · [로컬 계약](CONTRACTS.md#15-건강-데이터-로컬-전용-계약) · [설치/검증](WEARABLE_INTEGRATION.md)
