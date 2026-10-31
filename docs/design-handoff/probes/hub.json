@@ -1,0 +1,41 @@
+{
+  "title": "PIKKU · 이미지 기준 디자인",
+  "tabs": [
+    {
+      "file": "reference-wireframe.html",
+      "title": "화면 미리보기",
+      "prefix": "sketch-",
+      "stage": "이미지 기반 첫 시안"
+    },
+    {
+      "file": "structure.html",
+      "title": "구조 확인",
+      "prefix": "structure-",
+      "stage": "1단계 구조"
+    },
+    {
+      "file": "flow-proposal.html",
+      "title": "추천 따라가 보기",
+      "prefix": "scene-",
+      "stage": "2단계 플로우"
+    },
+    {
+      "file": "style-reference.html",
+      "title": "이미지 디자인 기준",
+      "prefix": "style-",
+      "stage": "3단계 이미지 기준"
+    },
+    {
+      "file": "rules-preview.html",
+      "title": "디자인 규칙 미리보기",
+      "prefix": "section-",
+      "stage": "4단계 규칙 검토"
+    },
+    {
+      "file": "final-preview.html",
+      "title": "화면별 최종 검토",
+      "prefix": "screen-",
+      "stage": "Figma 제작 전 확인"
+    }
+  ]
+}

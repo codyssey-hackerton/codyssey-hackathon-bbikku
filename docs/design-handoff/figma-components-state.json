@@ -1,0 +1,188 @@
+{
+  "runId": "pikku-components-2026-11-01",
+  "fileKey": "YpAuzE5kCYzo6AQ3a59jmE",
+  "sessionId": "482fffca-3734-4c02-ac51-97ee21896c15",
+  "scope": "schedule card and button component families",
+  "status": "component originals and examples created; existing screen migration rejected by automatic review",
+  "components": [
+    {
+      "id": "20:858",
+      "name": "Button / 일정 상태",
+      "variants": [
+        {
+          "id": "20:854",
+          "name": "상태=기록 전",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "id": "20:857",
+          "name": "상태=완료됨",
+          "width": 55,
+          "height": 44
+        },
+        {
+          "id": "21:938",
+          "name": "상태=참석 확인",
+          "width": 72,
+          "height": 44
+        },
+        {
+          "id": "21:940",
+          "name": "상태=참석",
+          "width": 55,
+          "height": 44
+        },
+        {
+          "id": "21:942",
+          "name": "상태=불참",
+          "width": 55,
+          "height": 44
+        }
+      ],
+      "properties": {
+        "상태": {
+          "type": "VARIANT",
+          "defaultValue": "기록 전",
+          "variantOptions": [
+            "기록 전",
+            "완료됨",
+            "참석 확인",
+            "참석",
+            "불참"
+          ]
+        }
+      }
+    },
+    {
+      "id": "20:868",
+      "name": "Button / 일반 행동",
+      "variants": [
+        {
+          "id": "20:861",
+          "name": "종류=주요",
+          "width": 160,
+          "height": 44
+        },
+        {
+          "id": "20:864",
+          "name": "종류=보조",
+          "width": 160,
+          "height": 44
+        },
+        {
+          "id": "20:867",
+          "name": "종류=AI 보조",
+          "width": 70,
+          "height": 44
+        }
+      ],
+      "properties": {
+        "레이블#20:6": {
+          "type": "TEXT",
+          "defaultValue": "추가하기"
+        },
+        "종류": {
+          "type": "VARIANT",
+          "defaultValue": "주요",
+          "variantOptions": [
+            "주요",
+            "보조",
+            "AI 보조"
+          ]
+        }
+      }
+    },
+    {
+      "id": "20:955",
+      "name": "ScheduleCard / 일정 카드 / 시안",
+      "variants": [
+        {
+          "id": "20:880",
+          "name": "레이아웃=일간, 표시=진행 중",
+          "width": 272,
+          "height": 72
+        },
+        {
+          "id": "20:894",
+          "name": "레이아웃=일간, 표시=기록 전",
+          "width": 272,
+          "height": 72
+        },
+        {
+          "id": "20:908",
+          "name": "레이아웃=일간, 표시=완료됨",
+          "width": 272,
+          "height": 72
+        },
+        {
+          "id": "20:922",
+          "name": "레이아웃=일간, 표시=진행 중 완료",
+          "width": 272,
+          "height": 72
+        },
+        {
+          "id": "20:937",
+          "name": "레이아웃=목록, 표시=기록 전",
+          "width": 332,
+          "height": 66
+        },
+        {
+          "id": "20:952",
+          "name": "레이아웃=목록, 표시=완료됨",
+          "width": 332,
+          "height": 66
+        },
+        {
+          "id": "23:934",
+          "name": "레이아웃=목록, 표시=참석 확인",
+          "width": 332,
+          "height": 66
+        },
+        {
+          "id": "23:947",
+          "name": "레이아웃=일간, 표시=참석 확인",
+          "width": 272,
+          "height": 72
+        }
+      ],
+      "properties": {
+        "일정 이름#20:21": {
+          "type": "TEXT",
+          "defaultValue": "데일리 미팅 준비"
+        },
+        "유형과 상태#20:22": {
+          "type": "TEXT",
+          "defaultValue": "할 일 · 진행 중"
+        },
+        "시간#20:23": {
+          "type": "TEXT",
+          "defaultValue": "오후 1:00 - 2:00"
+        },
+        "레이아웃": {
+          "type": "VARIANT",
+          "defaultValue": "일간",
+          "variantOptions": [
+            "일간",
+            "목록"
+          ]
+        },
+        "표시": {
+          "type": "VARIANT",
+          "defaultValue": "진행 중",
+          "variantOptions": [
+            "진행 중",
+            "기록 전",
+            "완료됨",
+            "진행 중 완료",
+            "참석 확인"
+          ]
+        }
+      }
+    }
+  ],
+  "originalScreenCards": 59,
+  "reviewBoard": "21:858",
+  "handoffNote": "24:957",
+  "duplicateCreated": false
+}
