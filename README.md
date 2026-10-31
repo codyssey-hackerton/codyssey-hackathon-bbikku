@@ -4,7 +4,7 @@
 
 ## 현재 상태
 
-현재는 **v1 아키텍처·최소 계약을 공유하고 개발과 제공자 검증을 병렬 진행하는 단계**다. 기준은 **Expo + React Native + TypeScript / Node.js·Fastify / LangGraph JS / PostgreSQL·pg-boss / gpt-6.1-terra(high), Responses API**다. Hermes는 설계 참고이며 설치·포크하지 않는다. DB/서버 호스팅과 외부 제공자는 미정 또는 검증 후보다.
+현재는 **v1 아키텍처·최소 계약을 공유하고 개발과 제공자 검증을 병렬 진행하는 단계**다. 기준은 **Expo + React Native + TypeScript / Node.js·Fastify / LangGraph JS / PostgreSQL·pg-boss / gpt-6.1-terra(high), Responses API**다. Hermes는 설계 참고이며 설치·포크하지 않는다. 현재 시연 API·PostgreSQL은 NAVER Cloud VM, 웹은 Vercel에서 실행한다. 외부 제공자의 지원 범위와 미검증 항목은 아래 문서에 구분한다.
 
 시연 목표는 개인화 추천→코드 검증→사용자 승인→반영, 실제 전화/이메일 연락대행, 전날/아침 서버 검토와 단일 지연·복구 사례다. 공동 약속은 연락 승인·상대 수락·최신 검증 후 변경한다. [PRD §2](docs/PRD.md)에 구현 순서·완료 기준·제외 범위를 정리했다.
 
