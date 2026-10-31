@@ -157,13 +157,16 @@ function ProposalList({ client, refreshVersion, onSelect, onBack }: {
   );
 }
 
-function instantText(value: string, timezone: string): string {
+function instantText(value: string, timezone: string, exact = false): string {
   // Keep sub-minute precision intact instead of silently rounding a proposed time.
-  if (/T\d{2}:\d{2}:(?!00(?:\.0+)?(?:Z|[+-]))/.test(value) || /\.\d*[1-9]\d*(?:Z|[+-])/.test(value)) return `${value} (${timezone})`;
+  if (!exact && (/T\d{2}:\d{2}:(?!00(?:\.0+)?(?:Z|[+-]))/.test(value) || /\.\d*[1-9]\d*(?:Z|[+-])/.test(value))) return `${value} (${timezone})`;
   try {
-    return new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short' }).format(new Date(value));
-  } catch { return `${value} (${timezone})`; }
+    const formatter = new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', ...(exact ? { second: '2-digit' } : {}), hour12: false, timeZoneName: 'short' });
+    if (!exact) return formatter.format(new Date(value));
+    const fraction = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1];
+    return formatter.formatToParts(new Date(value)).map(part => part.type === 'second' && fraction ? `${part.value}.${fraction}` : part.value).join('');
+  } catch { return exact ? `${value} (원본 시각)` : `${value} (${timezone})`; }
 }
 
 function slotText(slot: TimeSlot | null): string {
@@ -246,9 +249,8 @@ function missingFieldText(path: string): string {
 function ProposalContent({ proposal }: { proposal: Proposal }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const { validation } = proposal;
-  const scheduledChange = proposal.changeSet.changes.find(change => change.operation !== 'delete' && change.after.timeSlot !== null);
-  const expiryTimezone = scheduledChange && scheduledChange.operation !== 'delete' ? scheduledChange.after.timeSlot?.timezone ?? 'UTC'
-    : proposal.beforeItems.find(item => item.timeSlot !== null)?.timeSlot?.timezone ?? 'UTC';
+  let expiryTimezone = 'UTC';
+  try { expiryTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* Use UTC when the device timezone is unavailable. */ }
   const needsReview = !validation.valid || validation.conflicts.length > 0 || validation.missingFields.length > 0 || validation.protectedTargets.length > 0;
   const titleFor = (id: string) => proposal.beforeItems.find(item => item.id === id)?.title || '관련 일정 확인 필요';
   const segmentText = (id: string | null) => {
@@ -274,7 +276,7 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
       {validation.missingFields.length > 0 && <Text>빠진 정보: {[...new Set(validation.missingFields.map(missingFieldText))].join(', ')}. 내용을 보완해 새 제안을 요청해 주세요.</Text>}
       {validation.protectedTargets.length > 0 && <Text>보호된 일정: {validation.protectedTargets.map(titleFor).join(', ')}</Text>}
     </View>}
-    {proposal.status === 'pending' && proposal.expiresAt && <Text style={styles.muted}>확인 기한: {instantText(proposal.expiresAt, expiryTimezone)}</Text>}
+    {proposal.status === 'pending' && proposal.expiresAt && <Text style={styles.muted}>확인 기한: {instantText(proposal.expiresAt, expiryTimezone, true)}</Text>}
     <Text style={styles.sectionTitle} accessibilityRole="header">제안 이유</Text>
     <Text style={styles.text}>{proposal.reason || '이유가 제공되지 않았습니다.'}</Text>
 

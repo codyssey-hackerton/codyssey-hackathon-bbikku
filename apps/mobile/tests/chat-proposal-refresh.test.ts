@@ -492,3 +492,27 @@ test('create and delete show meaningful values while default fields stay in coll
   assert.match(textOf(view.tree), /소요 미설정/); assert.match(textOf(view.tree), /마감 미설정/);
   assert.match(textOf(view.tree), /분류 미분류/); assert.match(textOf(view.tree), /완료 대기/); assert.match(textOf(view.tree), /참석 미기록/);
 });
+
+test('proposal confirmation deadline displays exact instant in the device timezone', async () => {
+  const previousTimezone = process.env.TZ; process.env.TZ = 'Asia/Seoul';
+  try {
+    const { ProposalPanel } = await components;
+    const slot = { startsAt: '2026-11-02T09:00:00Z', endsAt: '2026-11-02T10:00:00Z', timezone: 'UTC' };
+    const after = { kind: 'event', title: '일정', timeSlot: slot, durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending' };
+    const proposal = { id: 'p-time', revision: 1, mode: 'personal', baseScheduleRevision: 0, baseContextRevision: 0,
+      changeSet: { changes: [{ changeId: 'c', operation: 'create', after }] }, beforeItems: [], reason: '시각 확인', evidenceRefs: [],
+      validation: { valid: true, conflicts: [], missingFields: [], protectedTargets: [], checkedScheduleRevision: 0, checkedContextRevision: 0, checkedAt: '2026-10-31T00:00:00Z' },
+      createdAt: '2026-10-31T00:00:00Z', expiresAt: '2026-10-31T23:56:31.276123Z', status: 'pending', coordinationTarget: null };
+    let writes = 0;
+    const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal },
+      post: async () => { writes++; throw new Error('unexpected write'); } };
+    const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
+    {
+      await view.settle(); press(view, '제안 시각 확인, 확인 대기, 상세 보기'); await view.settle();
+      const deadline = nodes(view.tree).find(node => node.type === 'Text' && textOf(node.children).startsWith('확인 기한:'));
+      assert.ok(deadline); const label = textOf(deadline.children);
+      assert.match(label, /2026\D+11\D+1\D+08:56:31\.276123/); assert.doesNotMatch(label, /2026-10-31T23:56/);
+      assert.equal(proposal.expiresAt, '2026-10-31T23:56:31.276123Z'); assert.equal(writes, 0);
+    }
+  } finally { if (previousTimezone === undefined) delete process.env.TZ; else process.env.TZ = previousTimezone; }
+});
