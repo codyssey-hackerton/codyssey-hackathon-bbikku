@@ -23,6 +23,11 @@ function retryableReview(operation: string, result: HttpResult): boolean {
   return operation === 'scheduled_review' && result.retryableWithoutEffects === true &&
     ((result.status === 503 && status === 'failed') || (result.status === 200 && status === 'skipped'));
 }
+function retryableReplyLookup(operation: string, result: HttpResult): boolean {
+  const body = result.body as { error?: { code?: string } } | null;
+  return operation === 'contact_reply_check' && result.retryableWithoutEffects === true &&
+    result.status === 503 && body?.error?.code === 'provider_unavailable';
+}
 
 // Volatile, single-process protection only; replace with transactional DB storage before deployment.
 export class MemoryIdempotency implements IdempotencyPort {
@@ -57,12 +62,12 @@ export class MemoryIdempotency implements IdempotencyPort {
     try {
       const result = await input.run({ finalize: run => run() });
       const body = result.body as { error?: { code?: string } } | null;
-      // Only chat's explicitly marked pre-write provider failure may be rerun.
+      // Only explicitly marked pre-write provider failures may be rerun.
       const safeProviderFailure = result.retryableWithoutEffects === true && result.status === 503 &&
         ((input.operation === 'chat' && body?.error?.code === 'provider_unavailable') ||
          (input.operation === 'scheduled_review' && (result.body as { status?: string })?.status === 'failed'));
       const busyConversation = input.operation === 'chat' && result.status === 409 && body?.error?.code === 'operation_in_progress';
-      if (safeProviderFailure || busyConversation || retryableReview(input.operation, result)) entry.state = 'retryable';
+      if (safeProviderFailure || busyConversation || retryableReview(input.operation, result) || retryableReplyLookup(input.operation, result)) entry.state = 'retryable';
       else { entry.state = 'completed'; entry.result = result; }
       return result;
     } catch {
@@ -84,10 +89,10 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const leaseUntil = new Date(now.getTime() + 15 * 60_000).toISOString();
     const conflict = (): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'idempotency_conflict', message: '동일한 중복 키에 다른 요청을 사용할 수 없습니다.', retryable: false } } });
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
-    const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review';
+    const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check';
     // Only operations whose entire effect is committed with this record may recover a stale claim.
     const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
-      'recipient_create', 'contact_request_create', 'contact_decision'].includes(input.operation);
+      'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);
     const claim = await this.store.transaction(input.userId, state => {
       const previous = state.idempotency.get(identity);
       if (previous) {
@@ -148,14 +153,14 @@ export class RepositoryIdempotency implements IdempotencyPort {
         : { status: 500, body: { requestId: input.requestId, error: { code: 'internal_error', message: '요청을 처리하지 못했습니다.', retryable: false } } };
     }
     if (finalized) return result;
-    // Only explicitly known-no-effect chat failures can be retried. Unknown writes remain reserved.
+    // Only explicitly known-no-effect preflight failures can be retried. Unknown writes remain reserved.
     return this.store.transaction(input.userId, state => {
       const record = state.idempotency.get(identity);
       if (!record || record.token !== token) return record?.state === 'completed' && record.result ? record.result : busy(operationId);
       const body = result.body as { error?: { code?: string } } | null;
       const retryable = (input.operation === 'chat' && ((result.retryableWithoutEffects === true && result.status === 503 && body?.error?.code === 'provider_unavailable') ||
         (result.status === 409 && body?.error?.code === 'operation_in_progress'))) ||
-        retryableReview(input.operation, result);
+        retryableReview(input.operation, result) || retryableReplyLookup(input.operation, result);
       record.state = retryable ? 'retryable' : 'completed';
       if (!retryable) record.result = result;
       delete record.token; delete record.leaseUntil;

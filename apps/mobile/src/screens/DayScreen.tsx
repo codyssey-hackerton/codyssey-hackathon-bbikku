@@ -1,9 +1,11 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Text } from '../ui/typography';
 import { colors } from '../ui/theme';
 import { Icon } from '../ui/Icon';
 import { useMutation } from '../api/useMutation';
+import type { ApiClient } from '../api/http';
+import PreparationProposalPanel from '../preparation/PreparationProposalPanel';
 import { compareTimestamps } from '../schedule/client';
 import type { CheckinInput, CheckinResult, ScheduleClient, ScheduleCommandInput, ScheduleCommandResult, ScheduleFields, ScheduleItem } from '../schedule/client';
 import { addDays, civilDate, dayRange, formatCivilDate, startOfDay } from '../schedule/dates';
@@ -12,6 +14,7 @@ import { ScheduleForm } from '../schedule/ScheduleForm';
 import { canCoordinate } from '../schedule/form';
 import { ScheduleError, ScheduleLoading } from '../schedule/ScheduleStatus';
 import { useSchedule } from '../schedule/useSchedule';
+import { selectNextActions } from '../schedule/nextAction';
 
 export type DayScreenProps = {
   selectedDate: Date;
@@ -21,6 +24,10 @@ export type DayScreenProps = {
   refreshVersion: number;
   onScheduleChanged: () => void;
   onCoordinate: (item: ScheduleItem) => void;
+  onRecovery: (item: ScheduleItem) => void;
+  api: ApiClient;
+  onOpenPreparationProposals: () => void;
+  visible?: boolean;
 };
 
 type Editor = {
@@ -49,7 +56,7 @@ function formatTimeRange(start: string, end: string, timezone: string): string {
   return `${formatTime(start, timezone)} – ${formatTime(end, timezone)}`;
 }
 
-export default function DayScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onScheduleChanged, onCoordinate }: DayScreenProps) {
+export default function DayScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onScheduleChanged, onCoordinate, onRecovery, api, onOpenPreparationProposals, visible = true }: DayScreenProps) {
   const selected = useMemo(() => {
     try { return civilDate(selectedDate, timezone); } catch { return null; }
   }, [selectedDate.getTime(), timezone]);
@@ -62,7 +69,17 @@ export default function DayScreen({ selectedDate, onSelectDate, client, timezone
   }, [year, month, day, timezone]);
   const result = useSchedule(client, range && { ...range, timezone, includeUnscheduled: true }, refreshVersion);
   const [selectionError, setSelectionError] = useState('');
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!visible) return;
+    const update = () => setNow(Date.now());
+    update();
+    const timer = setInterval(update, 30_000);
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') update(); });
+    return () => { clearInterval(timer); subscription.remove(); };
+  }, [visible]);
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [preparation, setPreparation] = useState<{ item: ScheduleItem; revision: number } | null>(null);
   const commandClient = useRef<ScheduleClient | null>(null);
   const checkinClient = useRef<ScheduleClient | null>(null);
   const command = useMutation<ScheduleCommandInput, ScheduleCommandResult>(
@@ -75,7 +92,7 @@ export default function DayScreen({ selectedDate, onSelectDate, client, timezone
   );
   const blocked = command.state.status === 'pending' || command.state.status === 'error' ||
     checkin.state.status === 'pending' || checkin.state.status === 'error';
-  const actionDisabled = blocked || editor !== null;
+  const actionDisabled = blocked || editor !== null || preparation !== null;
 
   if (!selected || !range) {
     return <View style={styles.content}><Text accessibilityRole="alert" style={styles.error}>날짜 또는 시간대를 확인할 수 없습니다.</Text></View>;
@@ -165,6 +182,17 @@ export default function DayScreen({ selectedDate, onSelectDate, client, timezone
             </Pressable>
           ))}
         </View>
+        {item.kind === 'event' && item.completion !== 'completed' && <Pressable accessibilityRole="button"
+          accessibilityLabel={`${item.title} 준비계획`} accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled}
+          onPress={() => { if (result.status === 'success' && !actionDisabled) setPreparation({ item, revision: result.data.scheduleRevision }); }}
+          style={[styles.coordinateButton, actionDisabled && styles.disabled]}>
+          <Text style={styles.actionText}>준비계획</Text><Icon name="arrowRight" size={15} color="#34435D" />
+        </Pressable>}
+        {item.kind === 'task' && item.completion === 'incomplete' && <Pressable accessibilityRole="button"
+          accessibilityLabel={`${item.title} 복구 상담`} accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled}
+          onPress={() => onRecovery(item)} style={[styles.coordinateButton, actionDisabled && styles.disabled]}>
+          <Text style={styles.actionText}>복구 상담</Text><Icon name="arrowRight" size={15} color="#34435D" />
+        </Pressable>}
         {eligibleForCoordination && <>
           <Pressable accessibilityRole="button" accessibilityLabel={`${item.title} 공동 약속 조정 검토`}
             accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled} onPress={() => onCoordinate(item)}
@@ -183,6 +211,11 @@ export default function DayScreen({ selectedDate, onSelectDate, client, timezone
   const completedCount = scheduled.filter((item) => item.completion === 'completed').length;
   const remainingCount = scheduled.filter((item) => item.completion === 'pending' || item.completion === 'incomplete').length;
   const unknownCount = scheduled.filter((item) => item.completion === 'unknown').length;
+  const actions = selectNextActions(scheduled, selected, timezone, new Date(now));
+
+  if (preparation) return <PreparationProposalPanel target={preparation.item} expectedScheduleRevision={preparation.revision}
+    timezone={timezone} api={api} visible={visible} onClose={() => setPreparation(null)}
+    onProposalCreated={() => { setPreparation(null); onOpenPreparationProposals(); }} />;
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
@@ -216,6 +249,26 @@ export default function DayScreen({ selectedDate, onSelectDate, client, timezone
       {result.status === 'error' && <View style={styles.statusCard}><ScheduleError error={result.error} retry={result.retry} /></View>}
       {result.status === 'success' && (
         <View style={styles.sections}>
+          <View style={styles.summaryCard}>
+            <View style={styles.summaryHeadingMain}>
+              <Icon name="clock" size={19} color={colors.primary} />
+              <Text accessibilityRole="header" style={styles.summaryTitle}>현재와 다음 행동</Text>
+            </View>
+            {actions.current && <View style={styles.nextAction}>
+              <Text style={styles.nextActionLabel}>이 시간의 일정</Text>
+              <Text style={styles.itemTitle}>{actions.current.title}</Text>
+              <Text style={styles.itemTime}>{formatTimeRange(actions.current.timeSlot!.startsAt, actions.current.timeSlot!.endsAt, timezone)}</Text>
+              <Text style={styles.summaryHint}>수행 상태: {COMPLETION_LABELS[actions.current.completion]}</Text>
+            </View>}
+            {actions.next && <View style={styles.nextAction}>
+              <Text style={styles.nextActionLabel}>다음 행동</Text>
+              <Text style={styles.itemTitle}>{actions.next.title}</Text>
+              <Text style={styles.itemTime}>{formatTimeRange(actions.next.timeSlot!.startsAt, actions.next.timeSlot!.endsAt, timezone)}</Text>
+              <Text style={styles.summaryHint}>수행 상태: {COMPLETION_LABELS[actions.next.completion]}</Text>
+            </View>}
+            {!actions.current && !actions.next && <Text style={styles.summaryHint}>선택한 날짜에 지금 진행 중이거나 앞으로 시작할 배치된 일정이 없습니다.</Text>}
+            {(actions.current || actions.next) && <Text style={styles.summaryHint}>저장된 일정 시간 기준이며 수행 상태는 자동으로 바뀌지 않습니다.</Text>}
+          </View>
           <View style={styles.summaryCard}>
             <View style={styles.summaryHeading}>
               <View style={styles.summaryHeadingMain}>
@@ -285,6 +338,8 @@ const styles = StyleSheet.create({
   statusCard: { marginTop: 16, paddingHorizontal: 16, backgroundColor: colors.surface, borderRadius: 20 },
   sections: { marginTop: 20, gap: 12 },
   summaryCard: { padding: 16, gap: 14, backgroundColor: colors.surface, borderRadius: 20, borderWidth: 1, borderColor: colors.border },
+  nextAction: { gap: 3 },
+  nextActionLabel: { color: colors.primary, fontSize: 13, fontWeight: '700' },
   summaryHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 },
   summaryHeadingMain: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   summaryTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },

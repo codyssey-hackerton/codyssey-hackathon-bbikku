@@ -209,6 +209,8 @@ function memoryApi(initial: any[] = []) {
   const proposals = new Map([[proposal.id, proposal], [alternative.id, alternative]]);
   const api: any = {
     connection: { status: 'available', senderAddress: 'sender@example.test' },
+    replyConnection: { status: 'available', senderAddress: 'sender@example.test' },
+    phoneConnection: { status: 'available', senderNumber: '+15550000001' },
     getHook: undefined, postHook: undefined,
     async get(path: string) {
       calls.push({ method: 'GET', path });
@@ -230,15 +232,18 @@ function memoryApi(initial: any[] = []) {
         return { contactRequest: structuredClone(item) };
       }
       if (url.pathname === '/v1/email-connection') return structuredClone(api.connection);
+      if (url.pathname === '/v1/email-reply-connection') return structuredClone(api.replyConnection);
+      if (url.pathname === '/v1/phone-connection') return structuredClone(api.phoneConnection);
       throw new Error(`unexpected mock GET ${path}`);
     },
     async post(path: string, body: any, options: any) {
       calls.push({ method: 'POST', path, body: structuredClone(body), options: structuredClone(options) });
       if (path.endsWith('/send')) assert.ok(typeof body.expectedSenderAddress === 'string' && body.expectedSenderAddress.trim());
       if (api.postHook) { const result = api.postHook(path, body, options); if (result !== undefined) return await result; }
-      if (path === '/v1/recipients') return { recipient: { ...recipient, displayName: body.displayName, address: body.address, channel: body.channel } };
+      if (path === '/v1/recipients') { api.savedRecipient = { ...recipient, displayName: body.displayName, address: body.address, channel: body.channel }; return { recipient: api.savedRecipient }; }
       if (path === '/v1/contact-requests') {
-        const contactRequest = { ...draft, recipientRef: body.recipientRef, purpose: body.purpose,
+        const savedRecipient = api.savedRecipient ?? recipient;
+        const contactRequest = { ...draft, channel: body.channel, recipientSnapshot: { displayName: savedRecipient.displayName, channel: savedRecipient.channel, address: savedRecipient.address }, recipientRef: body.recipientRef, purpose: body.purpose,
           messageOrCallBrief: body.messageOrCallBrief, allowedOptions: structuredClone(body.allowedOptions) };
         contacts.set(contactRequest.id, structuredClone(contactRequest));
         return { contactRequest };
@@ -249,7 +254,8 @@ function memoryApi(initial: any[] = []) {
         contacts.set(contactRequest.id, structuredClone(contactRequest));
         return { contactRequest };
       }
-      if (path === '/v1/contact-requests/contact-1/send') {
+      if (path === '/v1/phone-connection') { api.phoneConnection = { status: 'available', senderNumber: body.fromNumber }; return api.phoneConnection; }
+      if (path === '/v1/contact-requests/contact-1/send' || path === '/v1/contact-requests/contact-1/call') {
         const contactRequest = { ...contacts.get('contact-1'), deliveryStatus: 'sent_or_connected',
           negotiationStatus: 'awaiting_response', providerOperationId: 'provider-1' };
         contacts.set(contactRequest.id, structuredClone(contactRequest));
@@ -678,4 +684,234 @@ test('실제 앱 연결 설정은 미결 연락 저장 중 다른 계정으로 �
   assert.equal(posts(mock.calls, '/send').length, 0);
   pending.resolve({ recipient }); await view.settle();
   assert.equal(operationGuard.hasUnresolved(), false);
+});
+
+
+test('전화 기본 초안의 줄바꿈을 보존하고 지원하지 않는 제어문자와 과도한 TTS 길이는 차단한다', async t => {
+  const { ContactPanel } = await components;
+  const mock = memoryApi(); const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await view.settle(); press(view, '새 연락 초안 작성'); press(view, '전화 선택');
+  assert.match(input(view, '읽을 전화 내용').props.value, /\n/);
+  enter(view, '수신자 이름', '테스트 상대'); enter(view, '수신자 전화번호', '+12025550100');
+  press(view, '입력한 수신자 이름과 전화번호 확인');
+  enter(view, '읽을 전화 내용', '첫 줄\u0001둘째 줄');
+  assert.equal(button(view, '연락 초안 저장').props.disabled, true);
+  enter(view, '읽을 전화 내용', '&'.repeat(1000));
+  assert.equal(button(view, '연락 초안 저장').props.disabled, true);
+  enter(view, '읽을 전화 내용', `내용${'\r'.repeat(800)}`);
+  assert.equal(button(view, '연락 초안 저장').props.disabled, true);
+  enter(view, '읽을 전화 내용', '안녕하세요.\n약속 변경이 가능한지 확인 부탁드립니다.');
+  press(view, '연락 초안 저장'); await view.settle();
+  assert.equal(posts(mock.calls, '/contact-requests')[0].body.messageOrCallBrief, '안녕하세요.\n약속 변경이 가능한지 확인 부탁드립니다.');
+  assert.equal(posts(mock.calls, '/call').length, 0);
+});
+
+test('전화 초안은 E.164 수신자 확인과 별도 승인 후에만 전화 요청을 보낸다', async t => {
+  const { ContactPanel } = await components;
+  const mock = memoryApi(); const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await view.settle(); press(view, '새 연락 초안 작성'); press(view, '전화 선택');
+  enter(view, '수신자 이름', '상대'); enter(view, '수신자 전화번호', '01012345678');
+  press(view, '입력한 수신자 이름과 전화번호 확인');
+  assert.equal(button(view, '연락 초안 저장').props.disabled, true);
+  enter(view, '수신자 전화번호', '+821012345678'); press(view, '입력한 수신자 이름과 전화번호 확인');
+  press(view, '연락 초안 저장'); await view.settle();
+  assert.equal(posts(mock.calls, '/call').length, 0);
+  assert.equal(button(view, '전화 요청'), undefined);
+  press(view, '연락 내용 승인'); await view.settle();
+  assert.equal(posts(mock.calls, '/call').length, 0);
+  press(view, '전화 요청'); await view.settle();
+  const call = posts(mock.calls, '/call')[0];
+  assert.equal(call.body.expectedSenderNumber, '+15550000001');
+  assert.ok(call.body.requestId && call.options.idempotencyKey);
+  assert.match(textOf(view.tree), /전화 요청 접수, 연결·응답 미확인/);
+  assert.match(textOf(view.tree), /전화 요청 접수는 통화 연결이나 상대 수락의 증거가 아닙니다/);
+  assert.doesNotMatch(textOf(view.tree), /상대 수락 확인/);
+});
+
+test('전화 연결 시 자격 증명 입력은 즉시 비우고 미결 요청 동안 세션을 보호한다', async t => {
+  const { ContactPanel, operationGuard, ApiError } = await components;
+  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
+  const pending = deferred<any>(); mock.api.postHook = (path: string) => path === '/v1/phone-connection' ? pending.promise : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view);
+  assert.equal(input(view, '전화 계정 SID').props.secureTextEntry, true);
+  assert.equal(input(view, '전화 인증 토큰').props.secureTextEntry, true);
+  enter(view, '전화 계정 SID', 'test-sid'); enter(view, '전화 인증 토큰', 'test-token'); enter(view, '발신 전화번호', '+15550000001');
+  press(view, '전화 연결 설정');
+  assert.equal(input(view, '전화 계정 SID').props.value, ''); assert.equal(input(view, '전화 인증 토큰').props.value, '');
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '연락 목록').props.disabled, true);
+  pending.reject(new ApiError('timeout', 'timeout', true)); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '전화 요청').props.disabled, true);
+  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001' };
+  press(view, '발신 번호 다시 확인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true);
+  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001', lastRequestId: 'other-request' };
+  press(view, '발신 번호 다시 확인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true);
+  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001', lastRequestId: posts(mock.calls, '/phone-connection')[0].body.requestId };
+  press(view, '발신 번호 다시 확인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), false);
+  assert.equal(button(view, '전화 요청').props.disabled, false);
+  assert.equal(posts(mock.calls, '/call').length, 0);
+});
+
+test('전화 결과 불명은 상태 조회 후 동일 발신 번호와 멱등 키로만 재시도한다', async t => {
+  const { ContactPanel, ApiError, operationGuard } = await components;
+  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phoneReady]);
+  mock.api.postHook = (path: string) => { if (path.endsWith('/call')) throw new ApiError('timeout', 'timeout', true); };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '전화 요청'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '동일 발송 요청 재시도'), undefined);
+  press(view, '연락 상태 조회'); await view.settle(); press(view, '동일 발송 요청 재시도'); await view.settle();
+  const calls = posts(mock.calls, '/call'); assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]);
+  assert.equal(operationGuard.hasUnresolved(), true);
+});
+
+test('전화 발신 번호 충돌은 재확인 전 새 요청을 막고 접수 목록도 연결 미확인으로 표시한다', async t => {
+  const { ContactPanel, ApiError } = await components;
+  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phoneReady]);
+  mock.api.postHook = (path: string, body: any) => {
+    if (path.endsWith('/call') && body.expectedSenderNumber !== mock.api.phoneConnection.senderNumber) throw new ApiError('conflict', 'changed', false, 409);
+  };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000002' };
+  press(view, '전화 요청'); await view.settle(); press(view, '발송 오류 닫기');
+  assert.equal(button(view, '전화 요청').props.disabled, true);
+  press(view, '발신 번호 다시 확인'); await view.settle(); press(view, '전화 요청'); await view.settle();
+  const calls = posts(mock.calls, '/call'); assert.equal(calls[0].body.expectedSenderNumber, '+15550000001');
+  assert.equal(calls[1].body.expectedSenderNumber, '+15550000002'); assert.notEqual(calls[0].options.idempotencyKey, calls[1].options.idempotencyKey);
+  press(view, '연락 목록'); await view.settle();
+  assert.match(textOf(view.tree), /전화 요청 접수, 연결·응답 미확인/);
+});
+
+test('전화 설정 결과 불명 뒤 다른 발신 번호가 조회되어도 세션 잠금을 해제하지 않는다', async t => {
+  const { ContactPanel, ApiError, operationGuard } = await components;
+  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
+  mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); enter(view, '전화 계정 SID', 'sid'); enter(view, '전화 인증 토큰', 'token'); enter(view, '발신 전화번호', '+15550000001');
+  press(view, '전화 연결 설정'); await view.settle();
+  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000002', lastRequestId: posts(mock.calls, '/phone-connection')[0].body.requestId };
+  press(view, '발신 번호 다시 확인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '연락 목록').props.disabled, true);
+  assert.equal(button(view, '전화 요청').props.disabled, true); assert.equal(posts(mock.calls, '/call').length, 0);
+});
+
+test('회신 권한 미설정과 조회 실패를 응답 없음과 구분한다', async t => {
+  const { ContactPanel, ApiError } = await components;
+  const mock = memoryApi([sent]); mock.api.replyConnection = { status: 'not_configured', senderAddress: null };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view);
+  assert.match(textOf(view.tree), /회신 읽기 권한이 설정되지 않았습니다/);
+  assert.equal(button(view, '회신 확인').props.disabled, true);
+  mock.api.replyConnection = { status: 'available', senderAddress: 'sender@example.test' };
+  mock.api.postHook = (path: string) => { if (path.endsWith('/check-replies')) throw new ApiError('not_configured', 'no access', false, 503); };
+  press(view, '회신 조회 설정 다시 확인'); await view.settle(); press(view, '회신 확인'); await view.settle();
+  assert.match(textOf(view.tree), /회신 조회에 실패했습니다/);
+  assert.doesNotMatch(textOf(view.tree), /저장된 응답이 없습니다/);
+  assert.equal(posts(mock.calls, '/send').length, 0);
+});
+
+test('회신 확인은 저장된 본문과 허용 대안의 명시 선택 뒤 재승인하고 일정 갱신을 알린다', async t => {
+  const { ContactPanel } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const applied = { ...sent, negotiationStatus: 'applied' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '제안하신 시간이 괜찮습니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([sent]); let refreshed = 0;
+  mock.api.postHook = (path: string) => {
+    if (path.endsWith('/check-replies')) return { contactRequest: reviewed, responses: [response], checkedCount: 1, unmatchedCount: 1 };
+    if (path.endsWith('/confirm')) return { contactRequest: applied, response, scheduleRevision: 4, changed: true };
+  };
+  const view = harness.renderer(ContactPanel, { ...directProps(mock.api), onScheduleChanged: () => { refreshed += 1; } }); t.after(() => view.unmount());
+  await openContact(view); press(view, '회신 확인'); await view.settle();
+  assert.match(textOf(view.tree), /사용자 확인 필요/); assert.match(textOf(view.tree), /신원은 확인되지 않습니다/);
+  assert.match(textOf(view.tree), /판단할 수 없는 메일 1건/);
+  assert.match(textOf(view.tree), /제안하신 시간이 괜찮습니다/); assert.equal(posts(mock.calls, '/confirm').length, 0);
+  press(view, '선택: option-1 · 제안 proposal-1');
+  assert.equal(posts(mock.calls, '/confirm').length, 0);
+  press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
+  const confirm = posts(mock.calls, '/confirm')[0];
+  assert.equal(confirm.path, '/v1/contact-requests/contact-1/responses/response-1/confirm');
+  assert.equal(confirm.body.selectedOptionId, 'option-1'); assert.equal(confirm.body.contactRevision, sent.revision);
+  assert.ok(confirm.body.requestId && confirm.options.idempotencyKey); assert.match(textOf(view.tree), /일정 반영됨/);
+  assert.equal(refreshed, 2); assert.equal(posts(mock.calls, '/send').length, 0);
+});
+
+test('전화 결과 조회는 저장된 서버 응답만 읽고 확인 없이 수락을 만들지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const phone = { ...sent, channel: 'phone', recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phone]); let refreshed = 0;
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: phone, responses: [] } : undefined;
+  const view = harness.renderer(ContactPanel, { ...directProps(mock.api), onScheduleChanged: () => { refreshed += 1; } }); t.after(() => view.unmount());
+  await openContact(view); press(view, '통화 결과 조회'); await view.settle();
+  assert.match(textOf(view.tree), /저장된 응답이 없습니다/); assert.match(textOf(view.tree), /상대 응답 대기/);
+  assert.equal(posts(mock.calls).length, 0); assert.equal(refreshed, 1);
+});
+
+test('재승인 결과 불명 시 같은 응답과 옵션 및 멱등 키로만 재시도한다', async t => {
+  const { ContactPanel, ApiError, operationGuard } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '네, 가능합니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([reviewed]);
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: reviewed, responses: [response] } : undefined;
+  mock.api.postHook = (path: string) => { if (path.endsWith('/confirm')) throw new ApiError('timeout', 'timeout', true); };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '저장된 응답 조회'); await view.settle();
+  press(view, '선택: option-1 · 제안 proposal-1'); press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '연락 목록').props.disabled, true);
+  press(view, '동일 재승인 요청 재시도'); await view.settle();
+  assert.deepEqual(posts(mock.calls, '/confirm')[1], posts(mock.calls, '/confirm')[0]);
+  assert.equal(operationGuard.hasUnresolved(), true);
+});
+
+test('본문이 없거나 자동 회신인 응답은 사용자 재승인을 제공하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const common = { contactRequestId: sent.id, receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null, evidenceRef: 'evidence-1' };
+  const responses = [{ ...common, id: 'r-1', providerEventId: 'e-1', displayText: null, reviewReason: 'sender_unverified' },
+    { ...common, id: 'r-2', providerEventId: 'e-2', displayText: '부재중입니다.', reviewReason: 'automatic_message' }];
+  const mock = memoryApi([reviewed]);
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: reviewed, responses } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '저장된 응답 조회'); await view.settle();
+  assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
+  assert.equal(posts(mock.calls, '/confirm').length, 0);
+});
+
+test('공백뿐인 회신은 빈 본문으로 표시하고 재승인을 제공하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: ' \n  ', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([reviewed]);
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: reviewed, responses: [response] } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '저장된 응답 조회'); await view.settle();
+  assert.match(textOf(view.tree), /확인할 수 있는 회신 본문이 없습니다/);
+  assert.doesNotMatch(textOf(view.tree), /회신 원문의 일부입니다/);
+  assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
+  assert.equal(posts(mock.calls, '/confirm').length, 0);
+});
+
+test('재승인 후 최신성 재검증이 실패하면 일정 반영으로 표시하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '네, 가능합니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([reviewed]);
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: reviewed, responses: [response] } : undefined;
+  mock.api.postHook = (path: string) => path.endsWith('/confirm') ? { contactRequest: reviewed, response, scheduleRevision: 4, changed: false } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '저장된 응답 조회'); await view.settle();
+  press(view, '선택: option-1 · 제안 proposal-1'); press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
+  assert.match(textOf(view.tree), /현재 일정으로 새 제안을 요청해 주세요/); assert.doesNotMatch(textOf(view.tree), /일정 반영됨/);
+  press(view, '저장된 회신 다시 조회'); await view.settle();
+  assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
+  assert.equal(posts(mock.calls, '/confirm').length, 1);
 });

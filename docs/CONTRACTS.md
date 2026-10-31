@@ -40,9 +40,15 @@ update는 사용자에게 보여준 전체 편집 필드를 교체한다. `befor
 
 다중 캘린더는 확인된 동일성 근거/사용자 확인으로만 연결한다. 제목·시간만으로 합치지 않고 모든 SourceRef와 원본별 값을 보존한다. 원본 충돌은 표시하고 임의 선택하지 않는다. 최초 제공자 이후 추가 캘린더·양방향 전파·반복 편집 전체는 확장 범위다.
 
+### 2026-10-31 최소 기능 보완
+
+- `read_memory`는 유효한 null fact를 반환하되, 요청한 key에 non-null 값이 하나도 없으면 `missingFields`에 포함한다. `0`, `false`, 빈 문자열은 null과 구분한다. key 생략(keys=[])은 전체 유효 fact 조회 의미를 유지한다.
+- `ai_proposal`이 동일 내용의 update만 포함하면 `no_effective_change`로 거절한다. 절대시각과 timezone을 포함해 전체 일정 필드의 동일성을 확인한다. 직접 저장(`user_command`)과 실질 변경이 섞인 ChangeSet은 기존 의미를 유지하며 일부 변경을 몰래 제거하지 않는다.
+- 수정 요청은 기존 제안을 덮어쓰는 승인이 아니다. 사용자가 편집한 채팅 요청에서 새 제안을 생성하고 전체 변경을 다시 승인한다. 원래 제안은 기존 상태/최신성 규칙을 따른다.
+
 ## 3. Agent·Tool 계약
 
-기준은 `gpt-6.1-terra`, `reasoning.effort: high`, Responses API다. 실제 접근은 미검증이다. 접근 실패 시 다른 모델/effort로 자동 대체하지 않는다. 한 S LLM이 제출된 대화를 처리하며 “고마워”에 Tool이나 전체 재계획을 강제하지 않는다.
+기준은 `gpt-6.1-terra`, `reasoning.effort: high`, Responses API다. 실제 접근 검증 범위는 MODEL_VERIFICATION.md를 따른다. 접근 실패 시 다른 모델/effort로 자동 대체하지 않는다. 한 S LLM이 제출된 대화를 처리하며 “고마워”에 Tool이나 전체 재계획을 강제하지 않는다.
 
 고정 공동 약속도 사용자가 앱에서 조정 검토 대상을 명시적으로 선택하면 `coordinationTarget` 범위에서 **검토용 대안 생성**이 가능하다. 서버가 대상 소유·버전·선택을 확인해 Engine의 coordination 검증 범위에 주입한다. LLM이 이 범위를 만들어 보호를 해제할 수 없다. 완료 항목과 선택 밖 고정 일정은 계속 보호한다. 이 선택은 일정 반영이나 연락 승인이 아니며 실제 반영은 §7을 따른다.
 
@@ -68,6 +74,12 @@ type AgentResult =
 | `validate_changes` | `{changeSet}` | 서버가 최신 snapshot을 조회한 `ValidationResult` |
 
 Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못된 인수/권한 밖 조회는 거절한다. 외부 조회 어댑터는 §7 포트로 추가한다. LLM에 쓰기·발송 Executor를 직접 노출하지 않는다. 적용 직전 검증은 Tool 선택과 별개로 필수다. AI가 새로 배치하거나 시간을 바꾸는 일정의 시작이 검증 시점보다 과거이면 거절한다. 사용자 명시적 과거 기록과 시간이 그대로인 메타데이터 편집을 일괄 금지하는 규칙은 아니다.
+
+### 준비계획 전용 경로
+
+`POST /v1/preparation-proposals`는 `{requestId, targetId, expectedTargetRevision, expectedScheduleRevision, timezone, preparationMinutes, travelMinutes, bufferMinutes}`와 `Idempotency-Key`를 받는다. 반환은 `{requestId, data: {result: AgentResult}}`다. 시간 있는 미완료 event 한 건을 선택하고 모든 소요시간을 사용자가 입력한다. 0은 허용하되 전부 0은 거절하며 누락 값을 0으로 추측하지 않는다.
+
+서버가 기존 시간 계산 함수로 준비·이동·도착 여유 구간을 만들고 0보다 큰 구간만 개인 task의 변경안으로 구성한다. 일정 충돌·과거 시작·원본 버전·전체 일정/맥락 최신성 검증 후 기존 제안 저장/승인 경로를 이용한다. 약속 자체는 변경하지 않는다. 이 요청은 제안 생성이며 확정 저장이 아니다. 일반 LLM 출력 전체에 준비시간 관계를 강제하는 스키마 확장은 아니다.
 
 ## 4. HTTP v1 — 앱·백엔드가 먼저 연결할 경로
 
@@ -108,7 +120,7 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 
 PostgreSQL을 저장 기준으로 채택한다. 호스팅은 미정이다. Repository 경계는 `readSnapshot`, `saveProposal`, `recordDecision`, `applyChangesIfCurrent`다. 일정·제안·승인·Memory·연락작업·중복 실행 결과를 저장한다. 실제 테이블/마이그레이션은 찬욱님과 맞춘다. 테스트용 memory 어댑터는 durable=false이며 재시작 복구 증거가 아니다.
 
-현재 초기 구현은 [사용자별 영속 JSONB 저장 계약](../apps/api/DATABASE.md)을 사용한다. 상태·승인·멱등 결과는 한 트랜잭션이며, 모델 호출은 그 바깥에서 수행하고 최종 확정 전에 버전을 다시 확인한다. 연락 작업은 아직 미구현이다. 운영 정규화 테이블은 이 데이터를 보존하는 마이그레이션으로 담당자와 맞춘다.
+현재 초기 구현은 [사용자별 영속 JSONB 저장 계약](../apps/api/DATABASE.md)을 사용한다. 상태·승인·멱등 결과는 한 트랜잭션이며, 모델 호출은 그 바깥에서 수행하고 최종 확정 전에 버전을 다시 확인한다. 연락 초안·불변 승인·발송 실행 의도와 결과도 저장한다. 회신과 조건부 반영의 추가 저장 필드·호환성은 §9를 따른다. 운영 정규화 테이블은 이 데이터를 보존하는 마이그레이션으로 담당자와 맞춘다.
 
 반영은 권한·승인 버전·만료·최신 시각·일정/맥락 버전·충돌을 다시 검사한다. `scheduleRevision`/`contextRevision`이 바뀌면 stale 처리하며 **내용이 같더라도 새 기준으로 검증한 제안을 재확인**한다. v1 제안 만료는 생성 후 30분, 판단 snapshot의 유효한 일시 상황 만료, 새로 배치/이동하는 시작 시각 중 가장 이른 값이다. 시간 경과로 Memory가 만료됐는데 revision이 같다는 이유로 오래된 근거를 재사용하지 않는다. 버전 조건부 일정 변경과 결과/중복 기록은 하나의 DB 트랜잭션으로 저장한다. 승인/작업 재전달에는 기존 결과를 돌려주며 이미 반영된 작업을 재실행하지 않는다.
 
@@ -150,6 +162,53 @@ allowedOptions는 같은 공동 약속의 독립적인 검증된 대안들이며
 
 외부 부작용은 로컬 DB와 원자적이지 않다. 실행 의도를 먼저 기록하고 중복 작업/콜백을 식별한다. 타임아웃의 성공 여부를 모르면 outcome_unknown으로 보존하고 제공자 조회/사용자 확인으로 해결한다. 제공자별 보장이 없는 재시도를 정확히 한 번 발송이라고 부르지 않는다. 캘린더 초대 알림과 별도 이메일의 이중 통지는 실행 계획에서 방지한다.
 
-Gmail v1 발송은 PostgreSQL 등 영속 저장이 있어야 한다. send 요청은 화면에서 확인한 `expectedSenderAddress`를 포함하고 멱등 지문에도 묶는다. 현재 연결의 발신 주소가 다르면 무발송 충돌로 거절하고 계정을 다시 확인받는다. API는 `submitting`과 요청 식별을 먼저 확정하고 DB 잠금 밖에서 전송한다. 중복 요청이나 중단된 발송을 자동 재전송하지 않는다. 성공 응답의 메시지 ID는 Gmail 접수 증거이며 상대 수락·실제 수신 확인을 의미하지 않는다. `failed/outcome_unknown`을 새 승인 없이 ready로 되돌리는 경로는 제공하지 않는다. 현재 Gmail 권한은 발송·발신 계정 확인만이며 회신 읽기와 자동 일정 반영은 후속이다.
+Gmail v1 발송은 PostgreSQL 등 영속 저장이 있어야 한다. send 요청은 화면에서 확인한 `expectedSenderAddress`를 포함하고 멱등 지문에도 묶는다. 현재 연결의 발신 주소가 다르면 무발송 충돌로 거절하고 계정을 다시 확인받는다. API는 `submitting`과 요청 식별을 먼저 확정하고 DB 잠금 밖에서 전송한다. 중복 요청이나 중단된 발송을 자동 재전송하지 않는다. 성공 응답의 메시지 ID는 Gmail 접수 증거이며 상대 수락·실제 수신 확인을 의미하지 않는다. `failed/outcome_unknown`을 새 승인 없이 ready로 되돌리는 경로는 제공하지 않는다. 발송 권한과 회신 읽기 권한은 분리하며 회신 처리·사용자 확인·조건부 반영은 §9를 따른다.
 
 Gmail 우선 연결을 선택했고 Google Calendar, Twilio+음성, Kakao/TMAP은 검증 후보다. OAuth 접근 동의는 개별 연락 승인이 아니다. Calendar 읽기/쓰기, Gmail 발송/회신 읽기 권한은 구분한다. 개발용 Gmail OAuth 콜백은 PROVIDER_SETUP에 명시하며 그 밖의 제공자 콜백·운영 DB 스키마·음성 모델·푸시 제공자는 미정으로 이 경계를 유지해 병렬 검증한다. 실제 테스트 발신·발송에는 승인된 테스트 상대와 내용이 필요하다.
+
+## 8. 첫 Calendar 읽기·선택 가져오기 / Twilio 전화 증분
+
+이번 API 계약은 구현 증분이며 실제 계정 연결·배포 성공을 뜻하지 않는다. 일반 응답/오류/인증은 §4와 같다.
+
+| API | 입력 | data / 동작 |
+|---|---|---|
+| `GET /v1/calendar-connection` | 인증 | `{status: available/not_configured, accountLabel: string/null}` |
+| `GET /v1/calendar/calendars` | 인증 | `{calendars: [{id, summary, timeZone?}]}` |
+| `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
+| `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
+| `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null}`; 비밀 반환 없음 |
+| `POST /v1/phone-connection` | `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
+| `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
+
+**Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
+
+가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
+
+**전화:** Account SID/Auth Token과 계정 소유 voice 발신번호를 입력한다. 현재 API Key SID/Secret·검증된 외부 caller ID는 입력 지원 범위가 아니다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 읽기 전용 번호 조회이며 발신 승인이 아니다. 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
+
+전화 설정 POST는 기존 사용자별 PG 잠금 안에서 제공자 번호 조회(15초 timeout)와 파일 저장을 순서대로 처리한다. 같은 사용자의 다른 쓰기는 그동안 기다릴 수 있으며 다른 사용자와는 분리된다. 다중 인스턴스는 같은 DB와 자격 저장 위치를 전제로 한다. 잠금은 활성 DB 트랜잭션 동안의 순서 제어이며 파일 저장과 DB commit이 원자적이라는 뜻은 아니다. 원자 파일에 저장된 `lastRequestId`와 발신번호가 둘 다 요청과 일치할 때만 클라이언트가 응답 유실을 해소한다. 번호만 같은 이전 연결을 새 설정 성공으로 간주하지 않는다.
+
+기존 단방향 TTS 어댑터를 바탕으로 §9의 제한된 양방향 경로를 연결한다. 발송 채널을 바꾸어 승인 경계를 우회할 수 없고 채널 불일치는 부작용 전에 거절한다. `sent_or_connected`는 Twilio API 접수를 의미하며 실제 통화 연결/본문 청취/상대 수락의 증거가 아니다. 실패·결과 불명은 자동 재발신하지 않는다. 불특정 수신 전화에 응대하는 기능은 포함하지 않는다.
+
+## 9. 상대 회신 조회·확인·조건부 일정 반영
+
+2026-10-31 증분 계약. 구현·테스트·실제 제공자 상태는 IMPLEMENTATION_PLAN/PROVIDER_SETUP에 별도로 기록한다. 외부 원본 캘린더 쓰기는 이 범위에 포함하지 않는다.
+
+| 경로 | 요청 | 응답 data / 의미 |
+|---|---|---|
+| `GET /v1/email-reply-connection` | 인증 | 회신 읽기 연결 상태·발신 계정. 발송 동의만으로 available이 되지 않음 |
+| `GET /v1/contact-requests/:id/responses` | 인증 | `{contactRequest, responses}`; 해당 사용자 연락의 서버 저장 회신만 |
+| `POST /v1/contact-requests/:id/check-replies` | `{requestId, contactRevision}` + Idempotency-Key | `{contactRequest, responses, checkedCount, unmatchedCount}`; Gmail 조회 뒤 검증한 후보 저장 |
+| `POST /v1/contact-requests/:id/responses/:responseId/confirm` | `{requestId, contactRevision, selectedOptionId}` + Idempotency-Key | `{contactRequest, response, scheduleRevision, changed}`; 저장된 최신 회신을 직접 확인하고 허용 대안을 선택한 사용자 승인 |
+
+`ContactResponse`에 `displayText: string/null`, `reviewReason: string/null`을 추가한다. displayText는 서버가 인용·서명 등을 제거한 최대 2,000자의 답변 발췌이며 원본 전체나 상대 신원 인증이 아니다. 자동응답·본문 없음·연관 불명은 수락 증거로 사용할 수 없다. 공개 요청으로 providerEventId, accepted 또는 발췌를 생성/수정하는 API는 제공하지 않는다.
+
+Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성, 전송 메시지 ID·스레드·원본 헤더·이후 회신의 참조 관계를 확인한다. 헤더 일치만으로 실제 상대의 신원을 단정하지 않으므로 이메일 이벤트는 항상 `unclear`이고 `needs_user_review`로 남긴다. 사용자 확인은 실제 저장된 최신 발췌와 `sender_unverified` 후보에만 가능하다. 자동 메일이나 공백 발췌, 이미 확인한 응답, 다른 연락/사용자 응답은 확인 대상이 아니다. 정기 자동 메일 조회는 없으며 회신 확인 버튼으로 조회한다.
+
+전화는 공개 HTTPS 웹훅·서명 검증·계정/통화/번호 결합·영속 세션을 통해 서버가 관찰한 응답만 받는다. 음성 모델은 승인된 옵션의 잠정 선택을 해석하며, 선택 내용을 다시 안내한 뒤 명시적 번호 확인을 받아야 accepted가 된다. 모델 timeout·불분명·승인 밖 대안은 일정 변경 권한이 아니다. 콜백 단계와 식별자를 중복 처리하지 않으며 서버 재시작 뒤 저장된 세션/응답을 재사용한다.
+
+전화 대안은 1~9개이며 시각은 분 단위로 정확히 표현할 수 있어야 한다. 시작/종료의 시간대 이름과 그 순간의 UTC 시차를 함께 안내하여 DST 반복 시각도 구분한다. 초 또는 비0 소수초가 있거나 낭독 문구가 중복되는 대안은 발신 전 거절하며, 이미 접수된 통화에서도 재검증 후 검토 상태로 남긴다. 일반 일정/이메일의 시간 정밀도를 낮추거나 자동 반올림하는 변경은 아니다.
+
+회신 기록·사용자 확인·최종 반영에는 영속 DB가 필요하다. 제공자와 모델 호출은 사용자 DB 잠금 밖에서 수행하며, 최종적으로 승인 스냅샷·수신자·일정/맥락 revision·제안/시간 유효성·충돌을 재검증한다. 적용한 대안은 applied, 같은 연락의 다른 대안은 stale로 바꾸고 결과와 같은 트랜잭션으로 저장한다. 최신성 검사에 실패하면 changed=false/needs_user_review를 반환하며 기존 약속을 유지한다. 전달 성공이나 모호한 회신만으로 적용하지 않는다.
+
+**저장 호환성:** 기존 JSONB에 선택 필드 contactResponses/voiceSessions를 추가하고 과거 row는 빈 Map으로 읽는다. 새 필드가 저장된 row는 이전 서버의 strict decoder와 호환되지 않으므로 같은 DB에 구·신 서버를 혼합 실행하지 않는다. 배포 시 관련 API·예약 프로세스 버전을 함께 맞추고 이전 버전으로 단순 롤백하지 않는다.

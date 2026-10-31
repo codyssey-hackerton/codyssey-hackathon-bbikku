@@ -25,9 +25,62 @@ const create = (after: ScheduleFields, changeId = "create-1"): Change => ({ chan
 
 test("an empty change set is not a valid proposal or direct command", () => {
   for (const purpose of ["ai_proposal", "user_command"] as const) {
-    const validation = validateChanges(request([], { purpose }));
+    const input = request([], { purpose, snapshot: snapshot([event({ flexibility: "fixed" })]) });
+    const before = structuredClone(input);
+    const validation = validateChanges(input);
     assert.equal(validation.valid, false);
     assert.ok(validation.conflicts.some(({ reason }) => reason === "empty_change_set"));
+    assert.deepEqual(input, before);
+  }
+});
+
+test("one incomplete task can move after a fixed event only within its deadline", () => {
+  const fields = task({ completion: "incomplete", deadline: "2026-11-01T08:30Z",
+    timeSlot: slot("2026-11-01T05:00Z", "2026-11-01T05:30Z") });
+  const unfinished: ScheduleItem = { ...fields, id: "study", revision: 2, sourceRefs: [] };
+  const school = event({ id: "school", flexibility: "fixed" });
+  const completed: ScheduleItem = { ...task({ completion: "completed",
+    timeSlot: slot("2026-10-31T08:00Z", "2026-10-31T08:30Z") }), id: "done", revision: 1, sourceRefs: [] };
+  const move = (timeSlot: TimeSlot): Change => ({ changeId: "move", operation: "update",
+    targetId: unfinished.id, expectedRevision: unfinished.revision, after: { ...fields, timeSlot } });
+  const input = request([move(slot("2026-11-01T08:00Z", "2026-11-01T08:30Z"))], {
+    snapshot: snapshot([unfinished, school, completed]),
+  });
+  const before = structuredClone(input);
+  const result = assessChanges(input);
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.mode, "personal");
+  assert.deepEqual(input, before);
+
+  const missing = assessChanges({ ...input, snapshot: { ...input.snapshot, missingFields: ["taskValidity"] } });
+  assert.equal(missing.validation.valid, false);
+  assert.deepEqual(missing.validation.missingFields, ["taskValidity"]);
+  const late = assessChanges({ ...input, changeSet: { changes: [move(slot("2026-11-01T08:00Z", "2026-11-01T08:30:00.000001Z"))] } });
+  assert.equal(late.validation.valid, false);
+  assert.ok(late.validation.conflicts.some(({ reason }) => reason.startsWith("deadline_exceeded:")));
+  const overlap = assessChanges({ ...input, changeSet: { changes: [move(slot("2026-11-01T07:30Z", "2026-11-01T08:00Z"))] } });
+  assert.equal(overlap.validation.valid, false);
+  assert.ok(overlap.validation.conflicts.some(({ reason, targetIds }) => reason.startsWith("overlap:") && targetIds.includes(school.id)));
+  assert.deepEqual(input, before);
+});
+
+test("AI cannot move or delete a completed or fixed task", () => {
+  for (const overrides of [{ completion: "completed" as const }, { flexibility: "fixed" as const }]) {
+    const fields = task({ ...overrides, timeSlot: slot("2026-11-01T05:00Z", "2026-11-01T05:30Z") });
+    const existing: ScheduleItem = { ...fields, id: "protected-task", revision: 1, sourceRefs: [] };
+    const changes: Change[] = [
+      { changeId: "move", operation: "update", targetId: existing.id, expectedRevision: 1,
+        after: { ...fields, timeSlot: slot("2026-11-01T06:00Z", "2026-11-01T06:30Z") } },
+      { changeId: "delete", operation: "delete", targetId: existing.id, expectedRevision: 1 },
+    ];
+    for (const change of changes) {
+      const input = request([change], { snapshot: snapshot([existing]) });
+      const before = structuredClone(input);
+      const validation = validateChanges(input);
+      assert.equal(validation.valid, false);
+      assert.deepEqual(validation.protectedTargets, [existing.id]);
+      assert.deepEqual(input, before);
+    }
   }
 });
 

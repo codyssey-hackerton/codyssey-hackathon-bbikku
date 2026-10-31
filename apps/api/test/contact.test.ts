@@ -136,7 +136,7 @@ test('fixture creates separate domain-validated alternatives for the same unchan
   assert.deepEqual((await schedule(app)).items.find((item: ScheduleItem) => item.id === first.id), first);
 });
 
-test('recipient registration requires confirmation and a valid email; phone is explicitly unsupported', async t => {
+test('recipient registration requires confirmation and a valid email or phone number', async t => {
   const { app } = setup(t);
   for (const [key, body] of [
     ['unconfirmed', { ...recipientBody(), confirmed: false }],
@@ -144,14 +144,15 @@ test('recipient registration requires confirmation and a valid email; phone is e
     ['invalid-email', { ...recipientBody(), address: 'not-an-email' }],
     ['email-local-too-long', { ...recipientBody(), address: `${'a'.repeat(65)}@example.test` }],
     ['email-label-too-long', { ...recipientBody(), address: `a@${'a'.repeat(64)}.test` }],
+    ['invalid-phone', { ...recipientBody(), channel: 'phone', address: '01012345678' }],
   ] as const) {
     const response = await post(app, '/v1/recipients', body, key);
     assert.equal(response.statusCode, 400, response.body);
     assert.equal(response.json().error.code, 'invalid_request');
   }
   const phone = await post(app, '/v1/recipients', { ...recipientBody(), channel: 'phone', address: '+821012345678' }, 'phone');
-  assert.equal(phone.statusCode, 501, phone.body);
-  assert.equal(phone.json().error.code, 'not_implemented');
+  assert.equal(phone.statusCode, 200, phone.body);
+  assert.equal(phone.json().data.recipient.address, '+821012345678');
   const recipient = await register(app);
   assert.ok(recipient.id);
   assert.deepEqual({ displayName: recipient.displayName, channel: recipient.channel, address: recipient.address },

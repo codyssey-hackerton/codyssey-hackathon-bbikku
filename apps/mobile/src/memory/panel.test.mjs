@@ -266,3 +266,106 @@ test('a conflict after a timeout keeps the outcome uncertain and offers no new-r
   assert.doesNotMatch(textOf(view.tree), /최신 목록 확인 후 새 요청/);
   assert.equal(input(view, '값').props.editable, false);
 });
+
+test('optional time setup saves each numeric preference with the latest revision and leaves other fields unchanged', async () => {
+  let revision = 3;
+  const facts = [fact('preparationMinutes', 15)];
+  const calls = [];
+  const api = {
+    get: async () => ({ facts: [...facts], contextRevision: revision }),
+    post: async (path, body, options) => {
+      calls.push({ path, body: structuredClone(body), options: structuredClone(options) });
+      assert.equal(body.expectedContextRevision, revision);
+      const saved = fact(body.key, body.value);
+      const index = facts.findIndex((entry) => entry.key === body.key);
+      if (index < 0) facts.push(saved); else facts[index] = saved;
+      return { fact: saved, contextRevision: ++revision };
+    },
+  };
+  let changed = 0;
+  let back = 0;
+  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => { changed += 1; } });
+  await view.settle();
+  assert.match(textOf(view.tree), /현재 저장값: 15분/);
+  enter(view, '준비시간 분', '45');
+  enter(view, '이동시간 분', '30.5');
+  enter(view, '도착 여유시간 분', '0');
+  for (const label of ['준비시간', '이동시간', '도착 여유시간']) {
+    press(view, `${label} 저장`);
+    await view.settle();
+  }
+  assert.deepEqual(calls.map(({ body }) => [body.key, body.value, body.expectedContextRevision, body.kind, body.validUntil]), [
+    ['preparationMinutes', 45, 3, 'preference', null],
+    ['travelMinutes', 30.5, 4, 'preference', null],
+    ['bufferMinutes', 0, 5, 'preference', null],
+  ]);
+  assert.ok(calls.every(({ path }) => path === '/v1/memory'));
+  assert.equal(changed, 3);
+  assert.match(textOf(view.tree), /현재 저장값: 45분/);
+  press(view, '나중에 설정');
+  assert.equal(back, 1);
+  assert.equal(calls.length, 3);
+});
+
+test('time setup rejects empty, negative, malformed and non-finite values without writing; skip remains available', async () => {
+  const calls = [];
+  const api = { get: async () => ({ facts: [], contextRevision: 1 }), post: async (...args) => { calls.push(args); } };
+  let back = 0;
+  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => assert.fail('not saved') });
+  await view.settle();
+  for (const value of ['', ' ', '-1', 'abc', '1e3', 'Infinity', '9'.repeat(400)]) {
+    enter(view, '준비시간 분', value);
+    press(view, '준비시간 저장');
+    assert.match(textOf(view.tree), /준비시간은 0 이상의 숫자/);
+  }
+  press(view, '나중에 설정');
+  assert.equal(back, 1);
+  assert.equal(calls.length, 0);
+});
+
+test('time setup retries an uncertain write with the same request and keeps other drafts', async () => {
+  const calls = [];
+  let revision = 7;
+  let saved;
+  const api = {
+    get: async () => ({ facts: saved ? [saved] : [], contextRevision: revision }),
+    post: async (path, body, options) => {
+      calls.push({ path, body: structuredClone(body), options: structuredClone(options) });
+      if (calls.length === 1) throw new ApiError('timeout', 'timeout', true);
+      saved = fact(body.key, body.value);
+      return { fact: saved, contextRevision: ++revision };
+    },
+  };
+  const view = harness.renderer(MemoryPanel, { api, onBack: () => {}, onMemoryChanged: () => {} });
+  await view.settle();
+  enter(view, '준비시간 분', '15');
+  enter(view, '이동시간 분', '30');
+  press(view, '준비시간 저장');
+  await view.settle();
+  assert.equal(input(view, '준비시간 분').props.editable, false);
+  press(view, '같은 요청 다시 시도');
+  await view.settle();
+  assert.deepEqual(calls[1], calls[0]);
+  assert.equal(input(view, '준비시간 분').props.value, '');
+  assert.equal(input(view, '이동시간 분').props.value, '30');
+  assert.match(textOf(view.tree), /현재 저장값: 15분/);
+});
+
+test('saving one time and skipping does not write the other optional fields', async () => {
+  const calls = [];
+  const api = {
+    get: async () => ({ facts: [], contextRevision: 1 }),
+    post: async (path, body) => { calls.push({ path, body }); return { fact: fact(body.key, body.value), contextRevision: 2 }; },
+  };
+  let back = 0;
+  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => {} });
+  await view.settle();
+  enter(view, '이동시간 분', '30');
+  press(view, '이동시간 저장');
+  await view.settle();
+  press(view, '나중에 설정');
+  assert.equal(back, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.key, 'travelMinutes');
+  assert.equal(calls[0].body.value, 30);
+});

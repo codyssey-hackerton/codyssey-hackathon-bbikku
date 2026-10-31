@@ -18,6 +18,7 @@ const stored = z.object({
   format: z.literal(1), scheduleRevision: z.number().int().nonnegative(), contextRevision: z.number().int().nonnegative(),
   items: pairs, facts: pairs, proposals: pairs, proposalFacts: pairs, approvals: z.array(z.unknown()),
   recipients: pairs.optional(), contactRequests: pairs.optional(), contactDraftSnapshots: pairs.optional(), contactApprovals: z.array(z.unknown()).optional(),
+  contactResponses: pairs.optional(), voiceSessions: pairs.optional(),
   conversations: pairs, idempotency: pairs, reviewSchedule: z.unknown().nullable(), reviewScheduleUpdatedAt: z.string().nullable().optional(), reviewLedger: pairs,
 }).strict();
 
@@ -28,6 +29,8 @@ function encode(state: UserPlanningState): string {
     ...(state.contactRequests.size ? { contactRequests: [...state.contactRequests] } : {}),
     ...(state.contactDraftSnapshots.size ? { contactDraftSnapshots: [...state.contactDraftSnapshots] } : {}),
     ...(state.contactApprovals.length ? { contactApprovals: state.contactApprovals } : {}),
+    ...(state.contactResponses.size ? { contactResponses: [...state.contactResponses] } : {}),
+    ...(state.voiceSessions.size ? { voiceSessions: [...state.voiceSessions] } : {}),
     conversations: [...state.conversations], idempotency: [...state.idempotency], reviewSchedule: state.reviewSchedule,
     reviewScheduleUpdatedAt: state.reviewScheduleUpdatedAt, reviewLedger: [...state.reviewLedger] });
 }
@@ -37,6 +40,7 @@ function decode(value: unknown): UserPlanningState {
     items: new Map(data.items), facts: new Map(data.facts), proposals: new Map(data.proposals), proposalFacts: new Map(data.proposalFacts), approvals: data.approvals,
     recipients: new Map(data.recipients ?? []), contactRequests: new Map(data.contactRequests ?? []),
     contactDraftSnapshots: new Map(data.contactDraftSnapshots ?? []), contactApprovals: data.contactApprovals ?? [],
+    contactResponses: new Map(data.contactResponses ?? []), voiceSessions: new Map(data.voiceSessions ?? []),
     conversations: new Map(data.conversations), idempotency: new Map(data.idempotency), reviewSchedule: data.reviewSchedule,
     reviewScheduleUpdatedAt: data.reviewScheduleUpdatedAt ?? null, reviewLedger: new Map(data.reviewLedger),
   } as UserPlanningState;

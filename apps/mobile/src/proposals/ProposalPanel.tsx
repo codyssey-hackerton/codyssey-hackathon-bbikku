@@ -15,6 +15,7 @@ interface Props {
   refreshVersion: number;
   onScheduleChanged: () => void;
   onBack: () => void;
+  onRequestRevision: (proposal: Proposal) => void;
 }
 
 type Load<T> = { status: 'loading' } | { status: 'error'; error: unknown } | { status: 'success'; data: T };
@@ -231,8 +232,8 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
   </>;
 }
 
-function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack }: {
-  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void;
+function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: {
+  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void; onRequestRevision: (proposal: Proposal) => void;
 }) {
   const [contactProposal, setContactProposal] = useState<Proposal | null>(null);
   const mounted = useRef(false);
@@ -281,7 +282,7 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   const locked = state.status === 'pending' || state.status === 'error';
   const shown = state.status === 'success' ? state.result.proposal : current.status === 'success' ? current.data : null;
   if (contactProposal) return <ContactPanel api={api} proposalClient={client} proposal={contactProposal}
-    renderProposal={(item) => <ProposalContent proposal={item} />} onBack={() => setContactProposal(null)} />;
+    renderProposal={(item) => <ProposalContent proposal={item} />} onScheduleChanged={onScheduleChanged} onBack={() => setContactProposal(null)} />;
   return <ScrollView contentContainerStyle={styles.container}>
     <View style={styles.row}>
       <Text style={styles.title} accessibilityRole="header">제안 상세</Text>
@@ -306,6 +307,8 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
       {!uncertain && <Button label="제안 다시 조회" onPress={reload} secondary />}
     </>}
     {shown && state.status === 'idle' && <>
+      <Button label="수정 요청" onPress={() => onRequestRevision(shown)} secondary />
+      <Text style={styles.notice}>수정 요청은 새 제안을 위한 대화 초안입니다. 기존 제안은 그대로이며 새 제안에는 별도 승인이 필요합니다.</Text>
       {shown.status === 'pending' ? <>
         {shown.mode === 'coordination' && <Text style={styles.notice}>승인해도 원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.</Text>}
         {!canAccept(shown) && <Text style={styles.notice}>검증 결과가 유효하지 않거나 일관되지 않아 승인할 수 없습니다. 거절은 가능합니다.</Text>}
@@ -320,12 +323,12 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   </ScrollView>;
 }
 
-function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack }: Props) {
+function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: Props) {
   const client = useMemo(() => createProposalClient(api), [api]);
   const [selected, setSelected] = useState<string | null>(null);
   return selected === null
     ? <ProposalList client={client} refreshVersion={refreshVersion} onSelect={setSelected} onBack={onBack} />
-    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} />;
+    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} onRequestRevision={onRequestRevision} />;
 }
 
 export default function ProposalPanel(props: Props) {

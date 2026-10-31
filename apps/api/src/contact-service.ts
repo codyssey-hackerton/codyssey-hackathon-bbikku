@@ -25,6 +25,7 @@ const email = z.email().max(254).refine(value => {
   const [local, domain] = value.split('@');
   return !!local && local.length <= 64 && !!domain && domain.split('.').every(label => label.length <= 63);
 });
+const phone = /^\+[1-9]\d{1,14}$/;
 
 function recipientSnapshot(recipient: Recipient): ContactRequest['recipientSnapshot'] {
   return { displayName: recipient.displayName, channel: recipient.channel, address: recipient.address };
@@ -33,8 +34,8 @@ function recipientSnapshot(recipient: Recipient): ContactRequest['recipientSnaps
 function confirmedRecipient(state: UserPlanningState, id: string, channel: ContactRequest['channel']): Recipient {
   const recipient = state.recipients.get(id);
   if (!recipient) throw new PlanningError(404, 'not_found', '확인된 수신자를 찾을 수 없습니다.');
-  if (recipient.id !== id || recipient.channel !== channel || channel !== 'email' ||
-      !email.safeParse(recipient.address).success || !timestamp.safeParse(recipient.confirmedByUserAt).success) {
+  if (recipient.id !== id || recipient.channel !== channel ||
+      !(channel === 'email' ? email.safeParse(recipient.address).success : phone.test(recipient.address)) || !timestamp.safeParse(recipient.confirmedByUserAt).success) {
     throw new PlanningError(409, 'conflict', '수신자 또는 연락 수단을 다시 확인해 주세요.');
   }
   return recipient;
@@ -116,15 +117,15 @@ export class ContactService {
   constructor(private readonly store: PlanningStore, private readonly planning: PlanningService, private readonly clock: () => Date = () => new Date()) {}
 
   async createRecipient(userId: string, input: CreateRecipient) {
-    if (input.channel !== 'email') throw new PlanningError(501, 'not_implemented', '전화 연락은 아직 지원하지 않습니다.');
-    if (input.confirmed !== true || !email.safeParse(input.address).success) throw new PlanningError(400, 'invalid_request', '확인된 이메일 주소가 필요합니다.');
+    if (input.confirmed !== true || !(input.channel === 'email' ? email.safeParse(input.address).success : phone.test(input.address))) {
+      throw new PlanningError(400, 'invalid_request', '확인된 연락처가 필요합니다.');
+    }
     const recipient: Recipient = { id: randomUUID(), displayName: input.displayName, channel: input.channel,
       address: input.address, confirmedByUserAt: this.clock().toISOString() };
     return this.store.transaction(userId, state => { state.recipients.set(recipient.id, recipient); return { recipient }; });
   }
 
   async create(userId: string, input: CreateContact) {
-    if (input.channel !== 'email') throw new PlanningError(501, 'not_implemented', '전화 연락은 아직 지원하지 않습니다.');
     return this.store.atomic(userId, async () => {
       const baseline = await this.planning.capture(userId, 'UTC');
       return this.store.transaction(userId, state => {

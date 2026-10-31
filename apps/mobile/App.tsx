@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useFonts } from 'expo-font';
 import { FontReadyContext, Text, TextInput } from './src/ui/typography';
 import { colors } from './src/ui/theme';
@@ -13,15 +13,18 @@ import { createApiClient } from './src/api/http';
 import { normalizeApiBaseUrl } from './src/api/connection';
 import { operationGuard } from './src/api/operationGuard';
 import type { ApiClient } from './src/api/http';
-import ChatScreen from './src/chat/ChatScreen';
+import ChatScreen, { type RecoveryRequest, type RevisionRequest } from './src/chat/ChatScreen';
 import { createChatClient } from './src/chat/client';
 import type { CoordinationTarget } from './src/chat/client';
 import ProposalPanel from './src/proposals/ProposalPanel';
 import MemoryPanel from './src/memory/MemoryPanel';
 import ReviewPanel from './src/review/ReviewPanel';
 import CalendarScreen from './src/screens/CalendarScreen';
+import CalendarImportPanel from './src/calendar/CalendarImportPanel';
+import PhoneConnectionPanel from './src/contacts/PhoneConnectionPanel';
 import DayScreen from './src/screens/DayScreen';
 import { createScheduleClient } from './src/schedule/client';
+import { civilDate, formatCivilDate } from './src/schedule/dates';
 
 type Tab = 'chat' | 'calendar' | 'day';
 const tabs: { id: Tab; label: string }[] = [
@@ -31,7 +34,7 @@ const tabs: { id: Tab; label: string }[] = [
 ];
 
 // Public Expo variables are embedded in the app. Never place credentials here.
-const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim() || 'http://localhost:3001';
+const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim() || (Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
 const defaultApiUrl = normalizeApiBaseUrl(configuredApiUrl) ?? configuredApiUrl;
 
 function deviceTimezone(): string {
@@ -48,10 +51,12 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 
 function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: string }) {
   const [tab, setTab] = useState<Tab>('chat');
-  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review'>('main');
+  const [panel, setPanel] = useState<'main' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection'>('main');
   const [reviewOpened, setReviewOpened] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [coordinationTarget, setCoordinationTarget] = useState<(CoordinationTarget & { title: string }) | undefined>();
+  const [recoveryRequest, setRecoveryRequest] = useState<RecoveryRequest | undefined>();
+  const [revisionRequest, setRevisionRequest] = useState<RevisionRequest | undefined>();
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [proposalRefreshVersion, setProposalRefreshVersion] = useState(0);
   const refresh = useCallback(() => {
@@ -65,15 +70,35 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
 
   return <>
     <View style={styles.screenContainer}>
+      {panel === 'main' && <Pressable accessibilityRole="button" accessibilityLabel="전화 외부 연결" onPress={() => setPanel('phoneConnection')} style={styles.importButton}>
+        <Text style={styles.settingsToggleText}>전화 외부 연결</Text>
+      </Pressable>}
+      {panel === 'main' && (tab === 'calendar' || tab === 'day') && <Pressable accessibilityRole="button" accessibilityLabel="캘린더 일정 가져오기" onPress={() => setPanel('calendarImport')} style={styles.importButton}>
+        <Text style={styles.settingsToggleText}>캘린더 일정 가져오기</Text>
+      </Pressable>}
       <Scene visible={chatVisible}>
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
           onOpenProposals={() => setPanel('proposals')} onOpenMemory={() => setPanel('memory')} onOpenReviewSchedule={() => { setReviewOpened(true); setPanel('review'); }} onProposalCreated={refreshProposals}
-          coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} />
+          coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest} />
       </Scene>
       <Scene visible={panel === 'main' && tab === 'calendar'}><CalendarScreen selectedDate={selectedDate} onSelectDate={setSelectedDate} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
-      <Scene visible={panel === 'main' && tab === 'day'}><DayScreen selectedDate={selectedDate} onSelectDate={setSelectedDate} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} onScheduleChanged={refresh}
-        onCoordinate={(item) => { setCoordinationTarget({ id: item.id, expectedRevision: item.revision, title: item.title }); setTab('chat'); }} /></Scene>
-      <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} /></Scene>
+      <Scene visible={panel === 'main' && tab === 'day'}><DayScreen selectedDate={selectedDate} onSelectDate={setSelectedDate} client={scheduleClient} api={api} onOpenPreparationProposals={() => { refreshProposals(); setPanel('proposals'); }} timezone={timezone} refreshVersion={refreshVersion} onScheduleChanged={refresh} visible={panel === 'main' && tab === 'day'}
+        onCoordinate={(item) => { setCoordinationTarget({ id: item.id, expectedRevision: item.revision, title: item.title }); setTab('chat'); }}
+        onRecovery={(item) => {
+          const dateLabel = formatCivilDate(civilDate(selectedDate, timezone));
+          setRecoveryRequest({ key: JSON.stringify([item.id, dateLabel]), title: item.title, dateLabel,
+            text: `${dateLabel}에 확인한 미완료 할 일 “${item.title}”이 아직 필요한지와 기한을 먼저 확인하고 싶어요. 필요하다면 가능한 복구 방법을 함께 살펴봐 주세요. 일정 변경은 제안을 보고 결정할게요.` });
+          setTab('chat');
+        }} /></Scene>
+      <Scene visible={panel === 'proposals'}><ProposalPanel api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={(proposal) => {
+        const target = proposal.coordinationTarget;
+        setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
+          text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
+          coordinationTarget: target ? { ...target, title: proposal.beforeItems.find((item) => item.id === target.id)?.title ?? target.id } : undefined });
+        setTab('chat'); setPanel('main');
+      }} /></Scene>
+      {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
+      {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
     </View>
@@ -92,7 +117,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const [urlDraft, setUrlDraft] = useState(defaultApiUrl);
   const [tokenDraft, setTokenDraft] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true');
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const timezone = useMemo(deviceTimezone, []);
@@ -142,6 +167,8 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
+      {Platform.OS === 'web' && process.env.EXPO_PUBLIC_PREVIEW_ONLY === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 화면 미리보기</Text><Text style={styles.hint}>공유 API와 로그인 연결을 준비 중입니다. 실제 AI 대화와 일정 저장은 연결 완료 후 사용할 수 있습니다.</Text></View>}
+      {Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 기능 테스트</Text><Text style={styles.hint}>참여 코드를 입력해 기능을 테스트할 수 있습니다.</Text></View>}
       {fontUnavailable && <Text accessibilityRole="alert" style={styles.fontNotice}>글꼴을 불러오지 못해 기본 글꼴로 표시합니다.</Text>}
       <View style={styles.topBar}>
         <View style={styles.brandGroup}>
@@ -157,8 +184,8 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
         <View style={styles.settings}>
           <Text style={styles.settingLabel}>API 서버 주소</Text>
           <TextInput accessibilityLabel="API 서버 주소" value={urlDraft} onChangeText={(value) => { setUrlDraft(value); setTokenEdited(false); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
-          <Text style={styles.settingLabel}>개발 세션 Bearer 토큰</Text>
-          <TextInput accessibilityLabel="개발 세션 토큰" value={tokenDraft} onChangeText={(value) => { setTokenDraft(value); setTokenEdited(true); }} secureTextEntry autoComplete="off" autoCapitalize="none" autoCorrect={false} style={styles.input} />
+          <Text style={styles.settingLabel}>{Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' ? '팀 참여 코드' : '개발 세션 Bearer 토큰'}</Text>
+          <TextInput accessibilityLabel={Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' ? '팀 참여 코드' : '개발 세션 토큰'} value={tokenDraft} onChangeText={(value) => { setTokenDraft(value); setTokenEdited(true); }} secureTextEntry autoComplete="off" autoCapitalize="none" autoCorrect={false} style={styles.input} />
           <Text style={styles.hint}>토큰은 이 앱 실행 동안에만 사용합니다.</Text>
           {settingsError && <Text style={styles.error} accessibilityRole="alert">{settingsError}</Text>}
           <Pressable accessibilityRole="button" onPress={applySettings} style={styles.apply}><Text style={styles.applyText}>설정 적용</Text></Pressable>
@@ -185,7 +212,8 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.background },
+  safeArea: { flex: 1, width: '100%', maxWidth: 520, alignSelf: 'center', backgroundColor: colors.background },
+  importButton: { minHeight: 44, justifyContent: 'center', alignSelf: 'flex-end', paddingHorizontal: 20 },
   topBar: { minHeight: 58, paddingHorizontal: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   brandGroup: { flexDirection: 'row', gap: 9, alignItems: 'center' },
   brandMark: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },

@@ -8,12 +8,13 @@
 |---|---|
 | 모바일 | Expo + React Native + TypeScript. 채팅·월별·하루 화면. iOS/Android 목표, 실기기 검증은 별도. 디자인은 팀 시안 반영. |
 | 서버·Agent | Node.js + TypeScript + Fastify, 하나의 백엔드 안에서 LangGraph JS로 단일 S LLM 실행. Hermes 구조는 참고하되 설치·포크하지 않음. |
-| 모델 | 사용자 지정 `gpt-6.1-terra`, `reasoning.effort: high`, Responses API. 실제 프로젝트 접근/성능 미검증. |
-| 저장·시간 트리거 | PostgreSQL, pg-boss 서버 Scheduler. DB 호스팅은 미정. 저녁/아침 사용자별 설정, 주기 확인 자체는 LLM 호출이 아님. |
+| 모델 | 사용자 지정 `gpt-6.1-terra`, `reasoning.effort: high`, Responses API. 실제 호출·합성 사례 검증 기록 있음. 대표 성능·모델 비교 미검증. |
+| 저장·시간 트리거 | PostgreSQL, pg-boss 서버 Scheduler. 로컬 검증 완료, 별도 공개 테스트는 VM PostgreSQL 사용 인계. 저녁/아침 사용자별 설정, 주기 확인 자체는 LLM 호출이 아님. |
 | 승인 | 직접 폼 저장은 그 입력만 확인. AI 추가 변경은 별도 승인. 공동 약속 시간 조정은 연락 승인·상대 수락·최신 재검증 후 반영. |
 | 시연 목표 | [PRD §2](PRD.md)의 기본 추천 E2E + 실제 연락대행 + 전날/아침 검토. 단계별 개발이며 완료 증거를 별도 기록. |
 | 제공자 | Gmail 우선 연결 선택. Google Calendar, Twilio+음성, Kakao/TMAP은 후보. 실제 접근·호출·국가/계정 제약은 병렬 검증 후 확정. |
-| 미정 | DB/서버 호스팅, 앱 인증 제공자, 음성 모델, 푸시, 최종 시연 기기·전화 제공자, 다중 캘린더 쓰기 정책. |
+| 음성 | Twilio Gather/Say + 기존 Terra/high의 승인 옵션 분류·별도 DTMF 확인. 영속 세션·서명·회신/일정 검증은 서버 코드. 자유 대화형 음성은 후속. |
+| 미정 | 정식 앱 인증, 고정 API 도메인, 푸시, 최종 시연 기기, 다중 캘린더 쓰기 정책. 전화 실통화는 발신번호·공개 웹훅 준비 후 검증. |
 
 이는 2026-10-31 세진님의 문서 확정·개발 착수 요청에 따른 구현 기준이다. 팀 전체 검토 완료나 실제 실행 성공을 뜻하지 않는다. 코드 골격은 재사용하되 [CONTRACTS v1](CONTRACTS.md)에 맞추고, 제공자 검증을 기다리지 않고 공통 경계부터 구현한다.
 
@@ -129,4 +130,4 @@ Terra는 음성 입출력을 직접 지원하지 않으므로 일정 판단용 `
 
 2026-10-31 프로젝트 준비 상태 점검: 프로젝트 안에서 실제 자격증명 설정이나 완성된 제공자 연동을 확인하지 못했다. Calendar/Gmail·Twilio·Kakao/TMAP은 candidate/not_configured, Terra/high는 selected/not_configured이며 인증된 외부 호출은 수행하지 않았다. 팀은 프로젝트용 API 접근 수단, Google OAuth 테스트 계정/범위, 전화 계정·발신번호/음성 제공자, 시연 이동수단을 준비한다. 키는 저장소·채팅·보고서에 넣지 않고 프로젝트 비밀 설정으로 전달한다. 이는 당시 로컬 조사이며 별도 배포 환경의 상태를 단정하지 않는다.
 
-후속 상태(2026-10-31): 실제 Terra/high 추천·예약·승인을 합성 일정으로 검증했다. Gmail 연락 UI·영속 발송 실행기·로컬 OAuth 연결 도구를 구현했으며 실제 Google 계정 인증·발송 확인은 준비 중이다. 최신 검증은 [구현 계획](IMPLEMENTATION_PLAN.md)과 [제공자 설정](PROVIDER_SETUP.md)을 따른다.
+후속 상태(2026-10-31): 실제 Terra/high 추천·예약·승인을 합성 일정으로 검증했다. 사용자는 로컬 Gmail 발송 작업·확인을 완료했다고 보고했다. Calendar 읽기·선택 가져오기에 이어 Gmail 회신 읽기·사용자 확인, 제한된 Twilio 음성 선택 대화·명시적 번호 확인·조건부 내부 일정 반영을 코드·UI·합성 제공자/실제 PostgreSQL로 연결했다. Twilio 키의 실제 읽기 인증은 성공했으나 앱이 요구하는 소유 발신번호가 없으며 실통화는 하지 않았다. Gmail 회신 읽기 동의·profile HTTP200은 로컬에서 확인했으며, 실제 회신 조회와 Calendar 동의/조회·새 코드 배포는 별도다. 최신 검증은 [구현 계획](IMPLEMENTATION_PLAN.md)과 [제공자 설정](PROVIDER_SETUP.md)을 따른다.
