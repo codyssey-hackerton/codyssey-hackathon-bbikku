@@ -17,3 +17,6 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 .local/
+
+# Local key handoff notes
+/key.md
