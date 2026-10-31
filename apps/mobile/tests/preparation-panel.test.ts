@@ -148,6 +148,10 @@ function enter(view: any, label: string, value: string) {
   const element = nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === label);
   assert.ok(element, label); assert.notEqual(element.props.editable, false); element.props.onChangeText(value); view.flush();
 }
+function inputValue(view: any, label: string) {
+  const element = nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === label);
+  assert.ok(element, label); return element.props.value;
+}
 function deferred() {
   let resolve!: (value: unknown) => void; let reject!: (value: unknown) => void;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -221,4 +225,93 @@ test('question and failure are displayed without claiming a created proposal', a
     fill(view); press(view, '제안 생성'); await view.settle();
     assert.equal(callbacks, 0); assert.match(textOf(view.tree), new RegExp(result.message)); assert.ok(button(view, '다시 입력')); view.unmount();
   }
+});
+
+const memoryFact = (key: string, value: unknown, extra: any = {}) => ({
+  id: `fact-${key}`, revision: 1, kind: 'preference', key, value, source: { type: 'user', ref: 'user-1' },
+  recordedAt: '2020-01-01T00:00:00Z', validUntil: null, ...extra,
+});
+function propsWithApi(api: any) {
+  return { target, expectedScheduleRevision: 9, timezone: 'Asia/Seoul', api, onClose() {}, onProposalCreated() {} };
+}
+
+test('유효한 사용자 숫자 선호만 초기 입력으로 표시하고 0은 보존한다', async t => {
+  const { Panel } = await components;
+  const facts = [memoryFact('preparationMinutes', 15), memoryFact('travelMinutes', 0), memoryFact('bufferMinutes', 5.5)];
+  const view = harness.renderer(Panel, propsWithApi({ get: async () => ({ facts, contextRevision: 1 }), post: async () => ({}) }));
+  t.after(() => view.unmount()); await view.settle();
+  assert.equal(inputValue(view, '준비 시간 (분)'), '15'); assert.equal(inputValue(view, '이동 시간 (분)'), '0');
+  assert.equal(inputValue(view, '여유 시간 (분)'), '5.5'); assert.match(textOf(view.tree), /저장된 선호/);
+  assert.match(textOf(view.tree), /이번 일정에 맞는지 확인/);
+});
+
+test('null, 문자열, 음수, 사용자 외 출처, 미래 기록과 중복 선호는 입력하지 않는다', async t => {
+  const { Panel } = await components;
+  const cases = [
+    [memoryFact('preparationMinutes', null)], [memoryFact('preparationMinutes', '15')], [memoryFact('preparationMinutes', -1)],
+    [memoryFact('preparationMinutes', 0.00001)], [memoryFact('preparationMinutes', 10, { kind: 'observation' })],
+    [memoryFact('preparationMinutes', 10, { source: { type: 'derived', ref: 'system' } })],
+    [memoryFact('preparationMinutes', 10, { recordedAt: '2999-01-01T00:00:00Z' })],
+    [memoryFact('preparationMinutes', 10), memoryFact('preparationMinutes', 20, { id: 'duplicate' })],
+  ];
+  for (const facts of cases) {
+    const view = harness.renderer(Panel, propsWithApi({ get: async () => ({ facts, contextRevision: 1 }), post: async () => ({}) }));
+    await view.settle(); assert.equal(inputValue(view, '준비 시간 (분)'), ''); view.unmount();
+  }
+});
+
+test('늦은 조회는 사용자가 입력하거나 지운 칸을 덮지 않는다', async t => {
+  const { Panel } = await components; const pending = deferred();
+  const view = harness.renderer(Panel, propsWithApi({ get: () => pending.promise, post: async () => ({}) })); t.after(() => view.unmount());
+  enter(view, '준비 시간 (분)', '99'); enter(view, '이동 시간 (분)', '12'); enter(view, '이동 시간 (분)', '');
+  pending.resolve({ facts: [memoryFact('preparationMinutes', 10), memoryFact('travelMinutes', 20), memoryFact('bufferMinutes', 5)], contextRevision: 1 });
+  await view.settle();
+  assert.equal(inputValue(view, '준비 시간 (분)'), '99'); assert.equal(inputValue(view, '이동 시간 (분)'), '');
+  assert.equal(inputValue(view, '여유 시간 (분)'), '5');
+});
+
+test('제안 처리 중 늦게 온 선호는 입력과 동일 요청 재시도를 바꾸지 않는다', async t => {
+  const { Panel, ApiError } = await components; const memory = deferred(); const submission = deferred(); const calls: any[] = [];
+  const view = harness.renderer(Panel, propsWithApi({ get: () => memory.promise, post: (...args: any[]) => { calls.push(args); return calls.length === 1 ? submission.promise : Promise.resolve({ result: { kind: 'failure', message: '실패', code: 'conflict', retryable: false } }); } }));
+  t.after(() => view.unmount()); fill(view); press(view, '제안 생성');
+  memory.resolve({ facts: [memoryFact('preparationMinutes', 99)], contextRevision: 1 }); await view.settle();
+  assert.equal(inputValue(view, '준비 시간 (분)'), '10');
+  submission.reject(new ApiError('timeout', 'timeout', true)); await view.settle();
+  press(view, '같은 요청 다시 확인'); await view.settle(); assert.deepEqual(calls[1], calls[0]);
+});
+
+test('조회 실패는 직접 입력을 허용하고 재조회가 수정된 칸을 보존한다', async t => {
+  const { Panel } = await components; let reads = 0;
+  const view = harness.renderer(Panel, propsWithApi({ get: async () => { reads++; if (reads === 1) throw new Error('offline'); return { facts: [memoryFact('preparationMinutes', 30), memoryFact('travelMinutes', 0)], contextRevision: 1 }; }, post: async () => ({}) }));
+  t.after(() => view.unmount()); await view.settle(); assert.match(textOf(view.tree), /직접 입력할 수 있습니다/);
+  enter(view, '준비 시간 (분)', '9'); press(view, '저장된 시간 다시 조회'); await view.settle();
+  assert.equal(inputValue(view, '준비 시간 (분)'), '9'); assert.equal(inputValue(view, '이동 시간 (분)'), '0');
+});
+
+test('만료된 저장 선호는 전송 직전에 차단하고 직접 재입력하면 사용할 수 있다', async t => {
+  const { Panel } = await components; const actualNow = Date.now(); let clock = actualNow; t.mock.method(Date, 'now', () => clock);
+  const calls: any[] = []; const validUntil = new Date(actualNow + 60_000).toISOString();
+  const facts = [memoryFact('preparationMinutes', 10, { validUntil }), memoryFact('travelMinutes', 0), memoryFact('bufferMinutes', 5)];
+  const view = harness.renderer(Panel, propsWithApi({ get: async () => ({ facts, contextRevision: 1 }), post: (...args: any[]) => { calls.push(args); return Promise.resolve({ result: { kind: 'failure', message: '실패', code: 'conflict', retryable: false } }); } }));
+  t.after(() => view.unmount()); await view.settle(); clock = actualNow + 60_001;
+  press(view, '제안 생성'); await view.settle(); assert.equal(calls.length, 0); assert.match(textOf(view.tree), /선호가 만료되었습니다/);
+  enter(view, '준비 시간 (분)', '10'); press(view, '제안 생성'); await view.settle(); assert.equal(calls.length, 1);
+});
+
+test('조회 요청 후 응답 전에 만료된 선호는 채우지 않는다', async t => {
+  const { Panel } = await components; const actualNow = Date.now(); let clock = actualNow; t.mock.method(Date, 'now', () => clock);
+  const pending = deferred(); const view = harness.renderer(Panel, propsWithApi({ get: () => pending.promise, post: async () => ({}) }));
+  t.after(() => view.unmount()); clock = actualNow + 60_001;
+  pending.resolve({ facts: [memoryFact('preparationMinutes', 10, { validUntil: new Date(actualNow + 60_000).toISOString() })], contextRevision: 1 });
+  await view.settle(); assert.equal(inputValue(view, '준비 시간 (분)'), '');
+});
+
+test('계정 전환으로 이전 폼이 제거되면 늦은 이전 계정 응답은 새 폼에 반영되지 않는다', async t => {
+  const { Panel } = await components; const oldRequest = deferred();
+  const oldView = harness.renderer(Panel, propsWithApi({ get: () => oldRequest.promise, post: async () => ({}) }));
+  oldView.unmount();
+  const view = harness.renderer(Panel, propsWithApi({ get: async () => ({ facts: [memoryFact('preparationMinutes', 8)], contextRevision: 1 }), post: async () => ({}) }));
+  t.after(() => view.unmount()); await view.settle();
+  oldRequest.resolve({ facts: [memoryFact('preparationMinutes', 99)], contextRevision: 1 }); await view.settle();
+  assert.equal(inputValue(view, '준비 시간 (분)'), '8');
 });
