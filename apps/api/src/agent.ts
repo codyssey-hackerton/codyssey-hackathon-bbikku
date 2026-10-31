@@ -34,7 +34,7 @@ export function createPlanningAgent(options: {
 }) {
   const tools = new Map(options.tools.map(tool => [tool.name, tool]));
   if (tools.size !== options.tools.length) throw new Error('Duplicate tool name');
-  const maxSteps = options.maxSteps ?? 6;
+  const maxSteps = options.maxSteps ?? 10;
   if (!Number.isInteger(maxSteps) || maxSteps < 1) throw new Error('Invalid step limit');
   const State = new StateSchema({
     userId: z.string(), message: z.string(), context: z.record(z.string(), z.unknown()),

@@ -6,6 +6,8 @@ import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { AgentExecutionFailure, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
+import { createExternalTools } from './external-tools.ts';
+import { createExternalAccountTools } from './external-account-tools.ts';
 import type { SessionResolver } from './auth.ts';
 import type { createGoogleOAuth } from './google-oauth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
@@ -89,7 +91,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -133,13 +135,23 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     emailReplies: feature(!!await gmailRepliesFor(userId)),
     phone: feature(!!voiceWebhook && !!voiceTokens && (await options.phoneConnections?.status(userId))?.status === 'available'),
     places: feature(!!options.places && options.placesConfigured === true),
+    weather: feature(!!options.weather), subway: feature(!!options.subway && options.subwayConfigured === true),
     travelTime: { ...feature(!!options.travel && options.travelConfigured === true), modes: ['walk', 'transit', 'car'] as Array<'walk' | 'transit' | 'car'>,
       scheduledDeparture: 'unsupported' as const },
     scheduler: { status: schedulerStatus === 'available' ? 'configured' as const : schedulerStatus === 'degraded' ? 'degraded' as const : 'not_configured' as const,
       access: 'app' as const },
     };
   };
-  const runner = options.model ? new PlanningAgentRunner(planning, options.model, agentCapabilities) : undefined;
+  const runner = options.model ? new PlanningAgentRunner(planning, options.model, agentCapabilities, async userId => {
+    const google = await googleFor(userId);
+    return [
+      ...createExternalTools(userId, { places: options.placesConfigured ? options.places : undefined,
+        travel: options.travelConfigured ? options.travel : undefined, weather: options.weather,
+        subway: options.subwayConfigured ? options.subway : undefined, clock: options.clock }),
+      ...createExternalAccountTools(userId, { calendarConnection: google.calendarConnection,
+        gmailReplyConnection: await gmailRepliesFor(userId), store, clock: options.clock }),
+    ];
+  }) : undefined;
   const now = () => options.clock?.() ?? new Date();
   let modelStatus: 'not_configured' | 'available' | 'degraded' = options.model ? 'available' : 'not_configured';
 
@@ -211,7 +223,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
             if (verdict === 'early') return failed();
             if (verdict === 'stale' || verdict === 'late') return store.transaction(event.userId, state => skip(state, verdict));
             const agentResult = await runner.finish(prepared);
-            const retryable = agentResult.kind === 'failure' && ['stale_proposal', 'stale_snapshot'].includes(agentResult.code);
+            const retryable = agentResult.kind === 'failure' && ['stale_proposal', 'stale_snapshot', 'external_data_expired'].includes(agentResult.code);
             const outcome = retryable ? { status: 'failed' as const, result: agentResult } : { status: 'completed' as const, result: agentResult };
             await store.transaction(event.userId, state => { state.reviewLedger.set(event.idempotencyKey, { eventId: event.id, ...outcome, at: now().toISOString() }); });
             return { status: retryable ? 503 : 200, body: outcome, ...(retryable ? { retryableWithoutEffects: true as const } : {}) };
@@ -457,7 +469,8 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
           const agentResult = await runner.finish(prepared);
           await store.transaction(userId, state => {
             const current = state.conversations.get(conversationId)!;
-            current.turns = [...current.turns, { role: 'user' as const, content: body.message }, { role: 'assistant' as const, content: agentResult.message }].slice(-20);
+            current.turns = [...current.turns, { role: 'user' as const, content: body.message }, { role: 'assistant' as const, content: agentResult.message,
+              ...(prepared.baseline.externalExpiresAt ? { externalExpiresAt: prepared.baseline.externalExpiresAt } : {}) }].slice(-20);
             delete current.lock;
           });
           return { status: 200, body: { requestId: body.requestId, data: { conversationId, result: agentResult } } };

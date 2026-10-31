@@ -40,6 +40,7 @@ test('chat and scheduler receive the same server-scoped capability snapshot', as
     const expected = {
       calendar: { status: 'configured', access: 'app' }, email: { status: 'configured', access: 'app' },
       emailReplies: { status: 'not_configured', access: 'app' }, phone: { status: 'not_configured', access: 'app' },
+      weather: { status: 'not_configured', access: 'app' }, subway: { status: 'not_configured', access: 'app' },
       places: { status: 'configured', access: 'app' }, travelTime: { status: 'configured', access: 'app',
         modes: ['walk', 'transit', 'car'], scheduledDeparture: 'unsupported' }, scheduler: { status: 'configured', access: 'app' },
     };
@@ -51,6 +52,22 @@ test('chat and scheduler receive the same server-scoped capability snapshot', as
     const bobCapabilities = seen[2]!.context.capabilities as typeof expected;
     assert.equal(bobCapabilities.calendar.status, 'not_configured'); assert.equal(bobCapabilities.email.status, 'not_configured');
   } finally { await app.close(); }
+});
+
+test('weather and subway capabilities reflect their configured adapters', async () => {
+  for (const configured of [false, true]) {
+    let seen: Record<string, unknown> | undefined;
+    const app = buildApp({ sessions, model: { async decide(input) { seen = input.context; return { kind: 'answer', text: '확인했습니다.' }; } },
+      weather: { async forecast() { throw new Error('unexpected'); } },
+      subway: { async arrivals() { throw new Error('unexpected'); } }, subwayConfigured: configured });
+    try {
+      const response = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('bob', 'chat'), payload: { ...chat, requestId: 'chat' } });
+      assert.equal(response.statusCode, 200, response.body);
+      const capabilities = seen?.capabilities as { weather: { status: string }; subway: { status: string } };
+      assert.equal(capabilities.weather.status, 'configured');
+      assert.equal(capabilities.subway.status, configured ? 'configured' : 'not_configured');
+    } finally { await app.close(); }
+  }
 });
 
 test('adapter presence alone does not claim a configured route or travel time', async () => {

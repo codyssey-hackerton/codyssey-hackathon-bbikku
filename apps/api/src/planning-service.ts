@@ -5,13 +5,13 @@ import {
   type MemoryFact, type Proposal, type ReviewSchedule, type ScheduleItem, type ValidationResult,
 } from '@pikku/domain';
 import type { AgentDecision } from './agent.ts';
-import { changeSet as changeSetSchema, compareInstants } from './planning-schemas.ts';
+import { changeSet as changeSetSchema, compareInstants, timestamp } from './planning-schemas.ts';
 import type { PlanningStore, UserPlanningState } from './planning-store.ts';
 
 export class PlanningError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable = false, readonly details?: unknown) { super(message); }
 }
-type Baseline = { userId: string; snapshot: ContextSnapshot; factsKey: string; coordinationTarget?: CoordinationTarget };
+type Baseline = { userId: string; snapshot: ContextSnapshot; factsKey: string; coordinationTarget?: CoordinationTarget; externalExpiresAt?: string };
 type ProposalReview =
   | { ok: true; changes: ChangeSet; assessment: ReturnType<typeof proposalAssessment>; expiresAt: string }
   | { ok: false; result: AgentResult };
@@ -100,12 +100,16 @@ export class PlanningService {
     const parsed = changeSetSchema.safeParse(decision.changeSet);
     if (!parsed.success || !decision.reason.trim()) return { ok: false, result: { kind: 'failure', message: '제안 형식을 확인할 수 없습니다.', code: 'invalid_request', retryable: false } };
     if (!this.baselineCurrent(baseline, current)) return { ok: false, result: { kind: 'failure', message: '검토 중 일정 또는 맥락이 변경되었습니다. 다시 요청해 주세요.', code: 'stale_proposal', retryable: true } };
+    if (baseline.externalExpiresAt !== undefined && (!timestamp.safeParse(baseline.externalExpiresAt).success || compareInstants(baseline.externalExpiresAt, current.now) <= 0)) {
+      return { ok: false, result: { kind: 'failure', message: '조회한 외부 정보가 만료되었습니다. 다시 조회해 주세요.', code: 'external_data_expired', retryable: true } };
+    }
     const result = proposalAssessment(baseline.userId, current, parsed.data, baseline.coordinationTarget);
     if (!result.validation.valid || !result.mode) {
       if (result.validation.missingFields.length) return { ok: false, result: { kind: 'question', message: '제안을 확인할 정보가 부족합니다.', missingFields: result.validation.missingFields } };
       return { ok: false, result: { kind: 'failure', message: '제안이 일정 제약을 통과하지 못했습니다.', code: 'conflict', retryable: false } };
     }
-    const expiresAt = proposalExpiry(current, parsed.data);
+    let expiresAt = proposalExpiry(current, parsed.data);
+    if (expiresAt && baseline.externalExpiresAt && compareInstants(baseline.externalExpiresAt, expiresAt) < 0) expiresAt = baseline.externalExpiresAt;
     if (!expiresAt) return { ok: false, result: { kind: 'failure', message: '이미 시작했거나 만료된 제안은 저장할 수 없습니다.', code: 'expired_proposal', retryable: false } };
     return { ok: true, changes: parsed.data, assessment: result, expiresAt };
   }

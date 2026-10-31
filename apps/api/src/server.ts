@@ -56,6 +56,8 @@ const places = createKakaoPlaces({ apiKey: process.env.PIKKU_KAKAO_REST_API_KEY 
 const travel = createKakaoTravel({ apiKey: process.env.PIKKU_KAKAO_REST_API_KEY });
 const weather = createOpenMeteo();
 const subway = createSeoulSubway({ apiKey: process.env.SEOUL_SUBWAY_API_KEY, transport: process.env.SEOUL_SUBWAY_TRANSPORT });
+const subwayConfigured = /^[A-Za-z0-9]+$/.test(process.env.SEOUL_SUBWAY_API_KEY?.trim() ?? '') &&
+  (process.env.SEOUL_SUBWAY_TRANSPORT === undefined || ['http', 'https'].includes(process.env.SEOUL_SUBWAY_TRANSPORT));
 const kakaoConfigured = !!process.env.PIKKU_KAKAO_REST_API_KEY?.trim();
 // Only the explicitly named project key is used; do not discover global or other application keys.
 const projectKey = process.env.PIKKU_OPENAI_API_KEY;
@@ -82,7 +84,7 @@ for (const origin of webOrigins) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PIKKU_WEB_ORIGINS must contain exact HTTP(S) origins');
 }
-const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
+const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, googleOAuth, places, travel, weather, subway, subwayConfigured, placesConfigured: kakaoConfigured, travelConfigured: kakaoConfigured, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }
