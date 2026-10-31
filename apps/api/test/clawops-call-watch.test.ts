@@ -34,7 +34,8 @@ function blockedWait(ready: () => void) {
 }
 
 test('clear final user hang-up requests cause exactly one bound POST', async () => {
-  for (const text of ['끊어', '알겠어, 끊어', '좋아요. 끊어.', '이제 통화 종료해주세요', '왜안끊어', '전화 끊어 주세요', '그럼 끊어', '이만 끊자']) {
+  for (const text of ['끊어', '알겠어, 끊어', '좋아요. 끊어.', '이제 통화 종료해주세요', '왜안끊어', '전화 끊어 주세요', '그럼 끊어', '이만 끊자',
+    '통화 그만', ' 통화   그만 ', '통화그만']) {
     const env = await fixture(); const sent = deferred(); let posts = 0;
     const before = await env.store.read(userId);
     const fetcher: typeof fetch = async (url, init) => {
@@ -54,7 +55,9 @@ test('clear final user hang-up requests cause exactly one bound POST', async () 
 
 test('negations, quotations and agent speech never terminate a call', async () => {
   for (const [text, role] of [['끊지마', 'user'], ['아직 끊으면 안돼', 'user'], ['끊어달란 말 아니야', 'user'],
-    ['전화 끊지 마세요', 'user'], ['그럼 끊지 마', 'user'], ['"끊어"라고 하지 마세요', 'user'], ['끊어', 'agent']]) {
+    ['전화 끊지 마세요', 'user'], ['그럼 끊지 마', 'user'], ['"끊어"라고 하지 마세요', 'user'], ['끊어', 'agent'],
+    ['통화 그만 하지 마', 'user'], ['"통화 그만"이라고 말했어요', 'user'], ['통화 그만이라고 말하지 마', 'user'],
+    ['전화 그만', 'user'], ['통화 그만', 'agent']]) {
     const env = await fixture(); const idle = deferred(); let posts = 0;
     const fetcher: typeof fetch = async (url, init) => {
       if (init?.method === 'POST') { posts++; return Response.json({}); }
