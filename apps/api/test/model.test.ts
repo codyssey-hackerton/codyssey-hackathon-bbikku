@@ -67,7 +67,7 @@ test('replays the original reasoning and function call with its matching native 
   assert.equal(step, 2);
 });
 
-test('accepts the actual registered schemas for all four read and calculation tools', async () => {
+test('accepts the actual registered schemas for all read and calculation tools', async () => {
   const service = new PlanningService(new MemoryPlanningStore(), () => new Date('2026-10-31T00:00:00Z'));
   const registered = createPlanningTools(service, await service.capture('server-user', 'Asia/Seoul'));
   const descriptors = registered.map(tool => ({ name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(tool.input) }));
@@ -75,6 +75,7 @@ test('accepts the actual registered schemas for all four read and calculation to
     { name: 'read_schedule', input: { from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul' } },
     { name: 'read_memory', input: { keys: ['preference'], at: '2026-10-31T00:00:00+09:00' } },
     { name: 'calculate_timing', input: { appointmentStart: '2026-10-31T15:00:00+09:00', travelMinutes: 30 } },
+    { name: 'find_free_slots', input: { from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul', durationMinutes: 30 } },
     { name: 'validate_changes', input: { changeSet: { changes: [{ changeId: 'new', operation: 'create', after: {
       kind: 'task', title: '청소', timeSlot: null, durationMinutes: 20, deadline: null,
       flexibility: 'flexible', involvement: 'personal', completion: 'pending',

@@ -43,6 +43,7 @@ export function createMutationMachine<I, R>(options: {
   let operation: Mutation<I> | null = null;
   let generation = 0;
   let hadUncertainOutcome = false;
+  let checking = false;
 
   function update(next: MutationState<R>) {
     state = next;
@@ -64,6 +65,10 @@ export function createMutationMachine<I, R>(options: {
       return;
     }
     if (generation !== thisGeneration) return;
+    finish(result);
+  }
+
+  function finish(result: R) {
     operation = null;
     hadUncertainOutcome = false;
     update({ status: 'success', result });
@@ -78,8 +83,26 @@ export function createMutationMachine<I, R>(options: {
       void perform(operation);
     },
     retry() {
-      if (state.status !== 'error' || !operation) return;
+      if (state.status !== 'error' || !operation || checking) return;
       void perform(operation);
+    },
+    async check<T>(lookup: (operation: Mutation<I>) => Promise<T>, completed: (value: T) => { result: R } | { error: unknown } | null): Promise<T | undefined> {
+      if (state.status !== 'error' || !state.uncertain || !operation || checking) return undefined;
+      const current = operation, thisGeneration = generation;
+      checking = true;
+      try {
+        const value = await lookup({ ...current, input: snapshot(current.input) });
+        if (generation !== thisGeneration || operation !== current || state.status !== 'error') return undefined;
+        const recovered = completed(value);
+        if (recovered && 'result' in recovered) finish(recovered.result);
+        else if (recovered && 'error' in recovered) {
+          hadUncertainOutcome = isUncertainMutationError(recovered.error);
+          update({ status: 'error', error: recovered.error, uncertain: hadUncertainOutcome });
+        }
+        return value;
+      } finally {
+        if (generation === thisGeneration) checking = false;
+      }
     },
     reset() {
       if (state.status === 'pending' || (state.status === 'error' && state.uncertain)) return;
@@ -89,6 +112,7 @@ export function createMutationMachine<I, R>(options: {
     },
     invalidate() {
       generation += 1;
+      checking = false;
       operation = null;
       hadUncertainOutcome = false;
       state = { status: 'idle' };

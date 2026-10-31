@@ -4,6 +4,7 @@ import { readGmailCredential, googleUserInfo } from './gmail-connection.ts';
 import { PlanningError } from './planning-service.ts';
 
 const EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events.readonly';
+const EVENTS_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const LIST_SCOPE = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly';
 const unavailable = () => new PlanningError(503, 'provider_unavailable', '캘린더 조회에 실패했습니다.');
 type CalendarEvent = { id: string; etag: string; title: string; startsAt: string; endsAt: string; timezone: string; involvement: 'personal' | 'shared' };
@@ -28,7 +29,7 @@ export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; c
       const value = await response.json() as { access_token?: unknown; token_type?: unknown; scope?: unknown; refresh_token?: unknown };
       const scopes = new Set(typeof value.scope === 'string' ? value.scope.split(/\s+/) : []);
       if (typeof value.access_token !== 'string' || !/^[a-z0-9._~+/-]+=*$/i.test(value.access_token) || value.token_type !== 'Bearer' ||
-          !scopes.has(EVENTS_SCOPE) || !scopes.has(LIST_SCOPE) || !scopes.has('openid') || !(scopes.has('email') || scopes.has('https://www.googleapis.com/auth/userinfo.email')) ||
+          !(scopes.has(EVENTS_SCOPE) || scopes.has(EVENTS_WRITE_SCOPE)) || !scopes.has(LIST_SCOPE) || !scopes.has('openid') || !(scopes.has('email') || scopes.has('https://www.googleapis.com/auth/userinfo.email')) ||
           (value.refresh_token !== undefined && value.refresh_token !== current.refreshToken)) throw unavailable();
       const info = await googleUserInfo(fetcher, value.access_token);
       if (info.subject !== current.subject || info.senderAddress !== current.senderAddress) throw unavailable();

@@ -14,6 +14,8 @@ test('prompt preserves the decision contract and current safety boundaries', () 
   for (const text of [
     '사용자의 현재 요청과 명시적인 선호', '보안·승인·도구 제한',
     'read_schedule', 'read_memory', 'calculate_timing', 'validate_changes',
+    'planning_preferences', 'kind가 preference, 출처가 user인 버전 1', '누락·null·unknown',
+    'travelEstimateMinutes', '실제 약속의 경로 조회를 대체하지 않는다', '일정을 자동 변경하지 않는다',
     'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
     'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies',
     '장소 후보가 모호하면', '사용자가 선택한 교통수단', '자동 가져오기나 일정 저장이 아니다',

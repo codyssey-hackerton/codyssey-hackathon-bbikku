@@ -6,7 +6,7 @@
 
 - JSON HTTP, 기본 경로 `/v1`, 최초 구현은 비스트리밍 요청/응답. 식별자는 불투명한 문자열이다. 엔터티 `revision`은 1부터, 사용자별 `scheduleRevision`·`contextRevision`은 0부터 증가하는 정수다.
 - 인증은 `Authorization: Bearer <session token>`. 사용자 범위는 서버가 확인한다. 본문/Tool의 `userId`로 권한을 얻을 수 없다. 인증 제공자는 미정이며 로컬 개발용 단일 사용자 세션은 명시적으로 켠 환경에서만 허용한다. 공개 시연 서버에 무인증 개발 모드를 노출하지 않는다.
-- 모든 POST 본문에 `requestId`, 쓰기/승인/대화 재전송에는 `Idempotency-Key` 헤더가 필요하다. 추적 ID와 중복 키는 별개다. 같은 사용자·작업 종류·키에 같은 본문이면 첫 결과를 반환하고, 다른 본문이면 `idempotency_conflict`다. 중복 키 해시에서 `requestId`는 제외한다. 예외: 제안 저장 전의 AI/읽기 Tool 실패처럼 서버가 부작용 없음을 확인한 대화 실패는 같은 키·같은 본문으로 다시 처리할 수 있다. 이때도 다른 본문은 충돌이며 동시 재시도는 하나만 실행한다. 저장/발송 결과 불명은 이 예외가 아니다.
+- 모든 POST 본문에 `requestId`, 쓰기/승인/대화 재전송에는 `Idempotency-Key` 헤더가 필요하다. 추적 ID와 중복 키는 별개다. 같은 사용자·작업 종류·키에 같은 본문이면 첫 결과를 반환하고, 다른 본문이면 `idempotency_conflict`다. 중복 키 해시에서 `requestId`는 제외한다. 다만 새 chat ledger는 상태 조회의 원 요청 바인딩을 위해 최초 requestId를 별도 보존하고, 다른 requestId 재사용은409로 거절한다(기존 미기록 레코드는 종전 POST 동작 유지). 예외: 제안 저장 전의 AI/읽기 Tool 실패처럼 서버가 부작용 없음을 확인한 대화 실패는 같은 키·같은 본문으로 다시 처리할 수 있다. 이때도 다른 본문은 충돌이며 동시 재시도는 하나만 실행한다. 저장/발송 결과 불명은 이 예외가 아니다.
 - 시점은 오프셋 포함 ISO 8601, 시간대는 IANA(예: `Asia/Seoul`), 시간 길이는 분이다. 구간은 `[시작, 종료)`. 상대 날짜는 서버 시각·사용자 시간대로 해석한다.
 - `?`는 생략 가능, `null`은 명시적 미설정이다. 배열의 빈 값은 `[]`. 조회 실패·미설정과 실제 빈 결과를 구별한다. 샘플을 실제 AI/외부 서비스 성공으로 표시하지 않는다.
 - 아래에서 `data`는 성공 응답의 본문이다. 성공: `{requestId, data}`. 오류: `{requestId, error: {code, message, retryable, details?}}`. 비밀값은 반환하지 않는다.
@@ -16,12 +16,16 @@
 | 타입 | 필수 필드와 선택 필드 | 규칙 |
 |---|---|---|
 | `TimeSlot` | `startsAt: string`, `endsAt: string`, `timezone: string` | 종료 > 시작. |
-| `ScheduleFields` | `kind: event/task`, `title: string`, `timeSlot: TimeSlot/null`, `durationMinutes: number/null`, `deadline: string/null`, `flexibility: fixed/flexible`, `involvement: personal/shared`, `completion: pending/completed/incomplete/unknown` | event는 시간 필수, task는 양수 소요시간 필수. deadline이 있으면 종료가 마감 이내. 미배치 task는 timeSlot=null. 배치 구간은 durationMinutes 이상이어야 한다. 무응답은 incomplete가 아니다. |
+| `ScheduleFields` | `kind: event/task`, `title: string`, `timeSlot: TimeSlot/null`, `durationMinutes: number/null`, `deadline: string/null`, `flexibility: fixed/flexible`, `involvement: personal/shared`, `completion: pending/completed/incomplete/unknown`, `category?: personal/work/null`, `attendance?: attended/absent/unknown/null` | event는 시간 필수, task는 양수 소요시간 필수. deadline이 있으면 종료가 마감 이내. 미배치 task는 timeSlot=null. 배치 구간은 durationMinutes 이상이어야 한다. category는 공유 여부와 별도이며 생략/null은 미분류다. attendance는 event 전용이며 완료 상태와 독립이고 생략/null은 미기록이다. 기존 completion을 참석으로 추정하지 않는다. |
 | `ScheduleItem` | `ScheduleFields` + `id`, `revision`, `sourceRefs: SourceRef[]` | ID/버전/출처는 서버 소유. 완료 항목과 고정 일정은 AI 변경에서 보호. |
 | `SourceRef` | `provider`, `accountRef`, `calendarId`, `externalEventId`, `lastSyncedAt`, `occurrenceKey?`, `sourceVersion?` | 모두 문자열. 계정 참조는 비밀키가 아님. 반복 회차 보존. |
 | `MemoryFact` | `id`, `revision`, `kind: preference/situation/observation/inference`, `key: string`, `value: JSON`, `source: {type: user/provider/derived, ref: string}`, `recordedAt`, `validUntil: string/null` | v1 쓰기는 명시적 preference/situation만. situation은 만료 필수. 미확인 상황을 영구 선호로 승격하지 않음. |
 | `ContextSnapshot` | `now`, `timezone`, `scheduleRevision`, `contextRevision`, `items: ScheduleItem[]`, `facts: MemoryFact[]`, `missingFields: string[]` | 필요한 범위만 조회. 만료된 사실은 유효한 맥락에서 제외. |
 | `ValidationResult` | `valid: boolean`, `conflicts: {targetIds: string[], reason: string, timeSlot?: TimeSlot}[]`, `missingFields: string[]`, `protectedTargets: string[]`, `checkedScheduleRevision`, `checkedContextRevision`, `checkedAt` | 부족 정보/충돌/보호 대상이 있으면 valid=false. |
+
+온보딩·프로필의 계획 선호는 기존 Memory에 사용자별 `kind: preference`, `key: planning_preferences`, `validUntil: null`인 한 fact로 저장한다. 값은 `{version: 1, goals: ('work'|'health'|'life')[], timing: {preparationMinutes: number|null, travelEstimateMinutes: number|null, bufferMinutes: number|null}, preferredPeriod: 'morning'|'afternoon'|'unknown'|null, onboardingStatus: 'completed'|'skipped'}`다. goals는 중복 없는 명시적 선택, 시간은 0~1440 정수이며 null은 미설정이다. 최초 건너뛰기는 빈 goals·null 시간·null 선호시간에 skipped를 기록한다. 기존 값이 있을 때 건너뛰기는 기존 선택을 유지한다. 이 값의 클라이언트 검증과 별개로 공통 Memory API는 일반 JSON을 허용하므로 해당 형태를 서버에서 강제한다고 가정하지 않는다.
+
+계획에 선호가 필요할 때 Agent는 `read_memory`에서 이 키의 사용자 출처 preference와 유효한 버전 1 선택값만 근거로 사용한다. 조회 결과에는 같은 키의 다른 kind도 포함될 수 있다. 미설정·미확인은 추정하지 않으며 `travelEstimateMinutes`는 사용자가 고른 참고값이지 실제 약속 경로 조회 결과가 아니다. 선호 조회·저장은 일정 자동 변경이나 제안 승인이 아니다. 쓰기는 기존 `expectedContextRevision`과 멱등성, 소유 사용자 범위를 따르고 stale 시 기존 값을 다시 조회해 확인한다.
 
 `ChangeSet = {changes: Change[], timingConstraints?: TimingConstraint[]}`. Change는 다음 중 하나다. 빈 변경 묶음은 허용하지 않는다. 서로 의존하는 묶음은 전체 적용 또는 전체 거절한다.
 
@@ -32,7 +36,7 @@ type Change =
   | { changeId: string; operation: 'delete'; targetId: string; expectedRevision: number };
 ```
 
-update는 사용자에게 보여준 전체 편집 필드를 교체한다. `before`, ID, 출처, 실제 버전은 서버가 조회/부여한다. 클라이언트가 보낸 과거 값은 검증 근거가 아니다. 같은 대상을 한 묶음에서 여러 번 수정하지 않는다.
+update는 사용자에게 보여준 전체 편집 필드를 교체한다. 호환성을 위해 `category`와 `attendance`를 생략하면 기존 값을 보존하고, null을 포함해 명시하면 교체한다. 참석 기록이 있는 event를 task로 바꿀 때는 attendance를 명시적으로 null로 지워야 한다. 제안 검증과 승인에도 같은 보존 규칙을 적용한다. `before`, ID, 출처, 실제 버전은 서버가 조회/부여한다. 클라이언트가 보낸 과거 값은 검증 근거가 아니다. 같은 대상을 한 묶음에서 여러 번 수정하지 않는다.
 
 `TimingConstraint`는 `{appointment: {kind: 'existing', id, expectedRevision} | {kind: 'change', changeId}, preparationMinutes: number/null, travelMinutes: number/null, bufferMinutes: number/null, segments: {preparation: string/null, travel: string/null, buffer: string/null}}`다. 약속은 기존 항목의 ID·버전 또는 같은 변경 묶음의 약속 변경을 참조한다. 각 소요가 0이면 해당 segment는 null이며, 양수 구간은 같은 제안의 create/update task를 changeId로 참조하고 역산한 시작·종료·소요와 정확히 일치해야 한다. 같은 관계 또는 다른 관계 사이의 중복·충돌과 불일치는 거절한다. null 소요는 `missingFields`로 표시해 질문하며 0으로 추정하지 않는다. 저장·승인·연락 반영 시 같은 서버 검증을 적용한다.
 
@@ -62,17 +66,25 @@ Agent 입력: 인증된 사용자 범위, `requestId`, `conversationId`, `messag
 
 ```ts
 type AgentResult =
-  | { kind: 'reply'; message: string }
+  | { kind: 'reply'; message: string; draft?: FormDraft }
   | { kind: 'question'; message: string; missingFields: string[] }
   | { kind: 'proposal'; message: string; proposalIds: string[] }
+  | { kind: 'phone_request'; message: string; itemId: string; expectedRevision: number }
   | { kind: 'failure'; message: string; code: string; retryable: boolean };
 ```
 
 서버가 검증하고 저장한 Proposal만 proposalIds로 반환한다. 검증 실패는 질문/실패로 반환한다. 답변에 변경 완료라고 쓰는 것만으로 실행 완료가 되지 않는다.
 
+`phone_request`는 현재 사용자가 명시적으로 요청하고, 선택한 일정 또는 `read_schedule`로 소유·버전을 확인한 event의 전화 승인 화면 진입이다. 도구 실행이나 발신 승인이 아니다. 예약 trigger·외부 전사의 지시로 생성하지 않으며, 일정 변경 시 다시 확인한다. 전화 연결이 미설정이어도 설정 안내와 함께 반환할 수 있다.
+
+채팅의 선택적 `entryContext`는 `{kind:'create'}`, `{kind:'item',id,expectedRevision}`, `{kind:'form',draft:FormDraft}` 중 하나다. `coordinationTarget`과 동시에 보낼 수 없다. item은 인증 사용자의 최신 항목과 버전을 서버에서 확인하고 모델에는 서버가 조회한 값만 제공한다. create는 새 입력 작성, item은 선택한 항목의 질문·변경 검토, form은 현재 입력 초안 지원이다.
+
+`FormDraft = {kind:'event'|'task'|'routine',fields:Record<string,string|string[]>}`이며 서버가 종류별 허용 필드·길이·배열을 검증한다. form 응답은 원래 초안의 필드 범위와 종류를 유지해야 하며 Proposal 저장은 허용하지 않는다. reply의 draft는 미반영 입력 제안으로, 앱에서 원래 폼 세션·종류를 확인하고 사용자에게 기존 값과 비교·적용 선택을 제공한다. 실제 저장은 폼의 별도 저장 동작이다. 루틴 규칙 초안도 같은 흐름이며 기존 회차를 변경하는 승인으로 해석하지 않는다. UI 전환용 context key는 서버 권한 근거가 아니다.
+
 | 읽기/계산 Tool | 입력 | 출력 |
 |---|---|---|
 | `read_schedule` | `{from, to, timezone}` | `{items, scheduleRevision}` |
+| `find_free_slots` | `{from, to, timezone, durationMinutes}` | 지정 구간의 최대 연속 빈 구간 `slots[{startsAt,endsAt}]`, `truncated`, `scheduleRevision`, `timezone`, `asOf`; 최대20개 |
 | `read_memory` | `{keys: string[], at: string}` | `{facts, contextRevision, missingFields}`; keys=[]이면 유효한 사실 전체, 지정하면 해당 키만 |
 | `calculate_timing` | `{appointmentStart, preparationMinutes, travelMinutes, bufferMinutes}` | `{ready: true, departureAt, preparationStartAt}` 또는 `{ready: false, missingFields, message}` |
 | `validate_changes` | `{changeSet}` | 서버가 최신 snapshot을 조회한 `ValidationResult` |
@@ -84,6 +96,8 @@ type AgentResult =
 | `read_calendar_events` | `{calendarId, from, to}` | 해당 Calendar의 일정(최대 31일·50개), 미지원 건수 |
 | `list_contact_requests` | `{proposalId?}` | 사용자 소유 연락 이력(최대 20개) |
 | `read_contact_replies` | `{contactRequestId}` | 발송 완료 이메일의 회신 후보(최대 20개), 사용자 확인 필요 |
+
+`find_free_slots`는 인증 사용자 실행의 동일 스냅샷을 읽는 순수 계산이다. from/to는 offset 포함 ISO 시각이며 범위는 최대31일, durationMinutes는 1~44640 정수다. 유효한 IANA timezone을 받고 반환하지만 baseline 시간대와 같을 필요는 없다. 절대시각 기준 반열림 구간에서 모든 시간 지정 일정을 점유로 취급하며 겹침을 병합하고 snapshot.now 이전을 제외한다. 반환은 요청 길이 이상의 최대 연속 빈 구간이지 자동 생성된 일정이 아니다. 시간대 표시는 최상위 timezone, 구간 ISO는 경계 원본 offset을 보존한다. 미배치 작업·미가져온 Calendar·미입력 준비/이동시간까지 가용성을 보장하지 않는다. asOf는 조회 스냅샷 시각이다. 답변 완료 시 스냅샷 최신성을 확인하고 현재 시각으로 재계산해 원 반환 구간마다 같은 종료 경계의 충분한 잔여 구간이 있는지 확인한다. durationMinutes를 확보할 수 없어진 후보가 있으면 stale_snapshot이며, 큰 구간의 시작이 지났다는 이유만으로 실패시키지는 않는다. 과거 시작은 지금부터 남은 구간으로 해석하도록 프롬프트에 명시한다. 제안 저장·승인 시 실제 선택 시각은 기존 현재 시각·충돌 검증을 적용한다.
 
 Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못된 인수/권한 밖 조회는 거절한다. 외부 조회 어댑터는 §7 포트로 추가한다. LLM에 쓰기·발송 Executor를 직접 노출하지 않는다. 적용 직전 검증은 Tool 선택과 별개로 필수다. AI가 새로 배치하거나 시간을 바꾸는 일정의 시작이 검증 시점보다 과거이면 거절한다. 사용자 명시적 과거 기록과 시간이 그대로인 메타데이터 편집을 일괄 금지하는 규칙은 아니다.
 
@@ -109,13 +123,16 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 |---|---|---|
 | `GET /health` | 없음, 인증 불필요 | `{status: 'ok'}` (프로세스 생존만 뜻함) |
 | `GET /v1/capabilities` | 인증 | `{storage: {mode: memory/postgres, durable: boolean}, model: {id, reasoningEffort, status}, integrations: {calendar, email, phone, travel}, scheduler: {status}}`; 각 status는 not_configured/available/degraded. available은 실행 경로 사용 가능이며 이번 호출 성공 보장 아님 |
-| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}}` | `{conversationId, result: AgentResult}` |
+| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}, entryContext?: ChatContext}` (두 context 동시 사용 불가) | `{conversationId, result: AgentResult}`; 초안은 §3 참고 |
+| `GET /v1/chat/requests/:requestId` | 인증 + 원 요청의 `Idempotency-Key` 헤더 | `{status: running/retryable/completed, result?: {status,body}}`; completed만 원 HTTP 결과 포함 |
 | `GET /v1/schedule` | query `from`, `to`, `timezone`, `includeUnscheduled=true/false` (기본 false) | `{items: ScheduleItem[], scheduleRevision}`; 겹치는 구간 조회, true이면 미배치 task도 포함 |
 | `POST /v1/schedule/commands` | `{requestId, expectedScheduleRevision, changeSet}` | `{outcome: 'applied', items: ScheduleItem[], deletedIds: string[], scheduleRevision}` |
 | `GET /v1/proposals` | query `status?`, `cursor?`, `limit?` (기본50, 최대100) | `{proposals: Proposal[], nextCursor: string/null}`; 현재 사용자, createdAt·id 내림차순. 예약 생성안도 같은 목록에서 조회 |
 | `GET /v1/proposals/:id` | ID | `{proposal: Proposal}` |
 | `POST /v1/proposals/:id/decision` | `{requestId, proposalRevision, decision: accept/reject}` | `{outcome: applied/rejected/awaiting_contact, proposal, scheduleRevision}` |
 | `POST /v1/schedule/:id/checkin` | `{requestId, expectedRevision, completion: completed/incomplete/unknown}` | `{item, scheduleRevision}`; 상태만 갱신, 이동 없음 |
+| `POST /v1/schedule/:id/attendance` | `{requestId, expectedRevision, attendance: attended/absent/unknown}` | `{item, scheduleRevision}`; event의 참석만 갱신 |
+| `POST /v1/schedule/:id/undo` | `{requestId, expectedRevision, field: completion/attendance}` | `{item, scheduleRevision}`; 사용자별 해당 상태의 직전 값을 한 번 복원. 이력이 없거나 이미 복원했으면 409 `no_undo` |
 | `GET /v1/memory` | query `at` | `{facts, contextRevision}`; 현재 사용자 유효 사실 |
 | `POST /v1/memory` | `{requestId, expectedContextRevision, kind: preference/situation, key, value, validUntil: string/null}` | `{fact, contextRevision}`; 같은 kind/key는 새 revision으로 대체, 출처는 서버가 user로 기록 |
 | `GET /v1/review-schedule` | 인증 | `{reviewSchedule: ReviewSchedule}` |
@@ -128,13 +145,19 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 | `GET /v1/email-connection` | 인증 | `{status: available/not_configured, senderAddress: string/null}`; 현재 사용자에게 묶인 Gmail 연결, 토큰 반환 없음 |
 | `POST /v1/contact-requests/:id/send` | `{requestId, contactRevision, expectedSenderAddress}` + `Idempotency-Key` | `{contactRequest}`; ready·승인 스냅샷·최신 기준 재검증 후 영속 실행 의도 기록, Gmail 단일 시도 |
 
+### 채팅 처리 제한과 결과 확인
+
+채팅 상태 조회는 동일 사용자·chat operation·Idempotency-Key·최초 requestId에 묶이며 쓰기나 모델 재실행을 하지 않는다. completed는 성공 여부와 무관한 저장된 원 응답이므로 내부 HTTP status/body를 검증해야 한다. retryable은 해당 시도에 확정된 쓰기가 없음을 서버가 확인한 경우이며 기존 입력·requestId·키로 재시도한다. running은 아직 결과 미확정이다. 조회 실패·404·구 ledger의 requestId 미기록은 효과가 없다는 증거가 아니므로 앱의 결과 불명 보호를 풀지 않는다. 원 requestId는 기존 사용자 JSONB의 ledger 레코드에 선택적으로 저장하며 최상위 스키마를 늘리지 않는다. 새 chat 레코드는 같은 키·본문이어도 최초 requestId가 다르면 409 idempotency_conflict다. 기존 requestId 미기록 레코드의 재시도 동작은 보존하며 새 상태조회만 거절한다. 프로세스 중단으로 running이 남아도 조회가 임의로 retryable로 바꾸지 않는다. 같은 POST 재시도에서 유효 lease는409, 만료 lease는 기존 token fencing을 거쳐 회수한다. 따라서 running 조회 후에도 동일 요청 재시도를 막지 않는다.
+
+기본 전체 준비 제한은120초로 모델·조회 작업과 최종 저장 진입 전까지 적용한다. 모델의 호출별60초·최대10단계·클라이언트180초 제한도 유지한다. finalize에 진입한 DB 트랜잭션을 타이머로 중도 포기하지 않으므로 잠금·commit 지연까지 포함한 HTTP120초 hard 상한은 아니다. 늦게 끝난 준비 작업은 결과를 저장하지 못하게 차단한다. 상태 조회는 중단 버튼이나 서버 강제 취소를 뜻하지 않는다. 내용 없는 시간 계측으로 병목을 확인하며 모델·개인 입력·도구 출력·자격 원문은 계측에 넣지 않는다.
+
 일정 commands는 직접 폼 저장 경로이며 AI 추가 변경을 끼워 넣지 않는다. 충돌은 409로 거절하고 해결 선택을 받는다. **이미 존재하는 공동 약속의 시간 변경·취소는 `contact_required`로 분기**하며 직접 저장으로 상대 수락을 우회하지 않는다. 공동 약속 최초 등록은 이미 정해진 약속의 기록이며 연락 승인을 뜻하지 않는다. 메모·제목·본인 체크인 같은 비조정 변경은 해당 권한만 검증한다. 공동 약속의 involvement를 personal로 바꿔 이 경계를 우회할 수 없다. 외부 쓰기 권한은 별도다.
 
 제안 decision의 accept는 **personal이면** 재검증 후 적용한다. **coordination이면** awaiting_contact로 전환하고 기존 일정은 유지한다. 연락 초안과 승인에는 별도 경로를 사용한다. UI는 연락 카드에서 §7의 전체 범위를 한 번 확인받을 수 있으며 일반 proposal accept를 먼저 강제하지 않는다. 연락 승인 자체가 나열된 대안의 조건부 적용 동의를 포함한다.
 
 연락 거절은 발송이나 일정 변경을 허가하지 않는다. 사용자·요청 버전·대기 상태·불변 초안 일치를 확인한 뒤, 대안이 만료되거나 현재 일정·맥락·수신자가 변경되어도 원본 스냅샷을 거절 기록으로 보존하고 종료할 수 있다. accept에는 최신성·만료·수신자·대안 전체 검증을 적용한다.
 
-오류 코드/HTTP: `invalid_request` 400, `unauthenticated` 401, `permission_denied` 403, `not_found` 404, `conflict/stale_proposal/expired_proposal/idempotency_conflict/contact_required` 409, `missing_information` 422, `not_implemented` 501, `not_configured/provider_unavailable` 503. `outcome_unknown`은 외부 실행 결과의 상태이며 무조건 재실행 가능한 오류로 반환하지 않는다. 같은 요청이 실행 중이면 409 `operation_in_progress`와 조회 대상 참조를 반환한다. 제안의 business failure는 AgentResult.failure로, 인증/전송/제공자 전체 실패는 HTTP 오류로 구별한다.
+오류 코드/HTTP: `invalid_request` 400, `unauthenticated` 401, `permission_denied` 403, `not_found` 404, `conflict/stale_proposal/expired_proposal/idempotency_conflict/contact_required/no_undo` 409, `missing_information` 422, `not_implemented` 501, `not_configured/provider_unavailable` 503. `outcome_unknown`은 외부 실행 결과의 상태이며 무조건 재실행 가능한 오류로 반환하지 않는다. 같은 요청이 실행 중이면 409 `operation_in_progress`와 조회 대상 참조를 반환한다. 제안의 business failure는 AgentResult.failure로, 인증/전송/제공자 전체 실패는 HTTP 오류로 구별한다.
 
 ## 5. 저장·승인·Scheduler
 
@@ -197,14 +220,14 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 | `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
 | `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
 | `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio, mode?: agent/voiceml}`; 비밀 반환 없음 |
-| `POST /v1/phone-connection` | 관리형 `{requestId, provider:"clawops", mode:"agent", accountId, apiKey, agentId, fromNumber}` / ClawOps VoiceML `{requestId, provider:"clawops", mode?:"voiceml", accountId, apiKey, signingSecret, fromNumber}` / 기존 Twilio `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
+| `POST /v1/phone-connection` | 인증 | `403 permission_denied`; 전화 자격은 운영자가 서버에서 관리하며 앱에서 입력·교체하지 않음 |
 | `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
 
 **Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
 
 가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
 
-**전화:** 신규 ClawOps 연결의 기본은 관리형 음성이며 계정 ID·API 키·agent ID와 계정 소유 발신번호를 입력한다. 번호와 agent의 실존을 읽기 전용으로 확인하며 웹훅 서명키는 필요하지 않다. 기존 VoiceML 모드는 별도 서명키를 요구하고, Twilio Account SID/Auth Token 입력과 저장 파일은 보존한다. 번호는 앱·저장소에서 E.164를 유지하고 ClawOps 전송 시 한국 번호를 국내 형식으로 바꾼다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 실통화 성공이나 서명키 일치 검증, 발신 승인이 아니다. 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
+**전화:** ClawOps 계정·키·agent ID·발신번호는 운영자가 서버에서 사용자별로 등록한다. 기존 `PhoneConnections.connect(userId, credential)`의 제공자 번호·agent 읽기 검증과 0600 파일 저장을 재사용하며, 일반 회원에게 전역 자격을 자동 배정하지 않는다. `GET /v1/phone-connection`은 상태만 제공하고 `POST`는 인증 후에도 403이다. 앱에는 키 입력 폼이 없다. 관리형 음성은 웹훅 서명키를 요구하지 않으며 기존 VoiceML/Twilio 저장 파일과 발신 경로는 유지한다. 발신에는 영속 저장소와 사용자 승인·번호·일정 최신성 검증이 필요하다. 연결 상태는 실통화 성공이나 발신 승인이 아니다. 자격은 클라이언트·일정 JSONB·로그에 저장하지 않는다.
 
 전화 설정 POST는 기존 사용자별 PG 잠금 안에서 제공자 번호 조회(15초 timeout)와 파일 저장을 순서대로 처리한다. 같은 사용자의 다른 쓰기는 그동안 기다릴 수 있으며 다른 사용자와는 분리된다. 다중 인스턴스는 같은 DB와 자격 저장 위치를 전제로 한다. 잠금은 활성 DB 트랜잭션 동안의 순서 제어이며 파일 저장과 DB commit이 원자적이라는 뜻은 아니다. 원자 파일에 저장된 `lastRequestId`와 발신번호가 둘 다 요청과 일치할 때만 클라이언트가 응답 유실을 해소한다. 번호만 같은 이전 연결을 새 설정 성공으로 간주하지 않는다.
 
@@ -286,7 +309,7 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 ## 14. 사용자별 Google OAuth — 통합 중인 계약
 
-인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'gmail_send' | 'gmail_read'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
+인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'calendar_write' | 'gmail_send' | 'gmail_read' | 'contacts'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
 
 사용자가 원래 앱에 확인 코드를 입력하면 인증된 `POST /v1/google/oauth/complete`에 `{completionSecret, confirmationCode}`를 보내고 성공 시 `{requestId, data: {status: 'connected'}}`를 받는다. 두 값은 43자 base64url이며 시작부터 10분 안에 같은 사용자에게서 함께 확인돼야 한다. 만료·불일치·재사용은 일반 400 오류다. 완료 요청은 한 번만 시도한다. 응답을 잃으면 자동 재시도하지 않고 연결 상태를 새로 조회하며, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 이미 있었다면 상태가 연결됨이어도 새 계정으로 변경됐는지는 확인할 수 없다. 취소·화면 이탈·계정 전환 시 앱의 비밀값을 지운다. 재시작 시 진행 중인 상태는 사라진다.
 
@@ -301,3 +324,64 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 - 운동은 `{source,id,startAt,endAt,kind}`다. 출처+ID로 중복을 제거하고 충돌·불완전·잘림을 표시한다. `summarizeHealth`는 선택 시간대의 오늘 포함 7일로 자르고 겹치는 기록 구간을 한 번만 더한다. `exerciseMinutes`는 일시정지 포함 기록 구간 시간이며 활동 시간 보증이 아니다.
 - `HealthSummary`는 출처·조회시각·상태·선택·날짜별 값·기록·`signals`·`stale`을 갖는다. 신호 `{kind,value,sampleDays,source,calculatedAt,expiresAt}`는 완전한 결과에서만 생성하고 마지막 조회부터 5분 뒤 만료한다. 장기 선호/건강 판단을 생성하지 않는다.
 - 결과는 화면 메모리에만 보관한다. 선택/시간대 변경 시 이전 결과를 폐기하며 연결해제·앱 프로세스 종료 시 지운다. 화면만 숨긴 동안은 메모리에 유지하고 복귀 시 만료를 확인한다. OS 권한 철회와 앱 연결해제는 별개다. 서버/AI 활용을 원하는 후속 단계에서는 별도 전송·동의·삭제 계약부터 합의한다.
+
+## 16. Google 회원 인증
+
+`POST /v1/auth/google/start {}`는 공개 경로이며 `{authorizationUrl,completionSecret}`을 반환한다. 기존 `/v1/google/oauth/callback`에서 `member_` state만 회원 흐름으로 전달한다. ID token 서명·aud/iss/exp·nonce·sub·email_verified와 PKCE/state를 검증한다. `POST /v1/auth/google/complete {completionSecret,confirmationCode}`는 `{sessionToken,expiresAt,member:{id,email,displayName}}`을 반환한다. 두 앱 확인 값은 43자 base64url, 10분 이내 일회용이다. 토큰 원문은 앱 메모리에만 두고 서버는 해시/7일 만료/취소 상태를 보관한다.
+
+Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'logged_out'}`이다. 기존 preview/개발 세션은 별도 resolver로 유지하고 회원 오류가 유효 preview 인증을 대신 취소하지 않는다. 모든 응답은 기존 `{requestId,data}`/error 봉투, TLS·no-store·IP 제한을 따른다. 앱 인증은 Google 외부 서비스 권한 동의가 아니다.
+
+## 17. 반복 루틴과 회차
+
+`Routine={id,revision,title,weekdays:number[],timezone,startDate,localTime,durationMinutes,active,category?:personal/work/null}`. weekdays는 월1~일7, 시작일은 YYYY-MM-DD, 현지시각 HH:mm, 소요시간 1~1440분이다. `GET /v1/routines` → `{routines}`; `POST /v1/routines {requestId,title,weekdays,timezone,startDate,localTime,durationMinutes,category?}` → `{routine}`; `PATCH /v1/routines/:id {requestId,expectedRevision,...수정값}` → `{routine}`. mutation은 Idempotency-Key를 요구한다.
+
+`POST /v1/routines/materialize {requestId,fromDate,toDate}`는 양끝 포함 최대31일의 활성 규칙을 기존 개인 고정 task 회차로 생성하고 `{createdCount,existingCount,conflicts:[{routineId,date,code:'schedule_conflict'|'invalid_local_time'}],scheduleRevision}`을 반환한다. 기본 UI 범위는 선택일 하루다. 생성 시점의 category를 회차에 기록하며 규칙의 이후 변경은 기존 회차를 바꾸지 않는다. 이미 생성/삭제한 회차는 재생성하지 않으며 existingCount는 이전 생성 이력이다. 규칙 변경/비활성은 기존 회차를 바꾸지 않는다. 사용자·루틴·날짜 unique와 일정/sourceRef/멱등 기록은 같은 DB transaction이다. 회차 완료는 기존 checkin을 사용한다.
+
+## 18. Calendar 원본 쓰기와 수동 양방향 동기화
+
+§14 OAuth kind에 `calendar_write`를 추가한다. 별도 `calendar-write-connection.json`, `calendar.events`+calendarlist readonly/openid/email 권한을 쓰며 기존 readonly 자격은 보존한다. `GET /v1/calendar-write-connection` → `{status:'available'|'not_configured',accountLabel:string|null}`은 본인 연결만 표시한다.
+
+`GET /v1/calendar-sync` → `{connections}`; `GET /v1/calendar-sync/calendars` → `{calendars:[{id,summary,accessRole}]}`. `POST /v1/calendar-sync/connect {requestId,calendarId,allowDeletes?:boolean,exportItemIds?:string[]}` → `{connection}`이며 최대100개의 직접 선택한 개인 이벤트만 신규 export한다. 삭제 동의는 기본 false다. `POST /v1/calendar-sync/:id/run {requestId,expectedRevision}` → `{connection,imported,exported,deleted,conflicts:[{reason,itemId?,eventId?}],unsupportedCount}`. 같은 버전의 선택 연결만 동기화한다. `POST /v1/calendar-sync/:id/disconnect {requestId,expectedRevision}` → `{disconnected:true}`는 원본/내부 일정을 삭제하지 않는다. mutation은 멱등키를 요구하고 성공/오류 봉투는 동일하다.
+
+증분 token/410 전체 조회, ETag/If-Match, 계정/원본 바인딩을 검증한다. 양쪽 변경·승인 증거 없는 공유 약속·미지원 형식은 충돌/지원불가로 남긴다. 삭제 전파는 동의 및 baseline 다음 revision의 개인 일정 tombstone 증거가 있어야 한다. 서버 사용자 state의 optional `tombstones`는 구 문서에서 빈 Map으로 읽으며 일정 삭제와 원자 저장한다.
+
+디자인 접합 전 보완: `POST /v1/calendar-sync/:id/exports {requestId,expectedRevision,exportItemIds}` → `{connection}`은 기존 연결에 새로 선택한 원본 없는 개인 이벤트를 추가한다. 비어 있는 선택은 거부하고 기존 대기열·매핑을 보존한다. 최대100개, 사용자/현재 revision·계정·activeRun·종류/소유를 검증하며 Idempotency-Key를 요구한다. 추가 선택 자체는 외부 쓰기가 아니다.
+
+공유 약속의 일반 변경/삭제는 계속 차단하되, 적용 완료된 정확한 연락 변경 증거가 있는 기존 공동 약속의 시간 update만 허용한다. `findCalendarContactAuthorization`의 사용자 승인/응답·current item/원본 identity/sourceVersion 증거와, Google Calendar owner·주최 계정·원본 ETag·변경 전 제목/시간을 쓰기 직전 락 안에서 확인한다. 원문 주최자 이메일은 응답에 추가하지 않고 provider는 `organizerSelf?`/`organizerIsAccount?` boolean만 제공한다. 전자는 이벤트 사본 Calendar 기준이지 로그인 사용자의 주최자 증명이 아니다. 빈 delta 뒤 새로 합의된 미매핑 후보는 유효한 증거의 원본만 최대100개 재조회하고 초과 시 candidate_limit 충돌을 표시한다.
+
+`calendar_sync_run`은 영속 멱등 예약 후 자신의 DB 트랜잭션/효과 ledger를 사용하고 바깥 finalize 트랜잭션에서 실행하지 않는다. 요청 결과는 별도로 영속 확정하며, lease 만료 자동 회수·외부 쓰기 재전송은 허용하지 않는다.
+
+`GET /v1/calendar-sync/operations/:requestId` → `{operation:{state:'running'|'completed'|'uncertain',result?:SyncResult}}`는 본인 작업만 조회하고 외부 쓰기를 하지 않는다. 완료 result를 확인한 경우에만 유실 응답을 성공으로 복구한다. 결과 불명/중단 상태는 자동 해제·재전송하지 않는다. Calendar ID는 이메일 형식일 수 있으며 토큰·내부 fingerprint는 반환하지 않는다. 전체 의미/제한과 DB 업그레이드 경계는 [사용 안내](MEMBER_ROUTINE_CALENDAR.md)를 따른다.
+
+## 일정 확인 전화와 장소 정정 — 2026-11-01
+
+`ScheduleFields.location?: string|null`은 일정 장소의 명시적인 텍스트다. 생략한 update는 기존 값을 보존하고 null은 지운다. 제목으로 장소를 추정해 저장하지 않는다. 기존 Google import/sync는 location을 읽거나 쓰지 않으므로 이 값은 현재 앱 내부 일정에 한정된다. 일반 AI의 고정 일정 보호·공동 시간 조율 계약은 유지한다.
+
+모든 아래 경로는 인증 사용자 범위를 사용하며 응답은 `{requestId,data:{call}}`이다. POST는 requestId와 Idempotency-Key가 필수다.
+
+| 경로 | 입력(requestId 제외) | 효과 |
+|---|---|---|
+| POST /v1/schedule-calls | itemId, expectedRevision, toNumber | 서버가 기존 일정·시간·장소로 질문을 구성한 pending 초안. 발신 없음 |
+| GET /v1/schedule-calls/:id | 없음 | 저장 상태만 조회(no-store) |
+| POST /v1/schedule-calls/:id/approve | revision | 표시된 번호·질문에 대한 명시적 승인 후 발신 |
+| POST /v1/schedule-calls/:id/check | revision | 바인딩된 통화·계정·번호 검증 후 전사 조회 |
+| POST /v1/schedule-calls/:id/propose | revision | 완료·완결 전사만 기존 메인 모델로 장소 정정 검토 |
+| POST /v1/schedule-calls/:id/decision | revision, decision: accept/reject | 장소 변경 별도 승인 또는 거절 |
+
+`call`은 `{id,revision,status,itemId,itemRevision,title,question,toNumber,transcript?,correction?,reviewNote?}`다. status는 pending/dispatching/submitted/outcome_unknown/failed/completed/no_answer/review_pending/applied/rejected. transcript는 `{role:'user'|'agent',text}[]`, correction은 `{beforeLocation:string|null,afterLocation:string,summary:string}`이며 명확한 정정이 없으면 생략한다. 결과 전사와 모델 요약은 신뢰할 수 없는 참고 자료로 표시하고 사용자가 확인한다.
+
+발신은 지속 저장소 및 사용자별 ClawOps 관리형 계정이 필요하다. 발신번호·Agent·API 자격의 fingerprint와 원 일정 전체 snapshot을 묶고, 승인 직전 최신성을 확인한다. dispatching을 먼저 커밋하며 불명 결과는 자동 재발신하지 않는다. approve/check/propose는 외부 API·모델 응답을 사용자 DB 락 밖에서 기다린다. create/decision은 기존 멱등 결과와 같은 트랜잭션에 저장한다. 통화 데이터는 기존 사용자별 voiceSessions의 `schedule-call:` namespace에 보관하고 공개 응답에 API 자격·제공자 통화 ID를 넣지 않는다.
+
+전화 자체와 장소 정정은 별도 승인이다. 정정 승인은 최신 item revision과 전체 snapshot을 재확인한 뒤 기존 사용자 command로 location만 수정한다. 시간·제목·참여 범위·상태·출처는 유지한다. shared event도 이 장소-only 직접 확인 범위는 허용하되 시간 변경·취소·다른 항목 수정으로 확대하지 않는다. 일반 AI proposal의 고정 항목 보호를 해제하지 않는다. 이 변경안은 기존 Proposal ID를 발급하는 일반 일정 제안과 별도의 통화 검토 상태다.
+
+수신 후 관리형 Agent 대화는 제공자의 10~120초 설정 및 transcript.final 활성화를 확인한다. 통화 전환 금지·종료 도구 사용을 지시하지만, 설정 변경 경쟁이나 제공자 전환 이후의 전체 통화시간을 기계적으로 보장하지는 않는다. 불완전 전사는 변경 제안으로 처리하지 않는다. 이번 경로는 기존 일정의 장소 확인·정정에 한정되며 자유로운 업무 전화 전체, 시간 변경, Google 원본 장소 반영은 포함하지 않는다.
+
+## 연락처 선택 — 2026-11-01
+
+- Google 연락처는 별도 `contacts` OAuth(readonly + openid/email)와 사용자별 `contacts-connection.json`을 사용한다. 다른 Google 연결을 덮어쓰거나 연락처 권한을 Calendar/Gmail 동의로 간주하지 않는다.
+- 인증된 `GET /v1/contacts/google/connection` → `{requestId,data:{status:'available'|'not_configured',accountLabel:string|null}}`.
+- 인증된 `GET /v1/contacts/google/search?q=이름` → `{requestId,data:{contacts:[{id,displayName,phoneNumbers:[{number,label?}]}],truncated:boolean}}`. q는 공백 제외 1~100자. 두 응답 모두 no-store. 외부 제공자 실패는 `provider_unavailable`, 미설정은 `not_configured`이며 상세 비밀/오류 원문은 노출하지 않는다.
+- 검색은 Google People의 이름 시작 부분 후보를 얻고 이름 포함 여부를 다시 확인한다. 이름 중간 문자열만으로 모든 연락처를 찾는다고 보장하지 않는다. 최대 30개, 연락처별 번호 20개. 결과 id는 응답 한정 UI 키이며 저장·권한 식별자로 사용하지 않는다. 초과 가능성이 있으면 truncated=true.
+- 검색 실행 전체 제한 15초(사전 사용자별 연결 파일 조회 시간 제외), 취소 전파·늦은 후속 호출 차단, token/userinfo64KiB·People512KiB 상한을 적용한다. Google 빈 검색 캐시 준비 후 5초 대기가 포함되어 즉시 응답은 보장하지 않는다.
+- 휴대폰 주소록은 Expo Contacts로 기기에서 권한을 요청하고 이름/번호를 조회한다. Android는 READ_CONTACTS만, iOS는 사용자 허용 범위(제한 허용 포함)만 읽으며 웹은 Google 연락처 또는 직접 입력을 사용한다. 네이티브 모듈/권한 설정 변경은 앱 재빌드가 필요하다.
+- 검색 결과나 연락처 선택은 발신 승인이 아니다. 같은 이름·다중 번호를 사용자가 구분하고 번호를 확인한 뒤 기존 승인 발신 경로를 사용한다. 전체 주소록은 서버/LLM에 업로드하지 않으며 Google 검색 결과도 Agent Tool로 제공하지 않는다. 선택한 이름/번호만 해당 연락 흐름에서 사용한다. 연락처 수정·삭제·자동 발신은 지원하지 않는다.

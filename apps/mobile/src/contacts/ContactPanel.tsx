@@ -3,16 +3,14 @@ import type { ReactNode } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
 import { ApiError, type ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
-import { isUncertainMutationError } from '../api/mutation';
-import { operationGuard } from '../api/operationGuard';
 import type { Proposal, ProposalClient } from '../proposals/client';
 import { ActionButton } from '../ui/ActionButton';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
-import { createContactClient, matchesPhoneProvider } from './client';
-import { PhoneConnectionForm } from './PhoneConnectionPanel';
+import { createContactClient } from './client';
+import { ContactPicker } from './ContactPicker';
 import { proposalDraft } from './draft';
-import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, PhoneConnectionInput, PhoneMode, PhoneProvider, RecipientInput } from './client';
+import type { ContactClient, ContactCallInput, ContactDecisionInput, ContactDraftInput, ContactRequest, ContactResponse, ContactResults, ContactSendInput, EmailConnection, PhoneConnection, RecipientInput } from './client';
 
 type Load<T> = { status: 'loading' } | { status: 'error' } | { status: 'success'; data: T };
 type Props = {
@@ -21,6 +19,7 @@ type Props = {
   proposalClient: ProposalClient;
   renderProposal: (proposal: Proposal) => ReactNode;
   onScheduleChanged?: () => void;
+  onOpenGoogleContacts?: () => void;
   onBack: () => void;
 };
 
@@ -82,8 +81,8 @@ function hasCounterpartSpeech(value: string | null | undefined): boolean {
   return typeof value === 'string' && /(?:^|\n)상대:[^\S\r\n]*[^\s]/u.test(value);
 }
 
-function ContactDraft({ client, proposal, onSaved, onCancel }: {
-  client: ContactClient; proposal: Proposal; onSaved: (contact: ContactRequest) => void; onCancel: () => void;
+function ContactDraft({ api, client, proposal, onSaved, onCancel, onOpenGoogleContacts }: {
+  api: ApiClient; client: ContactClient; proposal: Proposal; onSaved: (contact: ContactRequest) => void; onCancel: () => void; onOpenGoogleContacts?: () => void;
 }) {
   const [channel, setChannel] = useState<'email' | 'phone'>('email');
   const [name, setName] = useState('');
@@ -136,6 +135,7 @@ function ContactDraft({ client, proposal, onSaved, onCancel }: {
     <Text style={styles.label}>{channel === 'email' ? '수신자 이메일' : '수신자 전화번호 (E.164)'}</Text>
     <TextInput accessibilityLabel={channel === 'email' ? '수신자 이메일' : '수신자 전화번호'} editable={!blocked} maxLength={254} value={address} autoCapitalize="none" autoCorrect={false} keyboardType={channel === 'email' ? 'email-address' : 'phone-pad'}
       onChangeText={(value) => { setAddress(value); setConfirmed(false); }} style={styles.input} />
+    {channel === 'phone' && <ContactPicker api={api} disabled={blocked} onOpenGoogleContacts={onOpenGoogleContacts} onSelect={value => { setName(value.name); setAddress(value.number); setConfirmed(false); }} />}
     <Button label={confirmed ? '수신자 확인됨' : channel === 'email' ? '입력한 수신자 이름과 이메일 확인' : '입력한 수신자 이름과 전화번호 확인'} onPress={() => setConfirmed(!confirmed)} disabled={blocked || !name.trim() || !address.trim()} secondary />
     <Text style={styles.label}>{channel === 'email' ? '메일 제목' : '전화 목적'}</Text>
     <TextInput accessibilityLabel={channel === 'email' ? '메일 제목' : '전화 목적'} editable={!blocked} maxLength={200} value={purpose} onChangeText={setPurpose} style={styles.input} />
@@ -168,15 +168,8 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   const [previewLoad, setPreviewLoad] = useState<{ key: string; result: Load<Proposal[]> }>({ key: '', result: { status: 'loading' } });
   const preview = previewLoad.key === previewKey ? previewLoad.result : { status: 'loading' as const };
   const [connection, setConnection] = useState<Load<EmailConnection | PhoneConnection>>({ status: 'loading' });
-  const [setup, setSetup] = useState<'idle' | 'pending' | 'uncertain' | 'error'>('idle');
-  const setupOwner = useRef<object>({});
-  const setupLock = useRef(false);
-  const setupNumber = useRef('');
-  const setupRequestId = useRef('');
-  const setupProvider = useRef<PhoneProvider>('clawops');
-  const setupMode = useRef<PhoneMode>('agent');
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; operationGuard.clear(setupOwner.current); }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [senderNeedsReview, setSenderNeedsReview] = useState(false);
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -212,8 +205,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     send.state.status === 'pending' || send.state.status === 'error' || lookupBusy || resultsBusy ||
     checkReplies.state.status === 'pending' || (checkReplies.state.status === 'error' && checkReplies.state.uncertain) ||
     checkCall.state.status === 'pending' || (checkCall.state.status === 'error' && checkCall.state.uncertain) ||
-    confirmResponse.state.status === 'pending' || (confirmResponse.state.status === 'error' && confirmResponse.state.uncertain) ||
-    setup === 'pending' || setup === 'uncertain';
+    confirmResponse.state.status === 'pending' || (confirmResponse.state.status === 'error' && confirmResponse.state.uncertain);
 
   useEffect(() => {
     if (readOnly || contact.channel !== 'email' || contact.deliveryStatus !== 'sent_or_connected') return;
@@ -246,39 +238,10 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
     setConnection({ status: 'loading' });
     (contact.channel === 'phone' ? client.phoneConnection() : client.emailConnection()).then((data) => { if (active) {
       setConnection({ status: 'success', data }); setSenderNeedsReview(false);
-      if (setupLock.current && data.status === 'available' && 'senderNumber' in data && data.senderNumber === setupNumber.current &&
-          data.lastRequestId === setupRequestId.current && matchesPhoneProvider(data, setupProvider.current, setupMode.current)) {
-        setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current); setSetup('idle');
-      }
     } },
       () => { if (active) setConnection({ status: 'error' }); });
     return () => { active = false; };
   }, [client, contact.channel, connectionAttempt, readOnly]);
-
-  async function connectPhone(input: PhoneConnectionInput) {
-    if (setupLock.current) return;
-    setupLock.current = true;
-    setupNumber.current = input.fromNumber;
-    setupProvider.current = 'provider' in input ? input.provider : 'twilio';
-    setupMode.current = 'mode' in input && input.mode === 'agent' ? 'agent' : 'voiceml';
-    setSetup('pending');
-    operationGuard.update(setupOwner.current, { status: 'pending' });
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setupRequestId.current = `request-${id}`;
-    try {
-      const data = await client.connectPhone({ input, requestId: setupRequestId.current, idempotencyKey: `operation-${id}` });
-      if (!mounted.current) return;
-      if (data.status !== 'available' || data.senderNumber !== setupNumber.current || !matchesPhoneProvider(data, setupProvider.current, setupMode.current)) throw new ApiError('invalid_response', '발신 번호를 확인할 수 없습니다.');
-      setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current);
-      setConnection({ status: 'success', data }); setSenderNeedsReview(false); setSetup('idle');
-    } catch (error) {
-      if (!mounted.current) return;
-      const uncertain = isUncertainMutationError(error);
-      if (!uncertain) { setupLock.current = false; setupNumber.current = ''; setupRequestId.current = ''; operationGuard.clear(setupOwner.current); }
-      else operationGuard.update(setupOwner.current, { status: 'error', error: undefined, uncertain: true });
-      setSetup(uncertain ? 'uncertain' : 'error');
-    }
-  }
 
   async function lookup() {
     if (lookupLock.current) return;
@@ -292,7 +255,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       if (latest.negotiationStatus !== contact.negotiationStatus) onScheduleChanged?.();
       const mutations = [decision.state, send.state, checkReplies.state, checkCall.state, confirmResponse.state];
       if (latest.negotiationStatus === 'applied' && mutations.some(state => state.status === 'error') &&
-          mutations.every(state => state.status !== 'pending') && setup !== 'pending' && setup !== 'uncertain') {
+          mutations.every(state => state.status !== 'pending')) {
         resultVersion.current += 1;
         onReconcile(latest);
       } else if ((send.state.status === 'pending' || (send.state.status === 'error' && send.state.uncertain)) && latest.deliveryStatus === 'ready') {
@@ -367,15 +330,10 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
       {connection.status === 'error' && <ErrorNotice />}
       {connection.status === 'success' && (connection.data.status === 'available'
         ? <Text style={styles.text}>{contact.channel === 'phone' ? '발신 번호' : '발신 계정'}: {'senderNumber' in connection.data ? connection.data.senderNumber : connection.data.senderAddress}{'senderNumber' in connection.data ? ` · 제공자: ${connection.data.provider === 'clawops' ? `ClawOps · ${connection.data.mode === 'agent' ? '자연 음성 대화' : '키패드 방식'}` : 'Twilio'}` : ''}</Text>
-        : <Text style={styles.notice}>{contact.channel === 'phone' ? '발신 전화번호가 설정되지 않았습니다.' : '발신 Gmail 계정이 설정되지 않았습니다. 개발 환경의 계정 연결 설정을 완료한 뒤 다시 확인해 주세요.'}</Text>)}
-      {contact.channel === 'phone' && connection.status === 'success' && connection.data.status === 'not_configured' && setup !== 'uncertain' && <>
-        <PhoneConnectionForm disabled={locked} onSubmit={(input) => void connectPhone(input)} />
-      </>}
-      {setup === 'pending' && <Loading>전화 연결 설정을 확인하는 중입니다.</Loading>}
-      {setup === 'error' && <Text style={styles.error}>전화 연결 설정에 실패했습니다. 값을 다시 입력해 주세요.</Text>}
-      {setup === 'uncertain' && <Text style={styles.notice}>전화 연결 설정 결과를 확인하지 못했습니다. 발신 번호를 다시 확인해 주세요.</Text>}
+        : <Text style={styles.notice}>{contact.channel === 'phone' ? '전화 계정이 설정되지 않았습니다. 운영자에게 문의해 주세요.' : '발신 Gmail 계정이 설정되지 않았습니다. 개발 환경의 계정 연결 설정을 완료한 뒤 다시 확인해 주세요.'}</Text>)}
+      {contact.channel === 'phone' && connection.status === 'success' && connection.data.status === 'available' && <Text style={styles.notice}>서버에 설정된 발신 번호입니다. 전화 서비스의 실시간 연결 상태는 확인되지 않았습니다.</Text>}
       {senderNeedsReview && <Text style={styles.notice}>발신 계정을 다시 확인한 뒤 발송해 주세요.</Text>}
-      {connection.status !== 'loading' && <Button label={contact.channel === 'phone' ? '발신 번호 다시 확인' : '발신 계정 다시 확인'} disabled={locked && setup !== 'uncertain'} onPress={() => {
+      {connection.status !== 'loading' && <Button label={contact.channel === 'phone' ? '발신 번호 다시 확인' : '발신 계정 다시 확인'} disabled={locked} onPress={() => {
         setSenderNeedsReview(true); setConnection({ status: 'loading' }); setConnectionAttempt((value) => value + 1);
       }} secondary />}
       {send.state.status === 'idle' && <Button label={contact.channel === 'phone' ? '전화 요청' : 'Gmail 발송'} disabled={!canSend || locked} onPress={() => {
@@ -458,7 +416,7 @@ function ContactDetail({ client, proposalClient, contact, historyOnly, renderPro
   </>;
 }
 
-export default function ContactPanel({ api, proposal, proposalClient, renderProposal, onScheduleChanged, onBack }: Props) {
+export default function ContactPanel({ api, proposal, proposalClient, renderProposal, onScheduleChanged, onOpenGoogleContacts, onBack }: Props) {
   const client = useMemo(() => createContactClient(api), [api]);
   const [list, setList] = useState<Load<ContactRequest[]>>({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
@@ -515,7 +473,7 @@ export default function ContactPanel({ api, proposal, proposalClient, renderProp
         <Button label="연락 목록 새로고침" onPress={() => setAttempt((value) => value + 1)} secondary />
       </>}
     </>}
-    {view === 'draft' && <ContactDraft client={client} proposal={proposal} onCancel={backToList}
+    {view === 'draft' && <ContactDraft api={api} client={client} proposal={proposal} onOpenGoogleContacts={onOpenGoogleContacts} onCancel={backToList}
       onSaved={(item) => { setSelected(item); setView('detail'); }} />}
     {view === 'detail-loading' && <Loading>연락 상태를 불러오는 중입니다.</Loading>}
     {view === 'detail-error' && <><ErrorNotice /><Button label="연락 다시 조회" onPress={() => open(selectedId)} />

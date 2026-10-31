@@ -115,7 +115,7 @@ const harness = createHarness();
 const components = build({
   stdin: { contents: `export { default as Panel } from '../src/preparation/PreparationProposalPanel';
     export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'preparation-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'preparation-native' }, ({ path }) => ({

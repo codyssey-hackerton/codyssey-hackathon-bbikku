@@ -1,4 +1,5 @@
 import { ApiError, type ApiClient } from '../api/http';
+import { parseOffsetDateTime } from '@pikku/domain';
 import type { Mutation } from '../api/mutation';
 import { compareTimestamps, isTimestamp } from '../schedule/client';
 
@@ -21,7 +22,8 @@ const revision = (value: unknown): value is number => typeof value === 'number' 
 const invalid = () => new ApiError('invalid_response', '서버의 캘린더 응답을 확인할 수 없습니다.');
 
 export function validPeriod(from: string, to: string): boolean {
-  return isTimestamp(from) && isTimestamp(to) && compareTimestamps(from, to) < 0;
+  const start = parseOffsetDateTime(from), end = parseOffsetDateTime(to);
+  return start !== null && end !== null && start < end && end - start <= 366 * 86_400_000;
 }
 
 export function selectedEventRefs(events: CalendarEvent[], selected: ReadonlySet<string>): { id: string; etag: string }[] {

@@ -30,6 +30,9 @@ const fields = z.object({
   durationMinutes: z.number().finite().nullable(), deadline: timestamp.nullable(),
   flexibility: z.enum(['fixed', 'flexible']), involvement: z.enum(['personal', 'shared']),
   completion: z.enum(['pending', 'completed', 'incomplete', 'unknown']),
+  category: z.enum(['personal', 'work']).nullable().optional(),
+  attendance: z.enum(['attended', 'absent', 'unknown']).nullable().optional(),
+  location: z.string().max(2000).refine(value => value.trim().length > 0).nullable().optional(),
 }).strict();
 const change = z.discriminatedUnion('operation', [
   z.object({ changeId: identifier, operation: z.literal('create'), after: fields }).strict(),
@@ -49,6 +52,8 @@ const timingConstraint = z.object({
 export const changeSet = z.object({ changes: z.array(change).min(1).max(100), timingConstraints: z.array(timingConstraint).max(100).optional() }).strict();
 export const commandBody = z.object({ requestId: identifier, expectedScheduleRevision: z.number().int().min(0), changeSet }).strict();
 export const checkinBody = z.object({ requestId: identifier, expectedRevision: revision, completion: z.enum(['completed', 'incomplete', 'unknown']) }).strict();
+export const attendanceBody = z.object({ requestId: identifier, expectedRevision: revision, attendance: z.enum(['attended', 'absent', 'unknown']) }).strict();
+export const undoBody = z.object({ requestId: identifier, expectedRevision: revision, field: z.enum(['completion', 'attendance']) }).strict();
 export const memoryBody = z.object({
   requestId: identifier, expectedContextRevision: z.number().int().min(0),
   kind: z.enum(['preference', 'situation']), key: identifier, value: z.json(), validUntil: timestamp.nullable(),

@@ -48,8 +48,11 @@ function createHarness() {
   };
   react.useLayoutEffect = react.useEffect;
   const native = {
-    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
+    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View', Image: 'Image',
+    Modal: ({ visible = true, children }: any) => visible ? children : null,
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
+    AccessibilityInfo: { isReduceMotionEnabled: async () => true, addEventListener: () => ({ remove() {} }) },
+    PanResponder: { create: () => ({ panHandlers: {} }) },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
   const host = { react, native, jsx, fragment, fontState: [true, null] };
@@ -110,7 +113,7 @@ const components = build({
     export { default as ProposalPanel } from '../src/proposals/ProposalPanel';
     export { default as App } from '../App'; export { ApiError } from '../src/api/http';
     export { operationGuard } from '../src/api/operationGuard';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty' },
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty', '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ },
       args => ({ path: args.path, namespace: 'contact-native' }));
@@ -121,20 +124,22 @@ const components = build({
         path === 'expo-font' ? 'exports.useFonts=()=>globalThis.__contactPanelHarness.fontState' :
         path === 'react' ? 'module.exports=globalThis.__contactPanelHarness.react' :
         path === 'react-native' ? 'module.exports=globalThis.__contactPanelHarness.native' :
-        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider=({children})=>children; exports.SafeAreaView="View"' :
+        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider=({children})=>children; exports.SafeAreaView="View"; exports.useSafeAreaInsets=()=>({top:0,right:0,bottom:0,left:0})' :
         path === 'expo-status-bar' ? 'exports.StatusBar="StatusBar"' :
           'exports.jsx=exports.jsxs=globalThis.__contactPanelHarness.jsx; exports.Fragment=globalThis.__contactPanelHarness.fragment', loader: 'js',
     }));
-    builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen)$/ },
+    builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen|screens\/HomeScreen)$/ },
       args => ({ path: args.path, namespace: 'contact-screen' }));
     builder.onLoad({ filter: /.*/, namespace: 'contact-screen' }, ({ path }) => ({
-      contents: `const {jsx}=require('react/jsx-runtime'); module.exports=function Stub(props){return jsx(${JSON.stringify(path.split('/').pop())},props)}`,
+      contents: path.endsWith('HomeScreen')
+        ? 'const {jsx}=require("react/jsx-runtime");module.exports=props=>jsx("Pressable",{accessibilityLabel:"설정 열기",onPress:props.onOpenSettings})'
+        : `const {jsx}=require('react/jsx-runtime'); module.exports=function Stub(props){return jsx(${JSON.stringify(path.split('/').pop())},props)}`,
       loader: 'js',
     }));
   } }],
 }).then(bundled => {
   const compiled: any = { exports: {} };
-  new Function('module', 'exports', bundled.outputFiles[0].text)(compiled, compiled.exports);
+  new Function('module', 'exports', '__DEV__', bundled.outputFiles[0].text)(compiled, compiled.exports, true);
   return compiled.exports;
 });
 
@@ -155,6 +160,7 @@ function button(view: any, label: string) {
 }
 function press(view: any, label: string) {
   const found = button(view, label);
+  if (!found && label === '개발 연결 설정') { press(view, '설정 열기'); press(view, '계정'); press(view, '계정·앱 설정'); return; }
   assert.ok(found, `missing button: ${label}`);
   assert.notEqual(found.props.disabled, true, `disabled button: ${label}`);
   found.props.onPress(); view.flush();
@@ -352,9 +358,10 @@ test('실제 제안 화면의 승인 preview는 수신자, 제목, 본문과 모
   await openProposalContact(view); await openContact(view);
   const preview = textOf(view.tree);
   for (const value of [recipient.displayName, recipient.address, draft.purpose, draft.messageOrCallBrief,
-    'move-1', 'delete-2', '기존 회의', '옮긴 회의', oldSlot.startsAt, newSlot.startsAt, '없음 (삭제)']) {
+    '기존 회의', '옮긴 회의', '09:00', '10:00', '11:00', '12:00', '없음 (삭제)']) {
     assert.ok(preview.includes(value), `preview missing ${value}`);
   }
+  assert.doesNotMatch(preview, /move-1|delete-2|변경 ID|스냅샷 버전/);
   assert.equal(button(view, 'Gmail 발송'), undefined);
   assert.equal(posts(mock.calls, '/send').length, 0);
   press(view, '연락 내용 승인'); await view.settle();
@@ -678,8 +685,7 @@ test('실제 앱 연결 설정은 미결 연락 저장 중 다른 계정으로 �
   await openProposalContact(view); press(view, '새 연락 초안 작성'); fillDraft(view);
   press(view, '입력한 수신자 이름과 이메일 확인'); press(view, '연락 초안 저장');
   assert.equal(operationGuard.hasUnresolved(), true);
-  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'other-user'); press(view, '설정 적용');
-  assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  assert.equal(button(view, '개발 연결 설정'), undefined);
   assert.equal(input(view, '수신자 이메일').props.value, recipient.address);
   assert.equal(posts(mock.calls, '/send').length, 0);
   pending.resolve({ recipient }); await view.settle();
@@ -728,52 +734,19 @@ test('전화 초안은 E.164 수신자 확인과 별도 승인 후에만 전화 
   assert.doesNotMatch(textOf(view.tree), /상대 수락 확인/);
 });
 
-test('전화 연결 시 자격 증명 입력은 즉시 비우고 미결 요청 동안 세션을 보호한다', async t => {
-  const { ContactPanel, operationGuard, ApiError } = await components;
+test('전화 계정 미설정은 운영자 문의를 안내하고 상태만 조회한다', async t => {
+  const { ContactPanel } = await components;
   const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
   const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
-  const pending = deferred<any>(); mock.api.postHook = (path: string) => path === '/v1/phone-connection' ? pending.promise : undefined;
   const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
-  await openContact(view);
-  press(view, 'Twilio 선택');
-  assert.equal(input(view, '전화 계정 SID').props.secureTextEntry, true);
-  assert.equal(input(view, '전화 인증 토큰').props.secureTextEntry, true);
-  enter(view, '전화 계정 SID', 'test-sid'); enter(view, '전화 인증 토큰', 'test-token'); enter(view, '발신 전화번호', '+15550000001');
-  press(view, '전화 연결 설정');
-  assert.equal(input(view, '전화 계정 SID').props.value, ''); assert.equal(input(view, '전화 인증 토큰').props.value, '');
-  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '연락 목록').props.disabled, true);
-  pending.reject(new ApiError('timeout', 'timeout', true)); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '전화 요청').props.disabled, true);
+  await openContact(view); assert.match(textOf(view.tree), /운영자에게 문의/);
+  assert.equal(button(view, '전화 요청').props.disabled, true);
+  assert.ok(!nodes(view.tree).some(node => node.type === 'TextInput' && node.props.secureTextEntry));
+  assert.equal(posts(mock.calls, '/phone-connection').length, 0); assert.equal(posts(mock.calls, '/call').length, 0);
   mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001' };
   press(view, '발신 번호 다시 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), true);
-  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001', lastRequestId: 'other-request' };
-  press(view, '발신 번호 다시 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), true);
-  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000001', lastRequestId: posts(mock.calls, '/phone-connection')[0].body.requestId };
-  press(view, '발신 번호 다시 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), false);
-  assert.equal(button(view, '전화 요청').props.disabled, false);
-  assert.equal(posts(mock.calls, '/call').length, 0);
-});
-
-test('연락 화면의 ClawOps 연결은 제공자까지 일치해야 미결 잠금을 해제한다', async t => {
-  const { ContactPanel, operationGuard, ApiError } = await components;
-  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
-  const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
-  mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
-  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
-  await openContact(view);
-  press(view, '키패드 방식 선택');
-  enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key'); enter(view, 'ClawOps 서명 비밀', 'signing');
-  enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
-  const call = posts(mock.calls, '/phone-connection')[0]; assert.equal(call.body.provider, 'clawops');
-  assert.equal(operationGuard.hasUnresolved(), true);
-  mock.api.phoneConnection = { status: 'available', provider: 'twilio', senderNumber: '+15550000001', lastRequestId: call.body.requestId };
-  press(view, '발신 번호 다시 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
-  mock.api.phoneConnection = { status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: call.body.requestId };
-  press(view, '발신 번호 다시 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
-  assert.equal(posts(mock.calls, '/call').length, 0);
+  assert.match(textOf(view.tree), /실시간 연결 상태는 확인되지 않았습니다/);
+  assert.equal(button(view, '전화 요청').props.disabled, false); assert.equal(posts(mock.calls, '/call').length, 0);
 });
 
 test('전화 결과 불명은 상태 조회 후 동일 발신 번호와 멱등 키로만 재시도한다', async t => {
@@ -807,18 +780,16 @@ test('전화 발신 번호 충돌은 재확인 전 새 요청을 막고 접수 �
   assert.match(textOf(view.tree), /전화 요청 접수, 연결·응답 미확인/);
 });
 
-test('전화 설정 결과 불명 뒤 다른 발신 번호가 조회되어도 세션 잠금을 해제하지 않는다', async t => {
-  const { ContactPanel, ApiError, operationGuard } = await components;
+test('전화 계정 조회 실패는 재조회하며 자격 저장이나 발신을 시도하지 않는다', async t => {
+  const { ContactPanel } = await components;
   const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
-  const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
-  mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
+  const mock = memoryApi([phoneReady]); let fail = true;
+  mock.api.getHook = (path: string) => { if (path === '/v1/phone-connection' && fail) throw new Error('unavailable'); };
   const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
-  await openContact(view); press(view, 'Twilio 선택'); enter(view, '전화 계정 SID', 'sid'); enter(view, '전화 인증 토큰', 'token'); enter(view, '발신 전화번호', '+15550000001');
-  press(view, '전화 연결 설정'); await view.settle();
-  mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000002', lastRequestId: posts(mock.calls, '/phone-connection')[0].body.requestId };
-  press(view, '발신 번호 다시 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '연락 목록').props.disabled, true);
-  assert.equal(button(view, '전화 요청').props.disabled, true); assert.equal(posts(mock.calls, '/call').length, 0);
+  await openContact(view); assert.equal(button(view, '전화 요청').props.disabled, true);
+  fail = false; press(view, '발신 번호 다시 확인'); await view.settle();
+  assert.equal(button(view, '전화 요청').props.disabled, false);
+  assert.equal(posts(mock.calls, '/phone-connection').length, 0); assert.equal(posts(mock.calls, '/call').length, 0);
 });
 
 test('회신 권한 미설정과 조회 실패를 응답 없음과 구분한다', async t => {
@@ -1017,7 +988,7 @@ test('회신 반영 후 현재 제안 상태를 표시하고 나갔다 다시 �
   t.after(() => view.unmount());
   await view.settle(); press(view, '제안 시간 조정, 연락 대기, 상세 보기'); await view.settle();
   press(view, '연락 준비'); await openContact(view);
-  assert.match(textOf(view.tree), /상태: 연락 대기/);
+  assert.match(textOf(view.tree), /원 일정은 유지됩니다/);
   press(view, '회신 확인'); await view.settle();
   press(view, '선택: option-1 · 제안 proposal-1');
   press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
@@ -1025,14 +996,14 @@ test('회신 반영 후 현재 제안 상태를 표시하고 나갔다 다시 �
   assert.match(textOf(view.tree), /제안을 불러오는 중/);
   assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다/);
   holdPreview = false; updatedPreview.resolve({ proposal: mock.proposals.get(proposal.id) }); await view.settle();
-  assert.match(textOf(view.tree), /상태: 적용됨/);
+  assert.match(textOf(view.tree), /일정에 반영된 제안입니다/);
   assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다|같은 버전을 확인할 수 없어/);
   press(view, '연락 목록'); await view.settle();
   assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
   press(view, '제안으로'); await view.settle();
-  assert.match(textOf(view.tree), /상태: 적용됨/);
+  assert.match(textOf(view.tree), /일정에 반영된 제안입니다/);
   press(view, '연락 내역'); await openContact(view);
-  assert.match(textOf(view.tree), /상태: 적용됨/);
+  assert.match(textOf(view.tree), /일정에 반영된 제안입니다/);
   assert.match(textOf(view.tree), /승인된 연락 내용/);
   assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다|같은 버전을 확인할 수 없어/);
   assert.equal(button(view, 'Gmail 발송'), undefined);
@@ -1050,7 +1021,7 @@ test('완료된 여러 대안은 한 건 적용, 나머지 미반영으로 표�
   t.after(() => view.unmount());
   await view.settle(); press(view, '제안 시간 조정, 적용됨, 상세 보기'); await view.settle();
   press(view, '연락 내역'); await openContact(view);
-  assert.match(textOf(view.tree), /상태: 적용됨/); assert.match(textOf(view.tree), /상태: 기준 변경됨/);
+  assert.match(textOf(view.tree), /일정에 반영된 제안입니다/); assert.match(textOf(view.tree), /일정이 바뀌어 새 제안을 확인해야 합니다/);
   assert.match(textOf(view.tree), /나머지 대안은 반영되지 않았습니다/);
   assert.doesNotMatch(textOf(view.tree), /처리된 제안 내역을 확인할 수 없습니다/);
 });
@@ -1102,12 +1073,12 @@ test('다른 대안이 적용되어 stale이 된 원래 제안에서도 연락 �
   const mock = memoryApi([contact]); mock.proposals.set(original.id, original); mock.proposals.set(selected.id, selected);
   const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
   t.after(() => view.unmount());
-  await view.settle(); press(view, '제안 시간 조정, 기준 변경됨, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 시간 조정, 다시 확인 필요, 상세 보기'); await view.settle();
   press(view, '연락 내역'); await view.settle();
   assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
   await openContact(view);
   assert.match(textOf(view.tree), /조회 전용/); assert.match(textOf(view.tree), /일정 반영됨/);
-  assert.match(textOf(view.tree), /상태: 적용됨/); assert.match(textOf(view.tree), /상태: 기준 변경됨/);
+  assert.match(textOf(view.tree), /일정에 반영된 제안입니다/); assert.match(textOf(view.tree), /일정이 바뀌어 새 제안을 확인해야 합니다/);
   assert.ok(button(view, '저장된 응답 조회'));
   assert.equal(button(view, 'Gmail 발송'), undefined); assert.equal(button(view, '회신 확인'), undefined);
   assert.equal(posts(mock.calls, '/send').length, 0); assert.equal(posts(mock.calls, '/confirm').length, 0);
@@ -1183,3 +1154,18 @@ for (const action of ['decision', 'send'] as const) {
     assert.equal(posts(mock.calls, `/${action}`).length, 1);
   });
 }
+
+test('Google 연락처 선택은 수신자 입력만 채우고 명시적 확인과 승인을 유지한다', async t => {
+  const { ContactPanel } = await components; const mock = memoryApi();
+  mock.api.getHook = (path: string) => path.startsWith('/v1/contacts/google/search?') ? { contacts: [
+    { id: 'contact-0', displayName: '상대', phoneNumbers: [{ number: '010-1234-5678', label: '휴대폰' }, { number: '010-9876-5432', label: '직장' }] },
+  ], truncated: false } : undefined;
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await view.settle(); press(view, '새 연락 초안 작성'); press(view, '전화 선택'); press(view, '연락처에서 선택'); press(view, 'Google 연락처');
+  enter(view, '연락처 이름 검색', '상대'); press(view, '이름 검색'); await view.settle();
+  press(view, '상대 · 직장 · 010-9876-5432'); assert.equal(input(view, '수신자 전화번호').props.value, '+821098765432');
+  assert.equal(button(view, '연락 초안 저장').props.disabled, true); assert.equal(posts(mock.calls, '/recipients').length, 0);
+  press(view, '입력한 수신자 이름과 전화번호 확인'); press(view, '연락 초안 저장'); await view.settle();
+  assert.equal(posts(mock.calls, '/recipients')[0].body.address, '+821098765432');
+  assert.equal(posts(mock.calls, '/call').length, 0); assert.ok(button(view, '연락 내용 승인'));
+});

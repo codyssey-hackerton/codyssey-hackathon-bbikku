@@ -82,7 +82,9 @@ test('thanks uses one model turn without a tool; retries replay the first respon
     calls++;
     assert.equal(input.message, '고마워');
     assert.deepEqual(input.observations, []);
-    assert.deepEqual(input.tools.map(tool => tool.name), ['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes']);
+    assert.deepEqual(input.tools.map(tool => tool.name), ['read_schedule', 'read_memory', 'calculate_timing', 'find_free_slots', 'validate_changes',
+      'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
+      'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
     return { kind: 'answer', text: '천만에요!' };
   } };
   const app = buildApp({ sessions, model });
@@ -90,7 +92,7 @@ test('thanks uses one model turn without a tool; retries replay the first respon
   const first = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body('first') });
   assert.equal(first.statusCode, 200);
   assert.deepEqual(first.json().data.result, { kind: 'reply', message: '천만에요!' });
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: { timezone: 'Asia/Seoul', message: '고마워', requestId: 'second', conversationId: null } });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: { timezone: 'Asia/Seoul', message: '고마워', requestId: 'first', conversationId: null } });
   assert.deepEqual(replay.json(), first.json());
   assert.equal(calls, 1);
   const conflict = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: { ...body('third'), message: '다른 내용' } });
@@ -114,15 +116,18 @@ test('concurrent replay reports the in-progress operation and does not call the 
   t.after(() => app.close());
   const first = app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body() }).then(response => response);
   await started;
-  const concurrent = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body('retry') });
-  assert.equal(concurrent.statusCode, 409);
-  assert.equal(concurrent.json().error.code, 'operation_in_progress');
-  assert.equal(typeof concurrent.json().error.details.operationId, 'string');
-  release();
+  try {
+    const concurrent = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body() });
+    assert.equal(concurrent.statusCode, 409);
+    assert.equal(concurrent.json().error.code, 'operation_in_progress');
+    assert.equal(typeof concurrent.json().error.details.operationId, 'string');
+    const mismatched = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body('different-id') });
+    assert.equal(mismatched.json().error.code, 'idempotency_conflict');
+  } finally { release(); }
   const completed = await first;
   assert.equal(completed.statusCode, 200);
   assert.equal(calls, 1);
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body('retry') });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: body() });
   assert.deepEqual(replay.json(), completed.json());
 });
 

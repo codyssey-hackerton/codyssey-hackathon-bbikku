@@ -7,8 +7,21 @@ export type IdempotencyInput = { userId: string; operation: string; key: string;
   guard?: (state: UserPlanningState) => HttpResult | undefined;
   guardExisting?: (state: UserPlanningState) => HttpResult | undefined;
   run: (control: IdempotencyControl) => Promise<HttpResult> };
-export interface IdempotencyPort { execute(input: IdempotencyInput): Promise<HttpResult> }
-type RecordEntry = { fingerprint: string; operationId: string; state: 'running' | 'retryable' | 'completed'; result?: HttpResult };
+export type ChatRequestStatus = { status: 'running' | 'retryable' | 'completed'; result?: { status: number; body: unknown } };
+export interface IdempotencyPort {
+  execute(input: IdempotencyInput): Promise<HttpResult>;
+  getChat?(userId: string, key: string, requestId: string): Promise<ChatRequestStatus | null>;
+}
+type RecordEntry = { fingerprint: string; operationId: string; state: 'running' | 'retryable' | 'completed'; result?: HttpResult; requestId?: string };
+
+function chatStatus(entry: RecordEntry | undefined, requestId: string): ChatRequestStatus | null {
+  if (!entry || entry.requestId !== requestId) return null;
+  if (entry.state === 'completed') {
+    if (!entry.result) return null;
+    return { status: 'completed', result: { status: entry.result.status, body: entry.result.body } };
+  }
+  return { status: entry.state };
+}
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -37,13 +50,17 @@ export class MemoryIdempotency implements IdempotencyPort {
     if (!Number.isSafeInteger(maxRecordsPerUser) || maxRecordsPerUser < 1) throw new Error('Invalid per-user idempotency limit');
   }
 
+  async getChat(userId: string, key: string, requestId: string): Promise<ChatRequestStatus | null> {
+    return chatStatus(this.recordsByUser.get(userId)?.get(JSON.stringify(['chat', key])), requestId);
+  }
+
   async execute(input: IdempotencyInput): Promise<HttpResult> {
     const identity = JSON.stringify([input.operation, input.key]);
     const fingerprint = createHash('sha256').update(JSON.stringify(canonical(input.payload))).digest('hex');
     let userRecords = this.recordsByUser.get(input.userId);
     let entry = userRecords?.get(identity);
     if (entry) {
-      if (entry.fingerprint !== fingerprint) return {
+      if (entry.fingerprint !== fingerprint || (input.operation === 'chat' && entry.requestId !== undefined && entry.requestId !== input.requestId)) return {
         status: 409, body: { requestId: input.requestId, error: { code: 'idempotency_conflict', message: '동일한 중복 키에 다른 요청을 사용할 수 없습니다.', retryable: false } },
       };
       if (entry.state === 'running') return {
@@ -55,7 +72,7 @@ export class MemoryIdempotency implements IdempotencyPort {
       if (userRecords && userRecords.size >= this.maxRecordsPerUser) return {
         status: 503, body: { requestId: input.requestId, error: { code: 'provider_unavailable', message: '임시 요청 저장 공간이 가득 찼습니다.', retryable: false } },
       };
-      entry = { fingerprint, operationId: randomUUID(), state: 'running' };
+      entry = { fingerprint, operationId: randomUUID(), state: 'running', ...(input.operation === 'chat' ? { requestId: input.requestId } : {}) };
       if (!userRecords) { userRecords = new Map(); this.recordsByUser.set(input.userId, userRecords); }
       userRecords.set(identity, entry);
     }
@@ -82,6 +99,9 @@ export class MemoryIdempotency implements IdempotencyPort {
 // Durable reservations survive restart. Final state and result share one user-row transaction.
 export class RepositoryIdempotency implements IdempotencyPort {
   constructor(private readonly store: PlanningStore, private readonly clock: () => Date = () => new Date(), private readonly maxRecordsPerUser = 10_000) {}
+  async getChat(userId: string, key: string, requestId: string): Promise<ChatRequestStatus | null> {
+    return chatStatus((await this.store.read(userId)).idempotency.get(JSON.stringify(['chat', key])), requestId);
+  }
   async execute(input: IdempotencyInput): Promise<HttpResult> {
     const identity = JSON.stringify([input.operation, input.key]);
     const fingerprint = createHash('sha256').update(JSON.stringify(canonical(input.payload))).digest('hex');
@@ -90,13 +110,17 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const conflict = (): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'idempotency_conflict', message: '동일한 중복 키에 다른 요청을 사용할 수 없습니다.', retryable: false } } });
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
     const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check' || input.operation === 'contact_call_check';
+    // Calendar sync owns its durable effect ledger and transactions; an outer transaction would self-lock its final sync-row update.
+    const detachedAttempt = readOnlyAttempt || input.operation === 'calendar_sync_run' ||
+      ['schedule_call_approve', 'schedule_call_check', 'schedule_call_propose'].includes(input.operation);
     // Only operations whose entire effect is committed with this record may recover a stale claim.
-    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
-      'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);
+    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'schedule_attendance', 'schedule_undo', 'memory_write', 'proposal_decision', 'review_schedule_write',
+      'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm',
+      'schedule_call_create', 'schedule_call_decision'].includes(input.operation);
     const claim = await this.store.transaction(input.userId, state => {
       const previous = state.idempotency.get(identity);
       if (previous) {
-        if (previous.fingerprint !== fingerprint) return { result: conflict() };
+        if (previous.fingerprint !== fingerprint || (input.operation === 'chat' && previous.requestId !== undefined && previous.requestId !== input.requestId)) return { result: conflict() };
         if (previous.state === 'completed') return { result: input.guardExisting?.(state) ?? previous.result! };
         // A completed DB write and its result commit together; running after lease expiry means neither committed.
         if (previous.state === 'running' && !(recoverable && previous.leaseUntil && Date.parse(previous.leaseUntil) <= now.getTime())) {
@@ -117,10 +141,10 @@ export class RepositoryIdempotency implements IdempotencyPort {
       const guarded = input.guard?.(state);
       if (guarded) {
         const retryable = retryableReview(input.operation, guarded);
-        state.idempotency.set(identity, { fingerprint, operationId, state: retryable ? 'retryable' : 'completed', ...(!retryable ? { result: guarded } : {}) });
+        state.idempotency.set(identity, { fingerprint, operationId, state: retryable ? 'retryable' : 'completed', ...(input.operation === 'chat' ? { requestId: input.requestId } : {}), ...(!retryable ? { result: guarded } : {}) });
         return { result: guarded };
       }
-      state.idempotency.set(identity, { fingerprint, operationId, state: 'running', token, leaseUntil });
+      state.idempotency.set(identity, { fingerprint, operationId, state: 'running', token, leaseUntil, ...(input.operation === 'chat' ? { requestId: input.requestId } : {}) });
       return { operationId };
     });
     if (claim.result) return claim.result;
@@ -145,7 +169,7 @@ export class RepositoryIdempotency implements IdempotencyPort {
     };
     let result: HttpResult;
     try {
-      result = readOnlyAttempt ? await input.run({ finalize }) : await finalize(() => input.run({ finalize }));
+      result = detachedAttempt ? await input.run({ finalize }) : await finalize(() => input.run({ finalize }));
     } catch {
       // A scheduled review only writes inside finalize, atomically with its result.
       result = input.operation === 'scheduled_review'

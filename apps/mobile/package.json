@@ -12,7 +12,7 @@
     "export:ios": "expo export --platform ios --output-dir dist/ios",
     "export:android": "expo export --platform android --output-dir dist/android",
     "export": "npm run export:ios && npm run export:android",
-    "test": "tsx --test tests/*.test.ts src/schedule/*.test.mjs src/proposals/*.test.mjs src/memory/*.test.mjs",
+    "test": "tsx --test tests/*.test.ts src/*/*.test.mjs src/*/*.test.cts",
     "web": "expo start --web",
     "export:web": "expo export --platform web --output-dir dist/web"
   },
@@ -20,6 +20,7 @@
     "@expo/metro-runtime": "~58.0.15",
     "@kingstinct/react-native-healthkit": "16.2.0",
     "expo": "58.0.21",
+    "expo-contacts": "~58.0.10",
     "expo-dev-client": "58.0.18",
     "expo-font": "~58.0.11",
     "expo-status-bar": "58.0.4",

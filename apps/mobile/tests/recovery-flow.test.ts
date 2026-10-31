@@ -14,6 +14,9 @@ function createHarness() {
     return { instance: current, index: current.index++ };
   };
   const react: any = {
+    Children: { toArray: (children: any) => [children].flat(Infinity).filter(child => child != null && typeof child !== 'boolean') },
+    isValidElement: (element: any) => !!element && typeof element === 'object' && 'type' in element,
+    cloneElement: (element: any, props: any) => ({ ...element, props: { ...element.props, ...props } }),
     useState(initial: any) {
       const { instance, index } = slot();
       if (!instance.hooks[index]) {
@@ -49,8 +52,12 @@ function createHarness() {
   react.useLayoutEffect = react.useEffect;
   const listeners = new Set<(state: string) => void>();
   const native = {
-    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
+    Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View', Image: 'Image',
+    Modal: ({ visible = true, children }: any) => visible ? children : null,
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
+    AccessibilityInfo: { isReduceMotionEnabled: async () => true, addEventListener: () => ({ remove() {} }) },
+    PanResponder: { create: () => ({ panHandlers: {} }) },
+    LayoutAnimation: { configureNext() {}, Presets: { easeInEaseOut: {} } },
     BackHandler: { addEventListener: () => ({ remove() {} }) },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
     AppState: {
@@ -125,7 +132,7 @@ const components = build({
     resolveDir: resolve(__dirname), loader: 'ts',
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
-  loader: { '.otf': 'empty', '.ttf': 'empty' },
+  loader: { '.otf': 'empty', '.ttf': 'empty', '.png': 'empty' },
   plugins: [{ name: 'recovery-test-host', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ },
       (args) => ({ path: args.path, namespace: 'recovery-native' }));
@@ -136,24 +143,25 @@ const components = build({
         path === 'expo-font' ? 'exports.useFonts=()=>[true,null]' :
         path === 'react' ? 'module.exports=globalThis.__recoveryFlowHarness.react' :
         path === 'react-native' ? 'module.exports=globalThis.__recoveryFlowHarness.native' :
-        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider=({children})=>children; exports.SafeAreaView="View"' :
+        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider=({children})=>children; exports.SafeAreaView="View"; exports.useSafeAreaInsets=()=>({top:0,right:0,bottom:0,left:0})' :
         path === 'expo-status-bar' ? 'exports.StatusBar="StatusBar"' :
           'exports.jsx=exports.jsxs=globalThis.__recoveryFlowHarness.jsx; exports.Fragment=globalThis.__recoveryFlowHarness.fragment',
       loader: 'js',
     }));
-    builder.onResolve({ filter: /^\.\/src\/(api\/http|chat\/client|schedule\/client|proposals\/ProposalPanel|memory\/MemoryPanel|review\/ReviewPanel|screens\/CalendarScreen)$/ },
+    builder.onResolve({ filter: /^\.\/src\/(api\/http|chat\/client|schedule\/client|proposals\/ProposalPanel|memory\/MemoryPanel|review\/ReviewPanel|screens\/CalendarScreen|screens\/HomeScreen)$/ },
       (args) => ({ path: args.path, namespace: 'recovery-app-stub' }));
     builder.onLoad({ filter: /.*/, namespace: 'recovery-app-stub' }, ({ path }) => ({
       contents: path.endsWith('api/http') ? 'exports.createApiClient=()=>({})' :
         path.endsWith('chat/client') ? 'exports.createChatClient=()=>globalThis.__recoveryFlowHarness.chatClient' :
         path.endsWith('schedule/client') ? 'exports.createScheduleClient=()=>globalThis.__recoveryFlowHarness.scheduleClient' :
+        path.endsWith('screens/CalendarScreen') ? 'const {jsx}=require("react/jsx-runtime");module.exports=props=>jsx("Pressable",{accessibilityLabel:"테스트 날짜 선택",onPress:()=>props.onSelectDate(new Date())})' :
           'module.exports=()=>null',
       loader: 'js',
     }));
   } }],
 }).then((bundled) => {
   const compiled: any = { exports: {} };
-  new Function('module', 'exports', 'process', bundled.outputFiles[0].text)(compiled, compiled.exports, { env: {} });
+  new Function('module', 'exports', 'process', '__DEV__', bundled.outputFiles[0].text)(compiled, compiled.exports, { env: {} }, true);
   return compiled.exports as { App: any; DayScreen: any; ChatScreen: any; createChatClient: any; ApiError: any };
 });
 
@@ -174,7 +182,9 @@ function node(view: any, type: string, predicate: (item: any) => boolean) {
   return found;
 }
 function button(view: any, label: string) {
-  return node(view, 'Pressable', (item) => item.props.accessibilityLabel === label || textOf(item.children) === label);
+  const found = nodes(view.tree).find(item => item.type === 'Pressable' && (item.props.accessibilityLabel === label || textOf(item.children) === label));
+  assert.ok(found, `missing button: ${label}`);
+  return found;
 }
 function press(view: any, label: string) {
   const control = button(view, label);
@@ -193,6 +203,9 @@ function selectedTab(view: any, label: string) {
 function dayLabel(view: any) {
   const heading = node(view, 'Text', (item) => item.props.accessibilityRole === 'header' && /^\d{4}년 \d+월 \d+일/.test(textOf(item.children)));
   return textOf(heading.children);
+}
+function cardText(view: any, title: string) {
+  return textOf(node(view, 'Pressable', item => typeof item.props.accessibilityLabel === 'string' && item.props.accessibilityLabel.startsWith(`${title} · `)).children);
 }
 function recoveryLabel(title: string, date: string) { return `${title} ${date} 복구 상담 초안`; }
 function deferred<T>() {
@@ -263,13 +276,26 @@ async function setup(t: any, options: { items?: any[]; send?: (request: any) => 
   });
   return {
     App, DayScreen, ChatScreen, createChatClient, ApiError, items, requests, checkins, commands, intervals, scheduleClient,
-    render(Component: any, props?: any) { view = harness.renderer(Component, props); return view; },
+    render(Component: any, props?: any) {
+      view = harness.renderer(Component, props);
+      if (Component === App) {
+        press(view, '개발 연결 설정');
+        node(view, 'TextInput', item => item.props.accessibilityLabel === '개발 세션 토큰').props.onChangeText('synthetic'); view.flush();
+        press(view, '설정 적용');
+      }
+      return view;
+    },
     setTime(value: string) { t.mock.timers.setTime(Date.parse(value)); },
     emitAppState(state: string) { for (const listener of harness.host.listeners) listener(state); },
   };
 }
 
-async function openDay(view: any) { press(view, '하루 일정'); await view.settle(); }
+async function openDay(view: any) {
+  press(view, '캘린더');
+  if (nodes(view.tree).some(item => item.props?.accessibilityLabel === '테스트 날짜 선택')) press(view, '테스트 날짜 선택');
+  await view.settle();
+}
+function itemAction(view: any, title: string, action: string) { press(view, `${title} 더보기`); press(view, action); }
 function assertNoWrites(ctx: any) {
   assert.equal(ctx.checkins.length, 0);
   assert.equal(ctx.commands.length, 0);
@@ -290,16 +316,20 @@ test('real App routes only incomplete tasks into editable recovery and preserves
   await view.settle();
   assert.equal(ctx.intervals.size, 0);
   assert.equal(harness.host.listeners.size, 0);
+  press(view, 'AI 비서');
   enter(view, regularDraft);
   await openDay(view);
   assert.equal(ctx.intervals.size, 1);
   assert.equal(harness.host.listeners.size, 1);
   const date = dayLabel(view);
+  if (nodes(view.tree).some(entry => entry.props?.accessibilityLabel === '이전 일정 카드 펼치기')) press(view, '이전 일정 카드 펼치기');
   for (const title of ['완료된 테스트 작업', '대기 테스트 작업', '미확인 테스트 작업', '미완료 테스트 일정']) {
-    assert.equal(nodes(view.tree).some((entry) => entry.type === 'Pressable' && entry.props.accessibilityLabel === `${title} 복구 상담`), false);
+    press(view, `${title} 더보기`);
+    assert.equal(nodes(view.tree).some((entry) => entry.type === 'Pressable' && textOf(entry.children) === '복구 상담'), false);
+    press(view, '닫기');
   }
-  press(view, `${taskA} 복구 상담`);
-  assert.equal(selectedTab(view, 'AI 채팅'), true);
+  itemAction(view, taskA, '복구 상담');
+  assert.equal(selectedTab(view, 'AI 비서'), true);
   assert.equal(ctx.intervals.size, 0);
   assert.equal(harness.host.listeners.size, 0);
   assert.match(input(view).props.value, new RegExp(taskA));
@@ -315,7 +345,7 @@ test('real App routes only incomplete tasks into editable recovery and preserves
   assert.equal(input(view).props.value, '수정한 첫 번째 복구 초안');
 
   await openDay(view);
-  press(view, `${taskB} 복구 상담`);
+  itemAction(view, taskB, '복구 상담');
   assert.match(input(view).props.value, new RegExp(taskB));
   enter(view, '수정한 두 번째 복구 초안');
   press(view, recoveryLabel(taskA, date));
@@ -323,14 +353,14 @@ test('real App routes only incomplete tasks into editable recovery and preserves
   press(view, recoveryLabel(taskB, date));
   assert.equal(input(view).props.value, '수정한 두 번째 복구 초안');
   await openDay(view);
-  press(view, `${taskA} 복구 상담`);
+  itemAction(view, taskA, '복구 상담');
   assert.equal(input(view).props.value, '수정한 첫 번째 복구 초안');
   await openDay(view);
   press(view, '다음 날짜');
   await view.settle();
   const nextDate = dayLabel(view);
   assert.notEqual(nextDate, date);
-  press(view, `${taskA} 복구 상담`);
+  itemAction(view, taskA, '복구 상담');
   assert.ok(input(view).props.value.includes(nextDate));
   enter(view, '다른 날짜의 복구 초안');
   press(view, recoveryLabel(taskA, date));
@@ -350,8 +380,8 @@ test('coordination still sends its target; recovery question and follow-up never
   const view = ctx.render(ctx.App);
   await view.settle();
   await openDay(view);
-  press(view, '테스트 공동 일정 공동 약속 조정 검토');
-  assert.equal(selectedTab(view, 'AI 채팅'), true);
+  itemAction(view, '테스트 공동 일정', '공동 약속 조정 검토');
+  assert.equal(selectedTab(view, 'AI 비서'), true);
   enter(view, '공동 일정 조정 요청');
   press(view, '메시지 보내기');
   assert.deepEqual(ctx.requests[0].coordinationTarget, { id: 'shared-event', expectedRevision: 3 });
@@ -359,7 +389,7 @@ test('coordination still sends its target; recovery question and follow-up never
   enter(view, regularDraft);
   await openDay(view);
   const date = dayLabel(view);
-  press(view, `${taskA} 복구 상담`);
+  itemAction(view, taskA, '복구 상담');
   assert.equal(ctx.requests.length, 1);
   enter(view, '수정한 복구 질문');
   press(view, '메시지 보내기');
@@ -436,16 +466,17 @@ test('pending and uncertain recovery lock draft switching and retry the identica
   const ctx = await setup(t, { send: () => [first, second, third][count++].promise });
   const view = ctx.render(ctx.App);
   await view.settle();
+  press(view, 'AI 비서');
   enter(view, regularDraft);
   await openDay(view);
-  press(view, '테스트 공동 일정 공동 약속 조정 검토');
+  itemAction(view, '테스트 공동 일정', '공동 약속 조정 검토');
   assert.equal(input(view).props.value, regularDraft);
   await openDay(view);
   const date = dayLabel(view);
-  press(view, `${taskA} 복구 상담`);
+  itemAction(view, taskA, '복구 상담');
   enter(view, '실패해도 유지할 복구 요청');
   await openDay(view);
-  press(view, `${taskB} 복구 상담`);
+  itemAction(view, taskB, '복구 상담');
   enter(view, '두 번째 작업 초안');
   press(view, recoveryLabel(taskA, date));
   press(view, '메시지 보내기');
@@ -456,7 +487,7 @@ test('pending and uncertain recovery lock draft switching and retry the identica
   assert.equal('coordinationTarget' in ctx.requests[0], false);
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   await openDay(view);
-  press(view, `${taskB} 복구 상담`);
+  itemAction(view, taskB, '복구 상담');
   assert.equal(input(view).props.value, '실패해도 유지할 복구 요청');
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   first.reject(new Error('synthetic network failure'));
@@ -488,10 +519,11 @@ test('a definite chat error keeps recovery and general drafts locked until editi
   const ctx = await setup(t, { send: () => new Promise((_resolve, fail) => { reject = fail; }) });
   const view = ctx.render(ctx.App);
   await view.settle();
+  press(view, 'AI 비서');
   enter(view, regularDraft);
   await openDay(view);
   const date = dayLabel(view);
-  press(view, `${taskA} 복구 상담`);
+  itemAction(view, taskA, '복구 상담');
   enter(view, '확실한 오류 뒤 편집할 문구');
   press(view, '메시지 보내기');
   reject(new ctx.ApiError('not_configured', 'synthetic unavailable', false, 503));
@@ -515,12 +547,12 @@ test('day check-in remains explicit and blocks recovery while saving', async (t)
   await view.settle();
   await openDay(view);
   assertNoWrites(ctx);
-  press(view, '대기 테스트 작업 미완료 체크인');
+  press(view, '대기 테스트 작업 완료'); press(view, '미완료');
   assert.deepEqual(ctx.checkins[0].input, { id: 'task-pending', expectedRevision: 3, completion: 'incomplete' });
-  assert.equal(button(view, `${taskA} 복구 상담`).props.disabled, true);
+  assert.equal(button(view, `${taskA} 더보기`).props.disabled, true);
   pending.resolve({ item: { ...ctx.items.find((entry) => entry.id === 'task-pending'), completion: 'incomplete' }, scheduleRevision: 9 });
   await view.settle();
-  assert.notEqual(button(view, `${taskA} 복구 상담`).props.disabled, true);
+  assert.notEqual(button(view, `${taskA} 더보기`).props.disabled, true);
   assert.equal(ctx.commands.length, 0);
   assert.equal(ctx.requests.length, 0);
 });
@@ -537,7 +569,7 @@ test('day preparation opens explicit inputs and routes a saved proposal to revie
     timezone: 'UTC', refreshVersion: 0, onScheduleChanged: () => {}, onCoordinate: () => {}, onRecovery: () => {},
     onOpenPreparationProposals: () => { opened += 1; } });
   await view.settle();
-  press(view, '테스트 공동 일정 준비계획');
+  itemAction(view, '테스트 공동 일정', '준비계획');
   assert.equal(button(view, '제안 생성').props.disabled, true);
   for (const [label, value] of [['준비 시간 (분)', '15'], ['이동 시간 (분)', '0'], ['여유 시간 (분)', '10']]) {
     node(view, 'TextInput', entry => entry.props.accessibilityLabel === label).props.onChangeText(value); view.flush();
@@ -553,7 +585,7 @@ test('day preparation opens explicit inputs and routes a saved proposal to revie
   assertNoWrites(ctx);
 });
 
-test('day renders current/next times and unknown status and refreshes only while visible or active', async (t) => {
+test('day renders timeline phases and refreshes only while visible or active', async (t) => {
   const items = [
     item('current', '현재 테스트 일정', 'event', 'unknown', '2026-10-31T11:30:00Z', '2026-10-31T12:30:00Z'),
     item('next', '다음 테스트 일정', 'event', 'pending', '2026-10-31T12:45:00Z', '2026-10-31T13:30:00Z'),
@@ -564,28 +596,30 @@ test('day renders current/next times and unknown status and refreshes only while
     onScheduleChanged: () => {}, onCoordinate: () => {}, onRecovery: () => {}, visible: true };
   const view = ctx.render(ctx.DayScreen, props);
   await view.settle();
-  assert.match(textOf(view.tree), /이 시간의 일정현재 테스트 일정11:30 – 12:30수행 상태: 상태 미확인다음 행동다음 테스트 일정12:45 – 13:30수행 상태: 대기/);
+  assert.match(cardText(view, '현재 테스트 일정'), /진행 중/);
+  assert.match(cardText(view, '다음 테스트 일정'), /예정/);
+  assert.ok(button(view, '현재 테스트 일정 참석 확인'));
   assert.equal(ctx.intervals.size, 1);
   assert.equal([...ctx.intervals.values()][0].delay, 30_000);
   assert.equal(harness.host.listeners.size, 1);
   ctx.setTime('2026-10-31T12:50:00Z');
   ctx.emitAppState('background'); view.flush();
-  assert.match(textOf(view.tree), /이 시간의 일정현재 테스트 일정/);
+  assert.match(cardText(view, '현재 테스트 일정'), /진행 중/);
   ctx.emitAppState('active'); view.flush();
-  assert.match(textOf(view.tree), /이 시간의 일정다음 테스트 일정12:45 – 13:30/);
+  assert.match(cardText(view, '다음 테스트 일정'), /진행 중/);
   view.update({ ...props, visible: false });
   assert.equal(ctx.intervals.size, 0);
   assert.equal(harness.host.listeners.size, 0);
   ctx.setTime('2026-10-31T13:40:00Z');
   view.update({ ...props, visible: true });
-  assert.match(textOf(view.tree), /다음 행동나중 테스트 일정14:00 – 15:00/);
+  assert.match(cardText(view, '나중 테스트 일정'), /예정/);
   ctx.setTime('2026-10-31T14:05:00Z');
   [...ctx.intervals.values()][0].callback(); view.flush();
-  assert.match(textOf(view.tree), /이 시간의 일정나중 테스트 일정14:00 – 15:00/);
+  assert.match(cardText(view, '나중 테스트 일정'), /진행 중/);
   assertNoWrites(ctx);
 });
 
-test('day shows the empty next-action message for completed, past and unscheduled items', async (t) => {
+test('day retains unscheduled tasks alongside timeline items without writing', async (t) => {
   const items = [
     item('past', '지난 테스트 일정', 'event', 'pending', '2026-10-31T09:00:00Z', '2026-10-31T10:00:00Z'),
     item('completed', '완료 테스트 일정', 'event', 'completed', '2026-10-31T12:30:00Z', '2026-10-31T13:00:00Z'),
@@ -595,7 +629,8 @@ test('day shows the empty next-action message for completed, past and unschedule
   const view = ctx.render(ctx.DayScreen, { selectedDate, onSelectDate: () => {}, client: ctx.scheduleClient, timezone: 'UTC',
     refreshVersion: 0, onScheduleChanged: () => {}, onCoordinate: () => {}, onRecovery: () => {} });
   await view.settle();
-  assert.match(textOf(view.tree), /선택한 날짜에 지금 진행 중이거나 앞으로 시작할 배치된 일정이 없습니다/);
-  assert.equal(nodes(view.tree).some((entry) => entry.type === 'Text' && ['이 시간의 일정', '다음 행동'].includes(textOf(entry.children))), false);
+  assert.match(textOf(view.tree), /미배치 할 일/);
+  assert.match(textOf(view.tree), /미배치 테스트 작업/);
+  assert.ok(button(view, '미배치 테스트 작업 더보기'));
   assertNoWrites(ctx);
 });

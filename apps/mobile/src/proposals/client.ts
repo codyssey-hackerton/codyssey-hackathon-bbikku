@@ -79,6 +79,9 @@ function isFields(value: unknown): value is ScheduleFields {
       (value.flexibility !== 'fixed' && value.flexibility !== 'flexible') ||
       (value.involvement !== 'personal' && value.involvement !== 'shared') ||
       !['pending', 'completed', 'incomplete', 'unknown'].includes(value.completion as string)) return false;
+  if (value.category !== undefined && value.category !== null && value.category !== 'personal' && value.category !== 'work') return false;
+  if (value.attendance !== undefined && value.attendance !== null && !['attended', 'absent', 'unknown'].includes(value.attendance as string)) return false;
+  if (value.kind === 'task' && value.attendance != null) return false;
   if (value.kind === 'event' && value.timeSlot === null) return false;
   if (value.kind === 'task' && (typeof value.durationMinutes !== 'number' || value.durationMinutes <= 0)) return false;
   return !(isTimeSlot(value.timeSlot) && typeof value.deadline === 'string' &&

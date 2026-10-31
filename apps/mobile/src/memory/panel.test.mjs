@@ -11,6 +11,7 @@ import { Pressable as WebPressable, Text as WebText } from 'react-native-web';
 // React Native Testing Library / react-test-renderer are not installed in this worktree.
 function createHarness() {
   let current;
+  const views = new Set();
   const fragment = Symbol('fragment');
   const sameDeps = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
   const jsx = (type, props, key) => ({ type, props: props ?? {}, key });
@@ -70,6 +71,7 @@ function createHarness() {
 
   function renderer(Component, initialProps) {
     const view = { props: initialProps, dirty: true, effects: [], instances: new Map(), tree: null };
+    views.add(view);
     function render(node, path, seen) {
       if (node === null || node === undefined || typeof node === 'boolean') return null;
       if (typeof node === 'string' || typeof node === 'number') return node;
@@ -114,14 +116,23 @@ function createHarness() {
     view.flush();
     return view;
   }
-  return { renderer };
+  return { renderer, dispose() {
+    for (const view of views) {
+      for (const instance of view.instances.values()) {
+        instance.alive = false;
+        for (const hook of instance.hooks) if (hook?.cleanup) hook.cleanup();
+      }
+    }
+    views.clear();
+  } };
 }
 
 const harness = createHarness();
+test.afterEach(() => harness.dispose());
 const directory = dirname(fileURLToPath(import.meta.url));
 const bundled = await build({
   stdin: {
-    contents: `export { default } from './MemoryPanel'; export { ApiError } from '../api/http';`,
+    contents: `export { default } from './MemoryPanel'; export { ApiError } from '../api/http'; export { operationGuard } from '../api/operationGuard';`,
     resolveDir: directory, loader: 'ts',
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
@@ -140,7 +151,7 @@ const bundled = await build({
 });
 const compiled = { exports: {} };
 new Function('module', 'exports', bundled.outputFiles[0].text)(compiled, compiled.exports);
-const { default: MemoryPanel, ApiError } = compiled.exports;
+const { default: MemoryPanel, ApiError, operationGuard } = compiled.exports;
 
 function nodes(root) {
   if (root === null || root === undefined) return [];
@@ -192,8 +203,9 @@ test('선호 종류 선택은 네이티브 checked와 웹 aria-checked를 함께
     const markup = renderToStaticMarkup(React.createElement(WebPressable, { accessibilityRole: 'radio', 'aria-checked': item.props['aria-checked'] }, React.createElement(WebText, null, label)));
     assert.match(markup, new RegExp(`aria-checked="${checked}"`)); assert.match(markup, /role="radio"/);
   };
-  check('명시 선호', true); check('일시 상황', false); press(view, '일시 상황');
-  check('명시 선호', false); check('일시 상황', true);
+  press(view, '선호 또는 상황 추가');
+  check('선호', true); check('일시 상황', false); press(view, '일시 상황');
+  check('선호', false); check('일시 상황', true);
 });
 
 test('a hidden panel retains its draft, while a connection change clears it and ignores an old save', async () => {
@@ -209,16 +221,19 @@ test('a hidden panel retains its draft, while a connection change clears it and 
   const props = { api: oldApi, onBack: () => { back += 1; }, onMemoryChanged: () => { changed += 1; } };
   const view = harness.renderer(MemoryPanel, props);
   await view.settle();
+  press(view, '선호 또는 상황 추가');
   enter(view, '항목 이름', 'draft-key');
-  enter(view, '값', 'draft-value');
+  enter(view, '내용', 'draft-value');
   press(view, '뒤로');
   view.update(props); // Parent hides the same mounted panel.
   assert.equal(back, 1);
-  assert.equal(input(view, '값').props.value, 'draft-value');
+  assert.equal(input(view, '내용').props.value, 'draft-value');
   press(view, '저장');
   assert.equal(calls.length, 1);
   view.update({ ...props, api: newApi });
-  assert.equal(input(view, '값').props.value, '');
+  await view.settle();
+  press(view, '선호 또는 상황 추가');
+  assert.equal(input(view, '내용').props.value, '');
   assert.doesNotMatch(textOf(view.tree), /old-value|draft-value/);
   await view.settle();
   assert.match(textOf(view.tree), /new-value/);
@@ -243,12 +258,13 @@ for (const errorKind of ['network', 'not_configured']) {
     let changed = 0;
     const view = harness.renderer(MemoryPanel, { api, onBack: () => {}, onMemoryChanged: () => { changed += 1; } });
     await view.settle();
+    press(view, '선호 또는 상황 추가');
     enter(view, '항목 이름', 'focus');
-    enter(view, '값', '오전');
+    enter(view, '내용', '오전');
     press(view, '저장');
     await view.settle();
-    if (errorKind === 'not_configured') enter(view, '값', '수정한 초안');
-    else assert.equal(input(view, '값').props.editable, false);
+    if (errorKind === 'not_configured') enter(view, '내용', '수정한 초안');
+    else assert.equal(input(view, '내용').props.editable, false);
     press(view, '같은 요청 다시 시도');
     await view.settle();
     assert.deepEqual(calls[1], calls[0]);
@@ -257,7 +273,7 @@ for (const errorKind of ['network', 'not_configured']) {
     assert.equal(reads, 2);
     assert.equal(changed, 1);
     assert.match(textOf(view.tree), /서버에 저장했습니다/);
-    assert.equal(input(view, '값').props.value, errorKind === 'not_configured' ? '수정한 초안' : '');
+    assert.equal(input(view, '내용').props.value, errorKind === 'not_configured' ? '수정한 초안' : '');
   });
 }
 
@@ -273,8 +289,9 @@ test('a conflict after a timeout keeps the outcome uncertain and offers no new-r
   };
   const view = harness.renderer(MemoryPanel, { api, onBack: () => {}, onMemoryChanged: () => assert.fail('not saved') });
   await view.settle();
+  press(view, '선호 또는 상황 추가');
   enter(view, '항목 이름', 'focus');
-  enter(view, '값', '오전');
+  enter(view, '내용', '오전');
   press(view, '저장');
   await view.settle();
   press(view, '같은 요청 다시 시도');
@@ -282,108 +299,140 @@ test('a conflict after a timeout keeps the outcome uncertain and offers no new-r
   assert.deepEqual(calls[1], calls[0]);
   assert.match(textOf(view.tree), /이전 저장의 처리 여부는 아직 확인되지 않았습니다/);
   assert.doesNotMatch(textOf(view.tree), /최신 목록 확인 후 새 요청/);
-  assert.equal(input(view, '값').props.editable, false);
+  assert.equal(input(view, '내용').props.editable, false);
 });
 
-test('optional time setup saves each numeric preference with the latest revision and leaves other fields unchanged', async () => {
-  let revision = 3;
-  const facts = [fact('preparationMinutes', 15)];
+
+test('saved data is readable without raw objects; adding cannot overwrite and explicit text edit preserves kind and key', async () => {
   const calls = [];
+  const entries = [fact('planning_preferences', { secret: 'PRIVATE_OBJECT' }), fact('travelMinutes', 30),
+    fact('other', { secret: 'OTHER_PRIVATE_OBJECT' }), fact('focus', '오전')];
   const api = {
-    get: async () => ({ facts: [...facts], contextRevision: revision }),
+    get: async () => ({ facts: entries, contextRevision: 4 }),
     post: async (path, body, options) => {
-      calls.push({ path, body: structuredClone(body), options: structuredClone(options) });
-      assert.equal(body.expectedContextRevision, revision);
-      const saved = fact(body.key, body.value);
-      const index = facts.findIndex((entry) => entry.key === body.key);
-      if (index < 0) facts.push(saved); else facts[index] = saved;
-      return { fact: saved, contextRevision: ++revision };
+      calls.push({ body: structuredClone(body), options: structuredClone(options) });
+      return { fact: fact(body.key, body.value), contextRevision: 5 };
     },
   };
-  let changed = 0;
-  let back = 0;
-  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => { changed += 1; } });
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
   await view.settle();
-  assert.match(textOf(view.tree), /현재 저장값: 15분/);
-  enter(view, '준비시간 분', '45');
-  enter(view, '이동시간 분', '30.5');
-  enter(view, '도착 여유시간 분', '0');
-  for (const label of ['준비시간', '이동시간', '도착 여유시간']) {
-    press(view, `${label} 저장`);
-    await view.settle();
-  }
-  assert.deepEqual(calls.map(({ body }) => [body.key, body.value, body.expectedContextRevision, body.kind, body.validUntil]), [
-    ['preparationMinutes', 45, 3, 'preference', null],
-    ['travelMinutes', 30.5, 4, 'preference', null],
-    ['bufferMinutes', 0, 5, 'preference', null],
-  ]);
-  assert.ok(calls.every(({ path }) => path === '/v1/memory'));
-  assert.equal(changed, 3);
-  assert.match(textOf(view.tree), /현재 저장값: 45분/);
-  press(view, '나중에 설정');
-  assert.equal(back, 1);
-  assert.equal(calls.length, 3);
-});
-
-test('time setup rejects empty, negative, malformed and non-finite values without writing; skip remains available', async () => {
-  const calls = [];
-  const api = { get: async () => ({ facts: [], contextRevision: 1 }), post: async (...args) => { calls.push(args); } };
-  let back = 0;
-  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => assert.fail('not saved') });
-  await view.settle();
-  for (const value of ['', ' ', '-1', 'abc', '1e3', 'Infinity', '9'.repeat(400)]) {
-    enter(view, '준비시간 분', value);
-    press(view, '준비시간 저장');
-    assert.match(textOf(view.tree), /준비시간은 0 이상의 숫자/);
-  }
-  press(view, '나중에 설정');
-  assert.equal(back, 1);
+  let shown = textOf(view.tree);
+  assert.match(shown, /이동시간.*30분/);
+  assert.match(shown, /이 저장된 내용은 여기에서 표시할 수 없어요/);
+  assert.doesNotMatch(shown, /PRIVATE_OBJECT|JSON|조회 기준|목록 새로고침|준비시간 저장/);
+  assert.equal(nodes(view.tree).some(node => node.type === 'TextInput'), false);
+  assert.doesNotMatch(shown, /planning_preferences 수정|other 수정|이동시간 수정/);
+  press(view, '선호 또는 상황 추가');
+  enter(view, '항목 이름', 'other');
+  enter(view, '내용', '덮어쓰기');
+  press(view, '저장');
   assert.equal(calls.length, 0);
-});
-
-test('time setup retries an uncertain write with the same request and keeps other drafts', async () => {
-  const calls = [];
-  let revision = 7;
-  let saved;
-  const api = {
-    get: async () => ({ facts: saved ? [saved] : [], contextRevision: revision }),
-    post: async (path, body, options) => {
-      calls.push({ path, body: structuredClone(body), options: structuredClone(options) });
-      if (calls.length === 1) throw new ApiError('timeout', 'timeout', true);
-      saved = fact(body.key, body.value);
-      return { fact: saved, contextRevision: ++revision };
-    },
-  };
-  const view = harness.renderer(MemoryPanel, { api, onBack: () => {}, onMemoryChanged: () => {} });
+  assert.match(textOf(view.tree), /이미 저장된 이름/);
+  enter(view, '항목 이름', 'planning_preferences');
+  press(view, '저장');
+  assert.equal(calls.length, 0);
+  assert.match(textOf(view.tree), /다른 이름/);
+  press(view, 'focus 수정');
+  assert.equal(input(view, '항목 이름').props.editable, false);
+  assert.equal(input(view, '내용').props.value, '오전');
+  enter(view, '내용', '오후');
+  press(view, '저장');
   await view.settle();
-  enter(view, '준비시간 분', '15');
-  enter(view, '이동시간 분', '30');
-  press(view, '준비시간 저장');
-  await view.settle();
-  assert.equal(input(view, '준비시간 분').props.editable, false);
-  press(view, '같은 요청 다시 시도');
-  await view.settle();
-  assert.deepEqual(calls[1], calls[0]);
-  assert.equal(input(view, '준비시간 분').props.value, '');
-  assert.equal(input(view, '이동시간 분').props.value, '30');
-  assert.match(textOf(view.tree), /현재 저장값: 15분/);
-});
-
-test('saving one time and skipping does not write the other optional fields', async () => {
-  const calls = [];
-  const api = {
-    get: async () => ({ facts: [], contextRevision: 1 }),
-    post: async (path, body) => { calls.push({ path, body }); return { fact: fact(body.key, body.value), contextRevision: 2 }; },
-  };
-  let back = 0;
-  const view = harness.renderer(MemoryPanel, { api, onBack: () => { back += 1; }, onMemoryChanged: () => {} });
-  await view.settle();
-  enter(view, '이동시간 분', '30');
-  press(view, '이동시간 저장');
-  await view.settle();
-  press(view, '나중에 설정');
-  assert.equal(back, 1);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.key, 'travelMinutes');
-  assert.equal(calls[0].body.value, 30);
+  assert.deepEqual([calls[0].body.kind, calls[0].body.key, calls[0].body.value, calls[0].body.validUntil, calls[0].body.expectedContextRevision], ['preference', 'focus', '오후', null, 4]);
+});
+
+test('a new situation requires the user to choose its expiration', async () => {
+  const calls = [];
+  const api = { get: async () => ({ facts: [], contextRevision: 1 }), post: async (_path, body) => {
+    calls.push(body);
+    return { fact: { ...fact(body.key, body.value), kind: body.kind, validUntil: body.validUntil }, contextRevision: 2 };
+  } };
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+  await view.settle();
+  press(view, '선호 또는 상황 추가');
+  press(view, '일시 상황');
+  enter(view, '항목 이름', '상황');
+  enter(view, '내용', '이번 주 출장');
+  press(view, '저장');
+  assert.equal(calls.length, 0);
+  assert.match(textOf(view.tree), /기간을 선택/);
+  press(view, '오늘까지');
+  press(view, '저장');
+  await view.settle();
+  assert.equal(calls.length, 1);
+  assert.ok(Date.parse(calls[0].validUntil) > Date.now());
+});
+
+test('another unresolved write blocks new memory writes without discarding the draft', async () => {
+  const owner = {};
+  const calls = [];
+  const api = { get: async () => ({ facts: [], contextRevision: 1 }), post: async (_path, body) => {
+    calls.push(body);
+    return { fact: fact(body.key, body.value), contextRevision: 2 };
+  } };
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+  await view.settle();
+  press(view, '선호 또는 상황 추가');
+  enter(view, '항목 이름', 'focus');
+  enter(view, '내용', '오전');
+  operationGuard.update(owner, { status: 'error', error: new Error('unknown'), uncertain: true });
+  try {
+    press(view, '저장');
+    assert.equal(calls.length, 0);
+    assert.match(textOf(view.tree), /결과를 확인하지 못한 요청/);
+    assert.equal(input(view, '내용').props.value, '오전');
+  } finally { operationGuard.clear(owner); }
+  press(view, '저장');
+  await view.settle();
+  assert.equal(calls.length, 1);
+});
+
+test('editing an existing situation keeps its selected expiration unless changed', async () => {
+  const expiration = new Date(Date.now() + 60_000).toISOString();
+  const situation = { ...fact('trip', '출장 중'), kind: 'situation', validUntil: expiration };
+  const calls = [];
+  const api = { get: async () => ({ facts: [situation], contextRevision: 2 }), post: async (_path, body) => {
+    calls.push(body);
+    return { fact: { ...situation, value: body.value }, contextRevision: 3 };
+  } };
+  const originalTimer = globalThis.setTimeout;
+  globalThis.setTimeout = (...args) => { const timer = originalTimer(...args); timer.unref(); return timer; };
+  try {
+    const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+    await view.settle();
+    press(view, 'trip 수정');
+    const keep = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'radio' && textOf(node.children).startsWith('기존 기간 유지'));
+    assert.equal(keep.props.accessibilityState.checked, true);
+    enter(view, '내용', '출장 연장');
+    press(view, '저장');
+    await view.settle();
+    assert.equal(calls[0].validUntil, expiration);
+    assert.equal(calls[0].kind, 'situation');
+  } finally { globalThis.setTimeout = originalTimer; }
+});
+
+test('a definite conflict reloads the latest revision before a new request', async () => {
+  let reads = 0;
+  const calls = [];
+  const api = { get: async () => ({ facts: [], contextRevision: ++reads }), post: async (_path, body) => {
+    calls.push(structuredClone(body));
+    if (calls.length === 1) throw new ApiError('conflict', 'conflict', false, 409);
+    return { fact: fact(body.key, body.value), contextRevision: 3 };
+  } };
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+  await view.settle();
+  press(view, '선호 또는 상황 추가');
+  enter(view, '항목 이름', 'focus');
+  enter(view, '내용', '오전');
+  press(view, '저장');
+  await view.settle();
+  assert.equal(input(view, '내용').props.editable, false);
+  press(view, '최신 목록 확인 후 새 요청');
+  await view.settle();
+  assert.equal(input(view, '내용').props.value, '오전');
+  press(view, '저장');
+  await view.settle();
+  assert.deepEqual(calls.map(call => call.expectedContextRevision), [1, 2]);
+  assert.notEqual(calls[0].requestId, calls[1].requestId);
 });

@@ -209,57 +209,23 @@ test('a ready send response stays uncertain and retry preserves the exact intent
   assert.ok(requests[0].key);
 });
 
-test('phone connection and call use the requested contract and validate responses', async () => {
+test('phone connection status and call use the requested contract and validate responses', async () => {
   const phone = { ...sent, channel: 'phone' as const, recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone' as const, address: '+821012345678' } };
   const requests: any[] = [];
-  const responses = [{ status: 'not_configured', senderNumber: null, lastRequestId: null }, { status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' }, { contactRequest: phone }];
+  const responses = [{ status: 'not_configured', senderNumber: null, lastRequestId: null }, { contactRequest: phone }];
   const api: ApiClient = {
     get: async <T>(path: string) => { requests.push({ path }); return responses.shift() as T; },
     post: async <T>(path: string, body: object, options: object) => { requests.push({ path, body, options }); return responses.shift() as T; },
   };
   const client = createContactClient(api);
   assert.equal((await client.phoneConnection()).status, 'not_configured');
-  assert.equal((await client.connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' }))).status, 'available');
   assert.deepEqual(await client.call(op({ id: contactId, contactRevision: 1, expectedSenderNumber: '+15550000001' })), phone);
   assert.deepEqual(requests[0], { path: '/v1/phone-connection' });
-  assert.deepEqual(requests[1], { path: '/v1/phone-connection', body: { requestId: 'request-1', accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' }, options: { idempotencyKey: 'operation-1' } });
-  assert.deepEqual(requests[2], { path: '/v1/contact-requests/contact%20%2F%3F1/call', body: { requestId: 'request-1', contactRevision: 1, expectedSenderNumber: '+15550000001' }, options: { idempotencyKey: 'operation-1', timeoutMs: 60_000 } });
+  assert.deepEqual(requests[1], { path: '/v1/contact-requests/contact%20%2F%3F1/call', body: { requestId: 'request-1', contactRevision: 1, expectedSenderNumber: '+15550000001' }, options: { idempotencyKey: 'operation-1', timeoutMs: 60_000 } });
   await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: '01012345678' })).phoneConnection(), isInvalidResponse);
-  assert.deepEqual(await createContactClient(stub({ status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' })).phoneConnection(),
-    { status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' });
-  for (const lastRequestId of ['', 4, {}, 'wrong-request']) {
-    await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: '+15550000001', lastRequestId }))
-      .connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' })), isInvalidResponse);
-  }
+  assert.deepEqual(await createContactClient(stub({ status: 'available', senderNumber: '+15550000001', provider: 'clawops', mode: 'agent' })).phoneConnection(),
+    { status: 'available', senderNumber: '+15550000001', provider: 'clawops', mode: 'agent' });
   await assert.rejects(createContactClient(stub({ contactRequest: sent })).call(op({ id: contactId, contactRevision: 1, expectedSenderNumber: '+15550000001' })), isInvalidResponse);
-});
-
-test('ClawOps connection sends its own credential shape and requires the matching provider', async () => {
-  const input = { provider: 'clawops' as const, accountId: 'account', apiKey: 'key', signingSecret: 'signing', fromNumber: '+15550000001' };
-  const calls: any[] = [];
-  const api: ApiClient = { get: async <T>() => ({} as T), post: async <T>(path, body, options) => {
-    calls.push({ path, body, options }); return { status: 'available', provider: 'clawops', senderNumber: input.fromNumber, lastRequestId: 'request-1' } as T;
-  } };
-  assert.equal((await createContactClient(api).connectPhone(op(input))).provider, 'clawops');
-  assert.deepEqual(calls[0].body, { requestId: 'request-1', ...input });
-  for (const provider of [undefined, 'twilio', 'unknown']) {
-    await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: input.fromNumber, ...(provider ? { provider } : {}) })).connectPhone(op(input)), isInvalidResponse);
-  }
-  for (const lastRequestId of [undefined, null, 'other-request']) {
-    await assert.rejects(createContactClient(stub({ status: 'available', provider: 'clawops', senderNumber: input.fromNumber,
-      ...(lastRequestId === undefined ? {} : { lastRequestId }) })).connectPhone(op(input)), isInvalidResponse);
-  }
-  await assert.rejects(createContactClient(stub({ status: 'available', provider: 'clawops', senderNumber: input.fromNumber }))
-    .connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: input.fromNumber })), isInvalidResponse);
-});
-
-test('managed connection requires agent mode and its own matching receipt', async () => {
-  const input = { provider: 'clawops' as const, mode: 'agent' as const, accountId: 'account', apiKey: 'key', agentId: 'agent', fromNumber: '+15550000001' };
-  const response = { status: 'available', provider: 'clawops', mode: 'agent', senderNumber: input.fromNumber, lastRequestId: 'request-1' };
-  assert.deepEqual(await createContactClient(stub(response)).connectPhone(op(input)), response);
-  for (const invalid of [{ ...response, mode: undefined }, { ...response, mode: 'voiceml' }, { ...response, lastRequestId: undefined }]) {
-    await assert.rejects(createContactClient(stub(invalid)).connectPhone(op(input)), isInvalidResponse);
-  }
 });
 
 test('call check sends a scoped idempotent request and validates review metadata', async () => {

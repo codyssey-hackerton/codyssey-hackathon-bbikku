@@ -56,11 +56,12 @@ test('approved phone request and replay survive PostgreSQL and API reconnection'
     pools.push(pool);
     const store = new PostgresPlanningStore(pool);
     await store.migrate();
-    const app = buildApp({ sessions, store, clock, phoneConnections: new PhoneConnections({ directory, fetcher }), allowLocalPhoneConnect: true,
+    const connections = new PhoneConnections({ directory, fetcher });
+    const app = buildApp({ sessions, store, clock, phoneConnections: connections,
       voice: { publicBaseUrl: 'https://voice.example.test', sessionKey: Buffer.alloc(32, 4).toString('base64'),
         model: { async classify() { return { kind: 'unclear' }; } } } });
     apps.push(app);
-    return { pool, store, app };
+    return { pool, store, app, connections };
   };
   const post = async (app: ReturnType<typeof buildApp>, url: string, payload: object, key: string) => {
     const response = await app.inject({ method: 'POST', url, headers: headers(key), payload });
@@ -68,8 +69,8 @@ test('approved phone request and replay survive PostgreSQL and API reconnection'
     return response.json();
   };
   const first = await open();
-  const connected = await post(first.app, '/v1/phone-connection', { requestId: 'connect', ...credential }, 'connect');
-  assert.deepEqual(connected.data, { status: 'available', senderNumber: credential.fromNumber, lastRequestId: 'connect' });
+  const connected = await first.connections.connect('synthetic-user', credential, 'connect');
+  assert.deepEqual(connected, { status: 'available', senderNumber: credential.fromNumber, lastRequestId: 'connect' });
   assert.ok(!JSON.stringify(connected).includes(credential.authToken));
   const planning = new PlanningService(first.store, clock);
   const item = (await planning.command('synthetic-user', { expectedScheduleRevision: 0, changeSet: { changes: [

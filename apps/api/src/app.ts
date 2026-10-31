@@ -4,11 +4,18 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
-import { AgentExecutionFailure, type ModelPort } from './agent.ts';
+import { AgentExecutionFailure, type AgentMetrics, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
+import { chatContext } from './chat-context.ts';
 import { createExternalTools } from './external-tools.ts';
 import { createExternalAccountTools } from './external-account-tools.ts';
 import type { SessionResolver } from './auth.ts';
+import type { MemberAuth } from './member-auth.ts';
+import { registerMemberAuthRoutes } from './member-auth-routes.ts';
+import type { RoutineService } from './routine-service.ts';
+import { registerRoutineRoutes } from './routine-routes.ts';
+import type { CalendarSyncService } from './calendar-sync.ts';
+import { registerCalendarSyncRoutes } from './calendar-sync-routes.ts';
 import type { createGoogleOAuth } from './google-oauth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
 import { MODEL_ID, REASONING_EFFORT } from './model.ts';
@@ -24,6 +31,7 @@ import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
 import { managedCallBindingKey, PhoneDispatch } from './phone-dispatch.ts';
 import { createClawOpsReplies } from './clawops-replies.ts';
 import { createManagedCallWatch } from './clawops-call-watch.ts';
+import { ScheduleCallService } from './schedule-call-service.ts';
 import { VoiceTokens } from './voice-token.ts';
 import { VoiceWebhook } from './voice-webhook.ts';
 import type { VoiceClassifier } from './voice-model.ts';
@@ -34,7 +42,7 @@ import { ContactDispatch, gmailAvailable, type GmailContactPort } from './contac
 import { recipientBody, contactBody, contactDecisionBody } from './contact-schemas.ts';
 import { MemoryPlanningStore, type PlanningStore, type UserPlanningState } from './planning-store.ts';
 import { buildReviewEvents, type ReviewSchedulerRuntime, type TriggerEvent } from './scheduler.ts';
-import { checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timestamp, timezone } from './planning-schemas.ts';
+import { attendanceBody, checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timestamp, timezone, undoBody } from './planning-schemas.ts';
 
 class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable = false, readonly details?: unknown) { super(message); }
@@ -43,6 +51,18 @@ class ApiError extends Error {
 class RetryableChatProviderError extends ApiError {
   constructor(message: string) { super(503, 'provider_unavailable', message, true); }
 }
+
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { void work.catch(() => {}); reject(new AgentExecutionFailure('AGENT_DEADLINE')); return; }
+    const abort = () => reject(new AgentExecutionFailure('AGENT_DEADLINE'));
+    signal.addEventListener('abort', abort, { once: true });
+    work.then(value => { signal.removeEventListener('abort', abort); resolve(value); },
+      error => { signal.removeEventListener('abort', abort); reject(error); });
+  });
+}
+
+type ChatMetrics = { requestMs: number; prepareMs: number; finalizeMs: number; modelCalls: number; modelMs: number; toolCalls: number; toolMs: number };
 
 const nonblank = z.string().max(200).refine(value => value.trim().length > 0);
 const requestBody = z.object({ requestId: nonblank }).passthrough();
@@ -55,7 +75,8 @@ const chatBody = z.object({
     try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; }
   }),
   coordinationTarget: z.object({ id: nonblank, expectedRevision: z.number().int().min(1) }).strict().optional(),
-}).strict();
+  entryContext: chatContext.optional(),
+}).strict().refine(value => !(value.coordinationTarget && value.entryContext));
 const reviewTime = z.object({ enabled: z.boolean(), localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict()
   .refine(value => !value.enabled || value.localTime !== null);
 const reviewBody = z.object({ requestId: nonblank, expectedRevision: z.number().int().min(0), timezone, evening: reviewTime, morning: reviewTime }).strict();
@@ -73,13 +94,6 @@ const weatherBody = z.object({ destination: travelPoint, appointmentAt: timestam
 const subwayBody = z.object({ stationName: z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f/\\?#]/.test(value) && value !== '.' && value !== '..') }).strict();
 const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
-const phoneConnectBody = z.union([
-  z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict(),
-  z.object({ requestId: identifier, provider: z.literal('clawops'), accountId: identifier,
-    mode: z.literal('voiceml').optional(), apiKey: z.string().min(1).max(1024), signingSecret: z.string().min(1).max(1024), fromNumber: phoneNumber }).strict(),
-  z.object({ requestId: identifier, provider: z.literal('clawops'), mode: z.literal('agent'), accountId: identifier,
-    apiKey: z.string().min(1).max(1024), agentId: identifier, fromNumber: phoneNumber }).strict(),
-]);
 const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
 function requestId(request: FastifyRequest): string {
@@ -99,11 +113,13 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void>; chatDeadlineMs?: number; onChatMetrics?: (metrics: ChatMetrics) => void } = {}) {
+  const chatDeadlineMs = options.chatDeadlineMs ?? 120_000;
+  if (!Number.isSafeInteger(chatDeadlineMs) || chatDeadlineMs < 1 || chatDeadlineMs > 2_147_483_647) throw new Error('Invalid chat deadline');
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
-    origin: options.webOrigins, methods: ['GET', 'POST'],
+    origin: options.webOrigins, methods: ['GET', 'POST', 'PATCH'],
     allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'], maxAge: 600,
   });
   const authenticated = new WeakMap<FastifyRequest, string>();
@@ -111,6 +127,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   const idempotency = options.idempotency ?? (store.durable ? new RepositoryIdempotency(store, options.clock) : new MemoryIdempotency());
   const reviewIdempotency = store.durable ? idempotency : new RepositoryIdempotency(store, options.clock);
   const planning = new PlanningService(store, options.clock);
+  const scheduleCalls = new ScheduleCallService({ store, planning, connections: options.phoneConnections, model: options.model, clock: options.clock });
   const contacts = new ContactService(store, planning, options.clock);
   const contactResponses = new ContactResponseService(store, planning, options.clock);
   let voiceTokens: VoiceTokens | undefined; let voiceWebhook: VoiceWebhook | undefined;
@@ -273,14 +290,41 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   app.addHook('preHandler', async request => {
     if (request.routeOptions.url === '/health') return;
     if (request.method === 'GET' && request.routeOptions.url === '/v1/google/oauth/callback') return;
+    if (request.method === 'POST' && ['/v1/auth/google/start', '/v1/auth/google/complete'].includes(request.routeOptions.url ?? '')) return;
     // Only provider callbacks bypass session auth; each verifies its signature and bound call.
     if (request.method === 'POST' && ['/v1/voice/twilio/:token', '/v1/voice/clawops/:token'].includes(request.routeOptions.url ?? '')) return;
     const authorization = request.headers.authorization;
     const match = typeof authorization === 'string' ? /^Bearer ([^\s]+)$/i.exec(authorization) : null;
-    const session = match && options.sessions ? await options.sessions.resolve(match[1]) : null;
+    let memberUnavailable = false;
+    let session: Awaited<ReturnType<SessionResolver['resolve']>> = null;
+    if (match) {
+      try { session = await options.memberAuth?.resolve(match[1]) ?? null; }
+      catch { memberUnavailable = true; }
+      if (!session) session = await options.sessions?.resolve(match[1]) ?? null;
+    }
+    if (!session && memberUnavailable) throw new ApiError(503, 'provider_unavailable', '회원 인증 저장소에 연결할 수 없습니다.', true);
     if (!session || !session.userId) throw new ApiError(401, 'unauthenticated', '인증이 필요합니다.');
     authenticated.set(request, session.userId);
   });
+
+  const memberGuard = options.memberAuth ? registerMemberAuthRoutes(app, options.memberAuth,
+    { allowLocalInsecure: options.memberAllowLocalInsecure }) : undefined;
+  if (!options.memberAuth) {
+    const unavailable = () => { throw new ApiError(503, 'not_configured', '회원 인증 저장소가 준비되지 않았습니다.'); };
+    app.post('/v1/auth/google/start', unavailable);
+    app.post('/v1/auth/google/complete', unavailable);
+    app.get('/v1/auth/me', unavailable);
+    app.post('/v1/auth/logout', unavailable);
+  }
+  registerRoutineRoutes(app, { service: options.routineService, resolveUser: request => authenticated.get(request) });
+  if (options.calendarSync) registerCalendarSyncRoutes(app, { service: options.calendarSync, resolveUser: request => authenticated.get(request)!, idempotency });
+  else {
+    const unavailable = () => { throw new ApiError(503, 'not_configured', '캘린더 동기화 저장소가 준비되지 않았습니다.'); };
+    app.get('/v1/calendar-sync', unavailable);
+    app.get('/v1/calendar-sync/calendars', unavailable);
+    app.get('/v1/calendar-sync/operations/:requestId', unavailable);
+    for (const path of ['/v1/calendar-sync/connect', '/v1/calendar-sync/:id/run', '/v1/calendar-sync/:id/exports', '/v1/calendar-sync/:id/disconnect']) app.post(path, unavailable);
+  }
 
   app.after(() => {
   void app.register(async provider => {
@@ -336,8 +380,34 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   });
   app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listCalendars() }));
   app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listEvents(parse(calendarQuery, request.query)) }));
+  app.get('/v1/calendar-write-connection', async request => {
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.calendarWriteConnection;
+    return { requestId: request.id, data: { status: connection?.userId === userId ? 'available' : 'not_configured',
+      accountLabel: connection?.userId === userId ? connection.accountLabel : null } };
+  });
+  app.get('/v1/contacts/google/connection', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.contactsConnection;
+    return { requestId: request.id, data: { status: connection?.userId === userId ? 'available' : 'not_configured',
+      accountLabel: connection?.userId === userId ? connection.accountLabel : null } };
+  });
+  app.get('/v1/contacts/google/search', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const { q } = parse(z.object({ q: z.string().trim().min(1).max(100) }).strict(), request.query);
+    const userId = authenticated.get(request)!;
+    const connection = (await options.googleOAuth?.connections(userId))?.contactsConnection;
+    if (connection?.userId !== userId) throw new ApiError(503, 'not_configured', 'Google 연락처를 먼저 연결해 주세요.');
+    const controller = new AbortController();
+    const cancel = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once('aborted', cancel); reply.raw.once('close', cancel);
+    if (request.raw.aborted || reply.raw.destroyed) controller.abort();
+    try { return { requestId: request.id, data: await connection.searchContacts({ query: q }, { signal: controller.signal }) }; }
+    finally { request.raw.off('aborted', cancel); reply.raw.off('close', cancel); }
+  });
   app.post('/v1/google/oauth/start', async (request, reply) => {
-    const body = parse(z.object({ kind: z.enum(['calendar', 'gmail_send', 'gmail_read']) }).strict(), request.body);
+    const body = parse(z.object({ kind: z.enum(['calendar', 'calendar_write', 'gmail_send', 'gmail_read', 'contacts']) }).strict(), request.body);
     let result: Awaited<ReturnType<NonNullable<typeof options.googleOAuth>['start']>>;
     try { result = await options.googleOAuth?.start(authenticated.get(request)!, body.kind); }
     catch { throw new ApiError(503, 'not_configured', 'Google 연결이 설정되지 않았습니다.'); }
@@ -345,9 +415,14 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     reply.header('Cache-Control', 'no-store');
     return { requestId: request.id, data: result };
   });
-  app.get('/v1/google/oauth/callback', async (request, reply) => {
-    const query = z.object({ state: z.string().regex(/^[A-Za-z0-9_-]{43}$/), code: z.string().max(2048).optional() }).safeParse(request.query);
-    const confirmationCode = query.success ? await options.googleOAuth?.callback(query.data.state, query.data.code ?? '') : undefined;
+  app.get('/v1/google/oauth/callback', { onRequest: async (request, reply) => {
+    const query = request.query as Record<string, unknown> | undefined;
+    if (options.memberAuth?.ownsState(query?.state)) return memberGuard?.(request, reply);
+  } }, async (request, reply) => {
+    const query = z.object({ state: z.string().regex(/^(?:member_)?[A-Za-z0-9_-]{43}$/), code: z.string().max(2048).optional() }).safeParse(request.query);
+    const confirmationCode = !query.success ? undefined : options.memberAuth?.ownsState(query.data.state)
+      ? await options.memberAuth.callback(query.data.state, query.data.code ?? '')
+      : await options.googleOAuth?.callback(query.data.state, query.data.code ?? '');
     return reply.code(confirmationCode ? 200 : 400).header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer')
       .header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'").type('text/plain; charset=utf-8')
       .send(confirmationCode ? `앱으로 돌아가 아래 연결 확인 코드를 입력해 주세요.\n\n${confirmationCode}` : 'Google 연결을 완료하지 못했습니다. 앱에서 다시 시도해 주세요.');
@@ -412,13 +487,8 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     throw new ApiError(503, 'unavailable', '지하철 도착 조회를 사용할 수 없습니다.', true);
   });
   app.get('/v1/phone-connection', async request => ({ requestId: request.id, data: await options.phoneConnections?.status(authenticated.get(request)!) ?? { status: 'not_configured', senderNumber: null, lastRequestId: null } }));
-  app.post('/v1/phone-connection', async request => {
-    if (request.protocol !== 'https' && !options.allowLocalPhoneConnect) throw new ApiError(403, 'permission_denied', '안전한 연결이 필요합니다.');
-    if (!options.phoneConnections) throw new ApiError(503, 'not_configured', '전화 연결이 설정되지 않았습니다.');
-    if (!store.durable) throw new ApiError(503, 'not_configured', '전화 연결에는 지속 저장소가 필요합니다.');
-    const body = parse(phoneConnectBody, request.body);
-    const userId = authenticated.get(request)!;
-    return { requestId: body.requestId, data: await store.atomic(userId, () => options.phoneConnections!.connect(userId, body, body.requestId)) };
+  app.post('/v1/phone-connection', async () => {
+    throw new ApiError(403, 'permission_denied', '전화 연결은 서버에서 관리합니다.');
   });
 
   async function runIdempotent(request: FastifyRequest, operation: string, run: (body: z.infer<typeof requestBody>, control: IdempotencyControl) => Promise<HttpResult>): Promise<HttpResult> {
@@ -437,6 +507,36 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
       },
     });
   }
+
+  app.get('/v1/schedule-calls/:id', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    reply.header('Cache-Control', 'no-store');
+    return { requestId: request.id, data: await scheduleCalls.get(authenticated.get(request)!, id) };
+  });
+  app.post('/v1/schedule-calls', async (request, reply) => {
+    const body = parse(z.object({ requestId: nonblank, itemId: identifier, expectedRevision: z.number().int().positive(),
+      toNumber: z.string().trim().min(1).max(30) }).strict(), request.body);
+    const { requestId: _requestId, ...input } = body;
+    const result = await runIdempotent(request, 'schedule_call_create', async () => ({ status: 200,
+      body: { requestId: body.requestId, data: await scheduleCalls.create(authenticated.get(request)!, input) } }));
+    return reply.code(result.status).send(result.body);
+  });
+  for (const action of ['approve', 'check', 'propose'] as const) {
+    app.post(`/v1/schedule-calls/:id/${action}`, async (request, reply) => {
+      const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+      const body = parse(z.object({ requestId: nonblank, revision: z.number().int().positive() }).strict(), request.body);
+      const result = await runIdempotent(request, `schedule_call_${action}`, async () => ({ status: 200,
+        body: { requestId: body.requestId, data: await scheduleCalls[action](authenticated.get(request)!, id, { revision: body.revision }) } }));
+      return reply.code(result.status).send(result.body);
+    });
+  }
+  app.post('/v1/schedule-calls/:id/decision', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const body = parse(z.object({ requestId: nonblank, revision: z.number().int().positive(), decision: z.enum(['accept', 'reject']) }).strict(), request.body);
+    const result = await runIdempotent(request, 'schedule_call_decision', async () => ({ status: 200,
+      body: { requestId: body.requestId, data: await scheduleCalls.decide(authenticated.get(request)!, id, { revision: body.revision, decision: body.decision }) } }));
+    return reply.code(result.status).send(result.body);
+  });
 
   app.post('/v1/calendar/import', async (request, reply) => {
     const result = await runIdempotent(request, 'calendar_import', async (_requestBody, control) => {
@@ -463,7 +563,23 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     return reply.code(result.status).send(result.body);
   });
 
+  app.get('/v1/chat/requests/:requestId', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const { requestId: id } = parse(z.object({ requestId: nonblank }).strict(), request.params);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
+    const data = await idempotency.getChat?.(authenticated.get(request)!, key, id);
+    if (!data) throw new ApiError(404, 'not_found', '요청을 찾을 수 없습니다.');
+    return reply.send({ requestId: id, data });
+  });
+
   app.post('/v1/chat', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const started = performance.now();
+    const agentMetrics: AgentMetrics = { modelCalls: 0, modelMs: 0, toolCalls: 0, toolMs: 0 };
+    let prepareMs = 0; let finalizeMs = 0;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), chatDeadlineMs);
+    try {
     const result = await runIdempotent(request, 'chat', async (_requestBody, control) => {
       const body = parse(chatBody, request.body);
       if (!runner) throw new ApiError(503, 'not_configured', 'AI 연결이 설정되지 않았습니다.');
@@ -481,16 +597,25 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
       let completed = false;
       try {
         let prepared;
+        const prepareStarted = performance.now();
         try {
-          prepared = await runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
-            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget });
+          if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
+          prepared = await untilAborted(runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
+            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext },
+          { signal: controller.signal, metrics: agentMetrics }), controller.signal);
+          if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
           modelStatus = 'available';
         } catch (error) {
           if (!(error instanceof AgentExecutionFailure)) throw error;
           modelStatus = 'degraded';
           throw new RetryableChatProviderError('AI 요청을 처리하지 못했습니다.');
-        }
-        const result = await control.finalize(() => store.atomic(userId, async () => {
+        } finally { prepareMs += performance.now() - prepareStarted; }
+        // Once finalization starts its transaction, wait for its definitive outcome.
+        clearTimeout(deadline);
+        const finalizeStarted = performance.now();
+        let result: HttpResult;
+        let finished = false;
+        try { result = await control.finalize(() => store.atomic(userId, async () => {
           const conversation = (await store.read(userId)).conversations.get(conversationId);
           if (conversation?.lock?.token !== conversationToken || Date.parse(conversation.lock.until) <= now().getTime()) {
             throw new ApiError(409, 'operation_in_progress', '이 대화의 실행 권한이 만료되었습니다.', true, { conversationId });
@@ -502,9 +627,10 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
               ...(prepared.baseline.externalExpiresAt ? { externalExpiresAt: prepared.baseline.externalExpiresAt } : {}) }].slice(-20);
             delete current.lock;
           });
+          finished = true;
           return { status: 200, body: { requestId: body.requestId, data: { conversationId, result: agentResult } } };
-        }));
-        completed = true;
+        })); } finally { finalizeMs += performance.now() - finalizeStarted; }
+        completed = finished;
         return result;
       } finally {
         if (!completed) await store.transaction(userId, state => {
@@ -516,6 +642,14 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
       }
     });
     return reply.code(result.status).send(result.body);
+    } finally {
+      clearTimeout(deadline);
+      const end = performance.now();
+      const metrics: ChatMetrics = { requestMs: end - started, prepareMs, finalizeMs,
+        modelCalls: agentMetrics.modelCalls, modelMs: agentMetrics.modelMs + (agentMetrics.modelActiveAt === undefined ? 0 : end - agentMetrics.modelActiveAt),
+        toolCalls: agentMetrics.toolCalls, toolMs: agentMetrics.toolMs + (agentMetrics.toolActiveAt === undefined ? 0 : end - agentMetrics.toolActiveAt) };
+      try { if (options.onChatMetrics) options.onChatMetrics(metrics); else console.info('chat_metrics', metrics); } catch { /* Metrics never affect the request. */ }
+    }
   });
 
   app.get('/v1/schedule', async request => {
@@ -551,6 +685,22 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     const result = await runIdempotent(request, 'schedule_checkin', async () => {
       const body = parse(checkinBody, request.body);
       return { status: 200, body: { requestId: body.requestId, data: await planning.checkin(authenticated.get(request)!, id, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/schedule/:id/attendance', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const result = await runIdempotent(request, 'schedule_attendance', async () => {
+      const body = parse(attendanceBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await planning.attendance(authenticated.get(request)!, id, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/schedule/:id/undo', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const result = await runIdempotent(request, 'schedule_undo', async () => {
+      const body = parse(undoBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await planning.undo(authenticated.get(request)!, id, body) } };
     });
     return reply.code(result.status).send(result.body);
   });

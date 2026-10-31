@@ -118,7 +118,7 @@ const components = build({
       export { createChatClient } from './client'; export { createApiClient } from '../api/http';`,
     resolveDir: resolve(__dirname, '../src/chat'), loader: 'ts',
   },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface)|\.\/ChatScheduleSummary|\.\.\/contacts\/ContactPanel)$/ },
       (args) => ({ path: args.path, namespace: 'test-native' }));
@@ -216,7 +216,7 @@ test('validated proposals notify the latest parent callback once per successful 
   const { props, view } = await screen(fetcher, () => { previousCalls += 1; });
   send(view, '일정을 조정해 줘');
   assert.equal(previousCalls, 0);
-  assert.match(textOf(view.tree), /서버 응답을 기다리는 중/);
+  assert.match(textOf(view.tree), /답변을 준비하고 있어요/);
   const updated = { ...props, onProposalCreated: () => { currentCalls += 1; } };
   view.update(updated);
   first.resolve(chatResponse(proposal));
@@ -265,7 +265,7 @@ test('HTTP failure does not notify; a successful retry preserves the request and
   send(view, '일정 검토');
   await view.settle();
   assert.equal(calls, 0);
-  assert.match(textOf(view.tree), /서버 기능이 아직 설정되지 않았습니다/);
+  assert.match(textOf(view.tree), /AI 연결이 아직 설정되지 않았어요/);
   press(view, '같은 요청 다시 시도');
   assert.equal(calls, 0);
   assert.equal(requests[1].body, requests[0].body);
@@ -281,7 +281,7 @@ test('a malformed proposal response is rejected without notifying the parent', a
   send(view, '일정 검토');
   await view.settle();
   assert.equal(calls, 0);
-  assert.match(textOf(view.tree), /서버 응답 형식이 올바르지 않습니다/);
+  assert.match(textOf(view.tree), /서버 응답을 확인하지 못했어요/);
 });
 
 test('a late proposal from a remounted session cannot notify either session', async () => {
@@ -301,7 +301,7 @@ test('a late proposal from a remounted session cannot notify either session', as
   await view.settle();
   assert.equal(oldCalls, 0);
   assert.equal(newCalls, 0);
-  assert.match(textOf(view.tree), /서버 응답을 기다리는 중/);
+  assert.match(textOf(view.tree), /답변을 준비하고 있어요/);
   assert.doesNotMatch(textOf(view.tree), /새 제안을 확인하세요/);
   newResponse.resolve(chatResponse(proposal, 'new-conversation'));
   await view.settle();
@@ -416,4 +416,79 @@ test('proposal detail revision is read-only and unavailable during an unresolved
   decision.resolve({ outcome: 'applied', proposal: { ...proposal, status: 'applied' }, scheduleRevision: 2 });
   await view.settle();
   assert.equal(selected, undefined);
+});
+
+test('proposal summary keeps all decision-relevant changes visible without internal identifiers', async () => {
+  const { ProposalPanel } = await components;
+  const item = { id: 'private-event-id', revision: 3, kind: 'event', title: '기존 회의',
+    timeSlot: { startsAt: '2026-11-02T09:00:00.123456+09:00', endsAt: '2026-11-02T10:00:00+09:00', timezone: 'Asia/Seoul' },
+    durationMinutes: null, deadline: null, flexibility: 'flexible', involvement: 'personal', completion: 'pending', category: 'personal', attendance: 'unknown',
+    sourceRefs: [{ provider: 'google_calendar', accountRef: 'private@example.test', calendarId: 'private-calendar', externalEventId: 'private-external', lastSyncedAt: '2026-11-01T00:00:00Z' }] };
+  const { id, revision, sourceRefs, ...fields } = item;
+  const proposal = { id: 'private-proposal-id', revision: 2, mode: 'personal', baseScheduleRevision: 1, baseContextRevision: 1,
+    changeSet: { changes: [{ changeId: 'private-change-id', operation: 'update', targetId: id, expectedRevision: revision,
+      after: { ...fields, title: '변경 회의', timeSlot: { ...fields.timeSlot, startsAt: '2026-11-02T11:00:00+09:00', endsAt: '2026-11-02T12:00:00+09:00' },
+        durationMinutes: 60, deadline: '2026-11-03T12:00:00+09:00', flexibility: 'fixed', involvement: 'shared', category: 'work', attendance: 'absent', completion: 'incomplete' } }] },
+    beforeItems: [item], reason: '일정을 옮겨요', evidenceRefs: ['private-evidence'],
+    validation: { valid: true, conflicts: [], missingFields: [], protectedTargets: [], checkedScheduleRevision: 1, checkedContextRevision: 1, checkedAt: '2026-10-31T00:00:00Z' },
+    createdAt: '2026-10-31T00:00:00Z', expiresAt: '2026-11-03T12:00:00+09:00', status: 'pending', coordinationTarget: null };
+  const decisions: any[] = [];
+  const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal },
+    post: async (_path: string, body: any) => { decisions.push(body); return { outcome: 'applied', proposal: { ...proposal, status: 'applied' }, scheduleRevision: 2 }; } };
+  const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
+  await view.settle();
+  assert.doesNotMatch(textOf(view.tree), /private-proposal-id|생성:|버전:/);
+  press(view, '제안 일정을 옮겨요, 확인 대기, 상세 보기'); await view.settle();
+  const text = textOf(view.tree);
+  for (const value of ['기존 회의', '변경 회의', '09:00:00.123456+09:00', '11:00', '확인 기한:', '소요 시간:', '마감:', '시간 조정:', '참여 범위:', '분류:', '완료 상태:', '참석 상태:', '연결된 원본이 있는 일정']) assert.ok(text.includes(value), `missing ${value}`);
+  assert.doesNotMatch(text, /private-proposal-id|private-change-id|private-event-id|private@example\.test|private-calendar|private-external|private-evidence|서버 검증 결과|기준 일정 버전/);
+  assert.equal(decisions.length, 0);
+  press(view, '제안 승인'); await view.settle();
+  assert.equal(decisions.length, 1); assert.equal(decisions[0].proposalRevision, 2);
+});
+
+test('invalid proposal displays actionable conflict and missing information while approval stays disabled', async () => {
+  const { ProposalPanel } = await components;
+  const item = { id: 'event-hidden', revision: 1, kind: 'event', title: '겹치는 일정',
+    timeSlot: { startsAt: '2026-11-02T09:00:00+09:00', endsAt: '2026-11-02T10:00:00+09:00', timezone: 'Asia/Seoul' },
+    durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending', sourceRefs: [] };
+  const { id, revision, sourceRefs, ...fields } = item;
+  const proposal = { id: 'p-invalid', revision: 1, mode: 'personal', baseScheduleRevision: 1, baseContextRevision: 1,
+    changeSet: { changes: [{ changeId: 'c-invalid', operation: 'update', targetId: id, expectedRevision: revision, after: { ...fields, title: '새 일정' } }] },
+    beforeItems: [item], reason: '일정 변경', evidenceRefs: [],
+    validation: { valid: false, conflicts: [{ targetIds: [id], reason: 'overlap:c-invalid' }], missingFields: ['changes[0].after.deadline'], protectedTargets: [id], checkedScheduleRevision: 1, checkedContextRevision: 1, checkedAt: '2026-10-31T00:00:00Z' },
+    createdAt: '2026-10-31T00:00:00Z', expiresAt: null, status: 'pending', coordinationTarget: null };
+  const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal }, post: async () => { throw new Error('unexpected write'); } };
+  const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
+  await view.settle(); press(view, '제안 일정 변경, 확인 대기, 상세 보기'); await view.settle();
+  const text = textOf(view.tree);
+  assert.match(text, /시간이 겹칩니다/); assert.match(text, /빠진 정보: 마감/); assert.match(text, /보호된 일정: 겹치는 일정/);
+  assert.doesNotMatch(text, /overlap:|c-invalid|event-hidden/);
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === '제안 승인')?.props.disabled, true);
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === '제안 거절')?.props.disabled, false);
+});
+
+test('create and delete show meaningful values while default fields stay in collapsed details', async () => {
+  const { ProposalPanel } = await components;
+  const timeSlot = { startsAt: '2026-11-02T09:00:00+09:00', endsAt: '2026-11-02T10:00:00+09:00', timezone: 'Asia/Seoul' };
+  const item = { id: 'e1', revision: 1, kind: 'event', title: '기존 공동 일정', timeSlot, durationMinutes: 60,
+    deadline: '2026-11-03T10:00:00+09:00', flexibility: 'fixed', involvement: 'shared', completion: 'completed',
+    attendance: 'absent', category: 'work', sourceRefs: [] };
+  const created = { kind: 'event', title: '새 일정', timeSlot, durationMinutes: null, deadline: null,
+    flexibility: 'flexible', involvement: 'personal', completion: 'pending' };
+  const proposal = { id: 'p1', revision: 1, mode: 'personal', baseScheduleRevision: 0, baseContextRevision: 0,
+    changeSet: { changes: [{ changeId: 'add', operation: 'create', after: created }, { changeId: 'remove', operation: 'delete', targetId: item.id, expectedRevision: item.revision }] },
+    beforeItems: [item], reason: '일정 정리', evidenceRefs: [],
+    validation: { valid: true, conflicts: [], missingFields: [], protectedTargets: [], checkedScheduleRevision: 0, checkedContextRevision: 0, checkedAt: '2026-10-31T00:00:00Z' },
+    createdAt: '2026-10-31T00:00:00Z', expiresAt: null, status: 'pending', coordinationTarget: null };
+  const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal },
+    post: async () => { throw new Error('unexpected write'); } };
+  const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
+  await view.settle(); press(view, '제안 일정 정리, 확인 대기, 상세 보기'); await view.settle();
+  const collapsed = textOf(view.tree);
+  for (const value of ['새 일정', '기존 공동 일정', '공동', '고정', '소요 60분', '마감 ', '분류 업무', '완료 완료', '참석 불참']) assert.ok(collapsed.includes(value), `missing ${value}`);
+  assert.doesNotMatch(collapsed, /소요 미설정|마감 미설정|분류 미분류|완료 대기|참석 미기록/);
+  press(view, '상세 정보 보기');
+  assert.match(textOf(view.tree), /소요 미설정/); assert.match(textOf(view.tree), /마감 미설정/);
+  assert.match(textOf(view.tree), /분류 미분류/); assert.match(textOf(view.tree), /완료 대기/); assert.match(textOf(view.tree), /참석 미기록/);
 });

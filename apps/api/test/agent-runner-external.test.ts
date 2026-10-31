@@ -22,7 +22,7 @@ test('native external call is executed for the server user and returned to the s
   const output = success();
   const model = createResponsesModel('test-key', async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    assert.deepEqual(body.tools.map((tool: { name: string }) => tool.name), ['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes', ...names]);
+    assert.deepEqual(body.tools.map((tool: { name: string }) => tool.name), ['read_schedule', 'read_memory', 'calculate_timing', 'find_free_slots', 'validate_changes', ...names]);
     assert.equal(JSON.parse(body.input[1].content).message, input.message);
     requests++;
     if (requests === 1) return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'call1', name: 'get_weather', arguments: '{}' }] });
@@ -95,7 +95,7 @@ test('real geo and account tool schemas support a native place lookup with synth
   let calls = 0;
   const model = createResponsesModel('test-key', async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    assert.deepEqual(body.tools.slice(4).map((tool: { name: string }) => tool.name), names);
+    assert.deepEqual(body.tools.slice(5).map((tool: { name: string }) => tool.name), names);
     if (calls++ === 0) return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'place', name: 'search_places', arguments: '{"query":"시청"}' }] });
     const result = JSON.parse(body.input.at(-1).output);
     assert.equal(result.ok, true);

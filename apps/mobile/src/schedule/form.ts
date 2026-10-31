@@ -12,6 +12,7 @@ export interface ScheduleDraft {
   flexibility: ScheduleFields['flexibility'];
   involvement: ScheduleFields['involvement'];
   completion: ScheduleFields['completion'];
+  category: '' | 'personal' | 'work';
 }
 
 export function canCoordinate(item: ScheduleItem): boolean {
@@ -30,6 +31,7 @@ export function scheduleDraft(item: ScheduleItem | null, timezone: string): Sche
     flexibility: item?.flexibility ?? 'fixed',
     involvement: item?.involvement ?? 'personal',
     completion: item?.completion ?? 'pending',
+    category: item?.category ?? '',
   };
 }
 
@@ -50,6 +52,9 @@ export function scheduleFields(
   if (!draft.title.trim()) return { error: '제목을 입력해 주세요.' };
   if (original?.involvement === 'shared' && draft.involvement !== 'shared') {
     return { error: '기존 공동 일정은 개인 일정으로 바꿀 수 없습니다.' };
+  }
+  if (original?.attendance != null && draft.kind !== 'event') {
+    return { error: '참석 기록이 있는 일정은 할 일로 바꿀 수 없습니다.' };
   }
 
   const hasTime = draft.startsAt !== '' || draft.endsAt !== '';
@@ -90,7 +95,9 @@ export function scheduleFields(
       deadline: draft.deadline === '' ? null : draft.deadline,
       flexibility: draft.flexibility,
       involvement: draft.involvement,
-      completion: draft.completion,
+      completion: draft.kind === 'event' ? original?.completion ?? 'pending' : draft.completion,
+      ...(draft.category ? { category: draft.category } : original?.category !== undefined ? { category: null } : {}),
+      ...(draft.kind === 'event' && original && 'attendance' in original ? { attendance: original.attendance } : {}),
     },
   };
 }

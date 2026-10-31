@@ -35,5 +35,5 @@ export function useMutation<I, R>(execute: (op: Mutation<I>) => Promise<R>, onSu
       operationGuard.clear(owner.current);
     };
   }, [machine]);
-  return { state, submit: machine.submit, retry: machine.retry, reset: machine.reset };
+  return { state, submit: machine.submit, retry: machine.retry, reset: machine.reset, check: machine.check };
 }

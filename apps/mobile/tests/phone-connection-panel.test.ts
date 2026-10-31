@@ -108,7 +108,7 @@ const harness = createHarness();
 const components = build({
   stdin: { contents: `export { default as PhoneConnectionPanel } from '../src/contacts/PhoneConnectionPanel';
     export { ApiError } from '../src/api/http'; export { operationGuard } from '../src/api/operationGuard';`, resolveDir: resolve(__dirname), loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ contents:
@@ -131,168 +131,56 @@ function textOf(node: any): string {
   return typeof node === 'object' ? textOf(node.children) : String(node);
 }
 function button(view: any, label: string) { return nodes(view.tree).find(n => n.type === 'Pressable' && n.props.accessibilityLabel === label); }
-function input(view: any, label: string) { const found = nodes(view.tree).find(n => n.type === 'TextInput' && n.props.accessibilityLabel === label); assert.ok(found); return found; }
-function press(view: any, label: string) { const found = button(view, label); assert.ok(found); assert.notEqual(found.props.disabled, true); found.props.onPress(); view.flush(); }
-function enter(view: any, label: string, value: string) { const found = input(view, label); assert.notEqual(found.props.editable, false); found.props.onChangeText(value); view.flush(); }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function mockApi(initial: any = { status: 'not_configured', senderNumber: null }) {
   const calls: any[] = [];
-  const api: any = { status: initial, postHook: undefined, getHook: undefined,
-    async get(path: string) { calls.push({ method: 'GET', path }); if (api.getHook) return api.getHook(path); return api.status; },
-    async post(path: string, body: any, options: any) { calls.push({ method: 'POST', path, body, options }); if (api.postHook) return api.postHook(path, body, options); return { status: 'available', senderNumber: body.fromNumber }; },
+  const api: any = { status: initial, getHook: undefined,
+    async get(path: string) { calls.push({ method: 'GET', path }); return api.getHook ? api.getHook(path) : api.status; },
+    async post(path: string) { calls.push({ method: 'POST', path }); throw new Error('unexpected POST'); },
   };
   return { api, calls };
 }
-function fill(view: any, number = '+15550000001') {
-  press(view, 'Twilio 선택');
-  enter(view, '전화 계정 SID', 'test-sid'); enter(view, '전화 인증 토큰', 'test-token'); enter(view, '발신 전화번호', number);
-}
+function press(view: any, label: string) { const found = button(view, label); assert.ok(found); assert.notEqual(found.props.disabled, true); found.props.onPress(); view.flush(); }
 
-test('기본 자연 음성 연결은 에이전트 ID와 E.164 번호가 필요하고 전송 즉시 입력을 비운다', async t => {
-  const { PhoneConnectionPanel, operationGuard } = await components;
-  const mock = mockApi(); const pending = deferred<any>(); mock.api.postHook = () => pending.promise;
-  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
-  await view.settle();
-  assert.equal(button(view, 'ClawOps 선택').props.accessibilityState.checked, true);
-  assert.equal(button(view, '자연 음성 대화 선택').props.accessibilityState.checked, true);
-  assert.equal(nodes(view.tree).some((n: any) => n.props?.accessibilityLabel === 'ClawOps 서명 비밀'), false);
-  for (const label of ['ClawOps 계정 ID', 'ClawOps API 키', 'ClawOps 에이전트 ID']) assert.equal(input(view, label).props.secureTextEntry, true);
-  enter(view, 'ClawOps 계정 ID', 'test-account'); enter(view, 'ClawOps API 키', 'test-key'); enter(view, '발신 전화번호', '+15550000001');
-  assert.equal(button(view, '전화 연결 설정').props.disabled, true);
-  enter(view, 'ClawOps 에이전트 ID', 'test-agent'); press(view, '전화 연결 설정');
-  for (const label of ['ClawOps 계정 ID', 'ClawOps API 키', 'ClawOps 에이전트 ID', '발신 전화번호']) assert.equal(input(view, label).props.value, '');
-  const call = mock.calls.find((item: any) => item.method === 'POST');
-  assert.deepEqual({ ...call.body, requestId: 'request' }, { requestId: 'request', provider: 'clawops', mode: 'agent', accountId: 'test-account', apiKey: 'test-key', agentId: 'test-agent', fromNumber: '+15550000001' });
-  assert.equal(operationGuard.hasUnresolved(), true);
-  pending.resolve({ status: 'available', provider: 'clawops', mode: 'agent', senderNumber: '+15550000001', lastRequestId: call.body.requestId }); await view.settle();
-  assert.match(textOf(view.tree), /제공자: ClawOps/); assert.equal(operationGuard.hasUnresolved(), false);
-});
-
-test('ClawOps 요청의 다른 제공자 응답과 불명 복구는 성공으로 처리하지 않는다', async t => {
-  const { PhoneConnectionPanel, operationGuard } = await components;
-  const mock = mockApi(); mock.api.postHook = (_path: string, body: any) => ({ status: 'available', provider: 'twilio', senderNumber: body.fromNumber, lastRequestId: body.requestId });
-  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
-  await view.settle(); press(view, '키패드 방식 선택'); enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key');
-  enter(view, 'ClawOps 서명 비밀', 'signing'); enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
-  const requestId = mock.calls.find((item: any) => item.method === 'POST').body.requestId;
-  assert.equal(operationGuard.hasUnresolved(), true); assert.doesNotMatch(textOf(view.tree), /전화 연결을 확인했습니다/);
-  for (const provider of [undefined, 'twilio']) {
-    mock.api.status = { status: 'available', senderNumber: '+15550000001', lastRequestId: requestId, ...(provider ? { provider } : {}) };
-    press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
-  }
-  mock.api.status = { status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: requestId };
-  press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
-});
-
-test('자연 음성 요청의 불명 복구는 같은 번호와 receipt라도 agent 모드가 필요하다', async t => {
-  const { PhoneConnectionPanel, ApiError, operationGuard } = await components;
-  const mock = mockApi(); mock.api.postHook = () => { throw new ApiError('timeout', 'timeout', true); };
-  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
-  await view.settle(); enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key');
-  enter(view, 'ClawOps 에이전트 ID', 'agent'); enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
-  const requestId = mock.calls.find((item: any) => item.method === 'POST').body.requestId;
-  for (const mode of [undefined, 'voiceml']) {
-    mock.api.status = { status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: requestId, ...(mode ? { mode } : {}) };
-    press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
-  }
-  mock.api.status = { status: 'available', provider: 'clawops', mode: 'agent', senderNumber: '+15550000001', lastRequestId: requestId };
-  press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
-});
-
-test('연결 상태 조회와 E.164 검증 후 명시적 설정만 전송하고 즉시 입력을 비운다', async t => {
-  const { PhoneConnectionPanel, operationGuard } = await components;
-  const mock = mockApi(); const pending = deferred<any>(); mock.api.postHook = () => pending.promise; let backs = 0;
+test('미설정 상태는 운영자 안내만 표시하고 GET으로 확인한다', async t => {
+  const { PhoneConnectionPanel } = await components;
+  const mock = mockApi(); let backs = 0;
   const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => backs++ }); t.after(() => view.unmount());
-  await view.settle(); assert.match(textOf(view.tree), /설정되지 않았습니다/);
-  press(view, 'Twilio 선택');
-  assert.equal(input(view, '전화 계정 SID').props.secureTextEntry, true); assert.equal(input(view, '전화 인증 토큰').props.secureTextEntry, true);
-  fill(view, '01012345678'); assert.equal(button(view, '전화 연결 설정').props.disabled, true);
-  enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정');
-  for (const label of ['전화 계정 SID', '전화 인증 토큰', '발신 전화번호']) assert.equal(input(view, label).props.value, '');
-  assert.equal(button(view, '뒤로').props.disabled, true); assert.equal(operationGuard.hasUnresolved(), true);
-  assert.equal(mock.calls.length, 2); assert.equal(mock.calls[1].path, '/v1/phone-connection');
-  assert.deepEqual(Object.keys(mock.calls[1].body).sort(), ['accountSid', 'authToken', 'fromNumber', 'requestId']);
-  assert.ok(mock.calls[1].options.idempotencyKey);
-  pending.resolve({ status: 'available', senderNumber: '+15550000001' }); await view.settle();
-  assert.match(textOf(view.tree), /연결됨 · 발신 번호: \+15550000001/); assert.equal(operationGuard.hasUnresolved(), false);
+  await view.settle();
+  assert.match(textOf(view.tree), /전화 연결이 설정되지 않았습니다.*운영자에게 문의/);
+  assert.equal(nodes(view.tree).some((n: any) => n.type === 'TextInput'), false);
+  assert.equal(button(view, '전화 연결 설정'), undefined);
+  assert.deepEqual(mock.calls, [{ method: 'GET', path: '/v1/phone-connection' }]);
   press(view, '뒤로'); assert.equal(backs, 1);
-  assert.equal(mock.calls.some((c: any) => c.path.endsWith('/call')), false);
 });
 
-test('결과 불명은 정확한 번호와 요청 receipt가 모두 일치해야 복구한다', async t => {
-  const { PhoneConnectionPanel, ApiError, operationGuard } = await components;
-  const mock = mockApi(); mock.api.postHook = () => { throw new ApiError('timeout', 'secret should not appear', true); };
-  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} }); t.after(() => view.unmount());
-  await view.settle(); fill(view); press(view, '전화 연결 설정'); await view.settle();
-  const requestId = mock.calls.find((c: any) => c.method === 'POST').body.requestId;
-  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '뒤로').props.disabled, true);
-  assert.doesNotMatch(textOf(view.tree), /secret should not appear|test-token|test-sid/);
-  for (const status of [
-    { status: 'available', senderNumber: '+15550000002', lastRequestId: requestId },
-    { status: 'available', senderNumber: '+15550000001' },
-    { status: 'available', senderNumber: '+15550000001', lastRequestId: null },
-    { status: 'available', senderNumber: '+15550000001', lastRequestId: 'previous-request' },
-    { status: 'not_configured', senderNumber: null, lastRequestId: requestId },
-  ]) {
-    mock.api.status = status; press(view, '전화 연결 상태 확인'); await view.settle();
-    assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '뒤로').props.disabled, true);
-  }
-  mock.api.status = { status: 'available', senderNumber: '+15550000001', lastRequestId: requestId };
+test('연결 상태를 다시 조회하고 발신 번호를 표시한다', async t => {
+  const { PhoneConnectionPanel } = await components;
+  const mock = mockApi(); const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
+  await view.settle(); mock.api.status = { status: 'available', senderNumber: '+15550000001', provider: 'clawops', mode: 'agent' };
   press(view, '전화 연결 상태 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), false); assert.equal(button(view, '뒤로').props.disabled, false);
-  assert.equal(mock.calls.filter((c: any) => c.method === 'POST').length, 1);
+  assert.match(textOf(view.tree), /연결됨.*\+15550000001/);
+  assert.equal(mock.calls.length, 2); assert.ok(mock.calls.every((call: any) => call.method === 'GET'));
 });
 
-test('기존과 동일한 발신 번호도 새 요청 receipt가 일치하면 복구한다', async t => {
-  const { PhoneConnectionPanel, ApiError, operationGuard } = await components;
-  const mock = mockApi({ status: 'available', senderNumber: '+15550000001', lastRequestId: 'old-request' });
-  mock.api.postHook = () => { throw new ApiError('timeout', 'timeout', true); };
-  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} }); t.after(() => view.unmount());
-  await view.settle(); fill(view); press(view, '전화 연결 설정'); await view.settle();
-  const requestId = mock.calls.find((c: any) => c.method === 'POST').body.requestId;
-  press(view, '전화 연결 상태 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '뒤로').props.disabled, true);
-  mock.api.status = { status: 'available', senderNumber: '+15550000001', lastRequestId: requestId };
-  press(view, '전화 연결 상태 확인'); await view.settle();
-  assert.equal(operationGuard.hasUnresolved(), false); assert.equal(button(view, '뒤로').props.disabled, false);
+test('조회 실패는 접근 가능한 오류와 재시도를 제공한다', async t => {
+  const { PhoneConnectionPanel } = await components;
+  const mock = mockApi(); mock.api.getHook = () => { throw new Error('offline'); };
+  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
+  await view.settle(); assert.ok(nodes(view.tree).some((n: any) => n.props?.accessibilityRole === 'alert'));
+  assert.match(textOf(view.tree), /확인하지 못했습니다/);
+  mock.api.getHook = undefined; press(view, '다시 시도'); await view.settle();
+  assert.match(textOf(view.tree), /운영자에게 문의/); assert.equal(mock.calls.length, 2);
 });
 
-test('정상 POST의 다른 receipt 또는 null은 불명 상태로 보존한다', async t => {
-  const { PhoneConnectionPanel, operationGuard } = await components;
-  for (const receipt of ['other-request', null]) {
-    const mock = mockApi();
-    mock.api.postHook = () => ({ status: 'available', senderNumber: '+15550000001', lastRequestId: receipt });
-    const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} });
-    await view.settle(); fill(view); press(view, '전화 연결 설정'); await view.settle();
-    assert.equal(operationGuard.hasUnresolved(), true); assert.equal(button(view, '뒤로').props.disabled, true);
-    const requestId = mock.calls.find((c: any) => c.method === 'POST').body.requestId;
-    mock.api.status = { status: 'available', senderNumber: '+15550000001', lastRequestId: requestId };
-    press(view, '전화 연결 상태 확인'); await view.settle();
-    assert.equal(operationGuard.hasUnresolved(), false);
-    view.unmount();
-  }
-});
-
-test('정상 POST는 일치 receipt 또는 레거시 누락 receipt를 수용한다', async t => {
-  const { PhoneConnectionPanel, operationGuard } = await components;
-  for (const receipt of ['matching', 'missing']) {
-    const mock = mockApi();
-    mock.api.postHook = (_path: string, body: any) => ({ status: 'available', senderNumber: body.fromNumber,
-      ...(receipt === 'missing' ? {} : { lastRequestId: body.requestId }) });
-    const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} });
-    await view.settle(); fill(view); press(view, '전화 연결 설정'); await view.settle();
-    assert.equal(operationGuard.hasUnresolved(), false, receipt); assert.equal(button(view, '뒤로').props.disabled, false);
-    view.unmount();
-  }
-});
-
-test('인증 실패는 안전한 문구만 보여주고 뒤로 이동 후 재진입 시 입력이 없다', async t => {
-  const { PhoneConnectionPanel, ApiError } = await components;
-  const mock = mockApi(); mock.api.postHook = () => { throw new ApiError('unauthenticated', 'sensitive server error', false, 401); };
-  let backs = 0; const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => backs++ });
-  await view.settle(); fill(view); press(view, '전화 연결 설정'); await view.settle();
-  assert.match(textOf(view.tree), /연결된 세션을 확인/); assert.doesNotMatch(textOf(view.tree), /sensitive server error|test-token/);
-  press(view, '뒤로'); assert.equal(backs, 1); view.unmount();
-  const reopened = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} }); t.after(() => reopened.unmount());
-  await reopened.settle(); press(reopened, 'Twilio 선택'); assert.equal(input(reopened, '전화 인증 토큰').props.value, ''); assert.equal(input(reopened, '전화 계정 SID').props.value, '');
+test('서버 전환 뒤 이전 조회 응답은 반영하지 않는다', async () => {
+  const { PhoneConnectionPanel } = await components;
+  const first = mockApi(); const pending = deferred<any>(); first.api.getHook = () => pending.promise;
+  const second = mockApi({ status: 'available', senderNumber: '+15550000001' });
+  const view = harness.renderer(PhoneConnectionPanel, { api: first.api, onBack() {} });
+  view.update({ api: second.api, onBack() {} }); await view.settle();
+  assert.match(textOf(view.tree), /연결됨/);
+  pending.resolve({ status: 'not_configured', senderNumber: null }); await view.settle();
+  assert.match(textOf(view.tree), /연결됨/); assert.doesNotMatch(textOf(view.tree), /운영자에게 문의/);
+  view.unmount();
 });

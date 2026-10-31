@@ -5,14 +5,18 @@ import { googleUserInfo, readGmailCredential } from './gmail-connection.ts';
 import { getGmailConnection } from './gmail-connection.ts';
 import { getGmailReplyConnection } from './gmail-reply-connection.ts';
 import { getCalendarConnection } from './google-calendar.ts';
+import { getCalendarWriteConnection } from './google-calendar-write.ts';
+import { getContactsConnection } from './google-contacts.ts';
 
-export type GoogleOAuthKind = 'calendar' | 'gmail_send' | 'gmail_read';
+export type GoogleOAuthKind = 'calendar' | 'calendar_write' | 'gmail_send' | 'gmail_read' | 'contacts';
 const scopes: Record<GoogleOAuthKind, string[]> = {
   calendar: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events.readonly', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'],
+  calendar_write: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'],
   gmail_send: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.send'],
   gmail_read: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly'],
+  contacts: ['openid', 'email', 'https://www.googleapis.com/auth/contacts.readonly'],
 };
-const filenames: Record<GoogleOAuthKind, string> = { calendar: 'calendar-connection.json', gmail_send: 'gmail-connection.json', gmail_read: 'gmail-replies-connection.json' };
+const filenames: Record<GoogleOAuthKind, string> = { calendar: 'calendar-connection.json', calendar_write: 'calendar-write-connection.json', gmail_send: 'gmail-connection.json', gmail_read: 'gmail-replies-connection.json', contacts: 'contacts-connection.json' };
 const b64 = () => randomBytes(32).toString('base64url');
 type Flow = { userId: string; kind: GoogleOAuthKind; verifier: string; completionHash: Buffer; expiresAt: number; ticketHash?: string };
 type Pending = { flow: Flow; senderAddress: string; subject: string; refreshToken: string };
@@ -20,7 +24,9 @@ type Connections = {
   gmailContact?: Awaited<ReturnType<typeof getGmailConnection>>;
   gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>;
   calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>;
-  blocked?: { gmailContact: boolean; gmailReplyConnection: boolean; calendarConnection: boolean };
+  calendarWriteConnection?: Awaited<ReturnType<typeof getCalendarWriteConnection>>;
+  contactsConnection?: Awaited<ReturnType<typeof getContactsConnection>>;
+  blocked?: { gmailContact: boolean; gmailReplyConnection: boolean; calendarConnection: boolean; calendarWriteConnection: boolean; contactsConnection: boolean };
 };
 
 export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: typeof fetch; clock?: () => number; legacyGmail?: { userId: string; credentialPath: string } }) {
@@ -139,7 +145,7 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
   }
   async function connections(userId: string): Promise<Connections> {
     if (!configured) return {};
-    const blocked = { gmailContact: true, gmailReplyConnection: true, calendarConnection: true };
+    const blocked = { gmailContact: true, gmailReplyConnection: true, calendarConnection: true, calendarWriteConnection: true, contactsConnection: true };
     try {
       const dir = userDir(userId); await privateDirectory(directory!);
       try { await privateDirectory(dir); } catch (error) {
@@ -149,14 +155,22 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
       const exists = async (path: string) => { try { await lstat(path); return true; } catch (error) { return (error as NodeJS.ErrnoException)?.code !== 'ENOENT'; } };
       blocked.gmailContact = await exists(join(dir, filenames.gmail_send));
       blocked.gmailReplyConnection = blocked.gmailContact || await exists(join(dir, filenames.gmail_read));
-      blocked.calendarConnection = await exists(join(dir, filenames.calendar));
+      const calendarReadPath = join(dir, filenames.calendar), calendarWritePath = join(dir, filenames.calendar_write);
+      const hasCalendarRead = await exists(calendarReadPath);
+      blocked.calendarWriteConnection = await exists(calendarWritePath);
+      blocked.calendarConnection = hasCalendarRead || blocked.calendarWriteConnection;
+      blocked.contactsConnection = await exists(join(dir, filenames.contacts));
       let gmailContact: Awaited<ReturnType<typeof getGmailConnection>>;
       let gmailReplyConnection: Awaited<ReturnType<typeof getGmailReplyConnection>>;
       let calendarConnection: Awaited<ReturnType<typeof getCalendarConnection>>;
+      let calendarWriteConnection: Awaited<ReturnType<typeof getCalendarWriteConnection>>;
+      let contactsConnection: Awaited<ReturnType<typeof getContactsConnection>>;
       try { gmailContact = await getGmailConnection({ env, credentialPath: join(dir, filenames.gmail_send), userId, fetcher }); } catch { /* independently unavailable */ }
       try { gmailReplyConnection = await getGmailReplyConnection({ env, credentialPath: join(dir, filenames.gmail_read), sendCredentialPath: await sendPath(userId), userId, fetcher }); } catch { /* independently unavailable */ }
-      try { calendarConnection = await getCalendarConnection({ env, credentialPath: join(dir, filenames.calendar), userId, fetcher }); } catch { /* independently unavailable */ }
-      return { gmailContact, gmailReplyConnection, calendarConnection, blocked };
+      try { calendarConnection = await getCalendarConnection({ env, credentialPath: hasCalendarRead ? calendarReadPath : calendarWritePath, userId, fetcher }); } catch { /* independently unavailable */ }
+      try { calendarWriteConnection = await getCalendarWriteConnection({ env, credentialPath: calendarWritePath, userId, fetcher }); } catch { /* independently unavailable */ }
+      try { contactsConnection = await getContactsConnection({ env, credentialPath: join(dir, filenames.contacts), userId, fetcher }); } catch { /* independently unavailable */ }
+      return { gmailContact, gmailReplyConnection, calendarConnection, calendarWriteConnection, contactsConnection, blocked };
     } catch { return { blocked }; }
   }
   return { start, callback, complete, connections };

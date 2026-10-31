@@ -39,9 +39,9 @@ test('a read-only provider failure can retry the same key once at a time and cre
   assert.equal(changed.json().error.code, 'idempotency_conflict');
   assert.equal(calls, 2);
 
-  const retry = app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('retry') }).then(response => response);
+  const retry = app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') }).then(response => response);
   await retryStarted;
-  const concurrent = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('concurrent') });
+  const concurrent = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.equal(concurrent.statusCode, 409);
   assert.equal(concurrent.json().error.code, 'operation_in_progress');
   const conflicting = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: { ...chat('concurrent'), message: '다른 요청' } });
@@ -52,7 +52,7 @@ test('a read-only provider failure can retry the same key once at a time and cre
   assert.equal(succeeded.json().data.result.kind, 'proposal');
   assert.equal((await store.read('alice')).proposals.size, 1);
   assert.equal(calls, 3);
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('again') });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.deepEqual(replay.json(), succeeded.json());
   assert.equal((await store.read('alice')).proposals.size, 1);
   assert.equal(calls, 3);
@@ -70,7 +70,7 @@ test('invalid read-tool arguments can be retried without saving anything', async
   const first = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.equal(first.statusCode, 503);
   assert.equal(first.json().error.code, 'provider_unavailable');
-  const second = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('second') });
+  const second = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.equal(second.statusCode, 200);
   assert.equal(second.json().data.result.kind, 'reply');
   assert.equal((await store.read('alice')).proposals.size, 0);
@@ -133,7 +133,7 @@ test('a failure after proposal commit remains a cached 500 and cannot create a s
   assert.equal(first.statusCode, 500);
   assert.equal(first.json().error.code, 'internal_error');
   assert.equal((await store.read('alice')).proposals.size, 1);
-  const retry = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('retry') });
+  const retry = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.deepEqual(retry.json(), first.json());
   assert.equal((await store.read('alice')).proposals.size, 1);
   assert.equal(store.calls, 1);
@@ -180,7 +180,7 @@ test('other 503s and all 500s remain cached even if a caller incorrectly marks t
         ...(item.marked ? { retryableWithoutEffects: true as const } : {}) };
     } };
     const first = await idempotency.execute(input);
-    const replay = await idempotency.execute({ ...input, requestId: 'second' });
+    const replay = await idempotency.execute({ ...input, requestId: item.operation === 'chat' ? 'first' : 'second' });
     assert.deepEqual(replay, first);
     assert.equal(calls, 1);
   }
@@ -202,7 +202,7 @@ test('a validation exception is not misclassified as a retryable provider failur
   assert.equal(first.statusCode, 500);
   assert.equal(first.json().error.code, 'internal_error');
   assert.equal((await store.read('alice')).proposals.size, 0);
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('retry') });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers(), payload: chat('first') });
   assert.deepEqual(replay.json(), first.json());
   assert.equal(modelCalls, 1);
 });

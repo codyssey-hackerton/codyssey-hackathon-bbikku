@@ -13,6 +13,9 @@ export interface ScheduleFields {
   flexibility: "fixed" | "flexible";
   involvement: "personal" | "shared";
   completion: "pending" | "completed" | "incomplete" | "unknown";
+  category?: "personal" | "work" | null;
+  attendance?: "attended" | "absent" | "unknown" | null;
+  location?: string | null;
 }
 
 export interface ScheduleItem extends ScheduleFields {
@@ -133,6 +136,7 @@ export interface Approval {
 
 export type AgentResult =
   | { kind: "reply"; message: string }
+  | { kind: "phone_request"; message: string; itemId: string; expectedRevision: number }
   | { kind: "question"; message: string; missingFields: string[] }
   | { kind: "proposal"; message: string; proposalIds: string[] }
   | { kind: "failure"; message: string; code: string; retryable: boolean };

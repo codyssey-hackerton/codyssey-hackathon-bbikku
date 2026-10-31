@@ -4,7 +4,7 @@ import { Text } from '../ui/typography';
 import { colors } from '../ui/theme';
 import { ActionButton } from '../ui/ActionButton';
 import { Icon } from '../ui/Icon';
-import type { ScheduleItem, TimeSlot } from '@pikku/domain';
+import type { TimeSlot } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import ContactPanel from '../contacts/ContactPanel';
@@ -16,13 +16,14 @@ interface Props {
   onScheduleChanged: () => void;
   onBack: () => void;
   onRequestRevision: (proposal: Proposal) => void;
+  onOpenGoogleContacts?: () => void;
 }
 
 type Load<T> = { status: 'loading' } | { status: 'error'; error: unknown } | { status: 'success'; data: T };
 
 const statusText: Record<Proposal['status'], string> = {
   pending: '확인 대기', awaiting_contact: '연락 대기', applied: '적용됨', rejected: '거절됨',
-  stale: '기준 변경됨', expired: '만료됨', failed: '처리 실패',
+  stale: '다시 확인 필요', expired: '만료됨', failed: '처리 실패',
 };
 
 function errorCode(error: unknown): string | undefined {
@@ -34,13 +35,13 @@ function errorMessage(error: unknown): string {
     case 'stale_proposal': return '일정 또는 맥락이 바뀌어 이 제안을 다시 확인해야 합니다.';
     case 'expired_proposal': return '제안이 만료되었습니다. 다시 조회해 상태를 확인하세요.';
     case 'conflict': return '현재 일정과 충돌하거나 기준이 변경되었습니다. 다시 조회해 확인하세요.';
-    case 'idempotency_conflict': return '요청 중복 키가 다른 내용과 충돌했습니다. 다시 조회해 확인하세요.';
+    case 'idempotency_conflict': return '이전 요청과 내용이 달라 다시 확인해야 합니다.';
     case 'contact_required': return '공동 일정은 별도의 연락 조정이 필요합니다.';
     case 'missing_information': return '처리에 필요한 정보가 부족합니다. 다시 조회해 확인하세요.';
     case 'not_found': return '제안을 찾을 수 없습니다.';
     case 'permission_denied': return '이 제안에 접근할 권한이 없습니다.';
     case 'not_configured': return '제안 서비스가 아직 설정되지 않았습니다.';
-    case 'not_implemented': return '제안 기능이 아직 구현되지 않았습니다.';
+    case 'not_implemented': return '제안 기능을 아직 사용할 수 없습니다.';
     case 'unauthenticated': return '제안을 보려면 로그인 또는 세션 설정이 필요합니다.';
     case 'invalid_configuration': return '서버 주소를 확인해 주세요.';
     case 'invalid_response': return '서버의 제안 응답을 확인할 수 없습니다.';
@@ -135,18 +136,16 @@ function ProposalList({ client, refreshVersion, onSelect, onBack }: {
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.row}><Text style={styles.title} accessibilityRole="header">제안 목록</Text><Button label="뒤로" onPress={onBack} secondary /></View>
-      <Text style={styles.text}>제안의 전체 변경 내용과 검증 결과를 확인한 뒤 결정할 수 있습니다.</Text>
+      <Text style={styles.text}>변경 내용을 확인하고 결정해 주세요.</Text>
       {current.status === 'loading' && <Loading text="제안 목록을 불러오는 중입니다." />}
       {current.status === 'error' && <><ErrorNotice error={current.error} /><Button label="목록 다시 조회" onPress={reload} secondary /></>}
       {current.status === 'success' && <>
         {current.data.proposals.length === 0 && current.data.nextCursor === null && <Text style={styles.text}>표시할 제안이 없습니다.</Text>}
         {current.data.proposals.map((proposal) => (
-          <Pressable key={proposal.id} accessibilityRole="button" accessibilityLabel={`제안 ${proposal.reason || proposal.id}, ${statusText[proposal.status]}, 상세 보기`}
+          <Pressable key={proposal.id} accessibilityRole="button" accessibilityLabel={`제안 ${proposal.reason || '일정 제안'}, ${statusText[proposal.status]}, 상세 보기`}
             onPress={() => onSelect(proposal.id)} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
-            <View style={styles.row}><Icon name="sparkles" color={colors.primary} /><Text style={[styles.cardTitle, { flex: 1 }]}>{proposal.reason || '이유 없음'}</Text><Icon name="chevronRight" size={18} /></View>
+            <View style={styles.row}><Icon name="sparkles" color={colors.primary} /><Text numberOfLines={2} style={[styles.cardTitle, { flex: 1 }]}>{proposal.reason || '일정 제안'}</Text><Icon name="chevronRight" size={18} /></View>
             <Text style={styles.text}>{proposal.mode === 'personal' ? '개인 일정' : '공동 일정 조정'} · {statusText[proposal.status]}</Text>
-            <Text style={styles.muted}>제안 ID: {proposal.id} · 버전: {proposal.revision}</Text>
-            <Text style={styles.muted}>생성: {proposal.createdAt}</Text>
           </Pressable>
         ))}
         {loadingMore && <Loading text="다음 제안을 불러오는 중입니다." />}
@@ -158,94 +157,172 @@ function ProposalList({ client, refreshVersion, onSelect, onBack }: {
   );
 }
 
-function slotText(slot: TimeSlot | null): string {
-  return slot === null ? '미배치' : `${slot.startsAt} ~ ${slot.endsAt} (${slot.timezone})`;
+function instantText(value: string, timezone: string): string {
+  // Keep sub-minute precision intact instead of silently rounding a proposed time.
+  if (/T\d{2}:\d{2}:(?!00(?:\.0+)?(?:Z|[+-]))/.test(value) || /\.\d*[1-9]\d*(?:Z|[+-])/.test(value)) return `${value} (${timezone})`;
+  try {
+    return new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short' }).format(new Date(value));
+  } catch { return `${value} (${timezone})`; }
 }
 
+function slotText(slot: TimeSlot | null): string {
+  return slot === null ? '시간 미정' : `${instantText(slot.startsAt, slot.timezone)} ~ ${instantText(slot.endsAt, slot.timezone)}`;
+}
+
+const completionText = { pending: '대기', completed: '완료', incomplete: '미완료', unknown: '미확인' } as const;
+const categoryText = (value: ScheduleFields['category']) => value === 'personal' ? '개인' : value === 'work' ? '업무' : '미분류';
+const attendanceText = (value: ScheduleFields['attendance']) => value === 'attended' ? '참석' : value === 'absent' ? '불참' : value === 'unknown' ? '미확인' : '미기록';
+const kindText = (item: ScheduleFields) => item.kind === 'event' ? '일정' : '할 일';
+const durationText = (value: number | null) => value === null ? '미설정' : `${value}분`;
+const deadlineText = (item: ScheduleFields) => item.deadline === null ? '미설정' : instantText(item.deadline, item.timeSlot?.timezone ?? 'UTC');
+
 function Fields({ item }: { item: ScheduleFields }) {
-  const completion = { pending: '대기', completed: '완료', incomplete: '미완료', unknown: '알 수 없음' };
   return <View style={styles.fieldGroup}>
-    <Text style={styles.text}>종류: {item.kind === 'event' ? '일정' : '할 일'}</Text>
-    <Text style={styles.text}>제목: {item.title || '(빈 제목)'}</Text>
-    <Text style={styles.text}>시간: {slotText(item.timeSlot)}</Text>
-    <Text style={styles.text}>소요 시간: {item.durationMinutes === null ? '미설정' : `${item.durationMinutes}분`}</Text>
-    <Text style={styles.text}>마감: {item.deadline ?? '미설정'}</Text>
-    <Text style={styles.text}>유연성: {item.flexibility === 'fixed' ? '고정' : '유연'}</Text>
-    <Text style={styles.text}>참여: {item.involvement === 'personal' ? '개인' : '공동'}</Text>
-    <Text style={styles.text}>완료 상태: {completion[item.completion]}</Text>
+    <Text style={styles.cardTitle}>{item.title || '(빈 제목)'}</Text>
+    <Text style={styles.text}>{slotText(item.timeSlot)}</Text>
   </View>;
 }
 
-function BeforeItem({ item }: { item: ScheduleItem }) {
-  return <>
-    <Text style={styles.muted}>일정 ID: {item.id} · 변경 전 스냅샷 버전: {item.revision}</Text>
-    <Fields item={item} />
-    <Text style={styles.muted}>연결된 원본: {item.sourceRefs.length === 0 ? '없음' : `${item.sourceRefs.length}개`}</Text>
-    {item.sourceRefs.map((source, index) => <Text key={index} style={styles.muted}>
-      {`원본 ${index + 1}: 제공자 ${source.provider}, 계정 참조 ${source.accountRef}, 캘린더 ${source.calendarId}, 외부 일정 ${source.externalEventId}, 동기화 ${source.lastSyncedAt}${source.occurrenceKey === undefined ? '' : `, 반복 회차 ${source.occurrenceKey}`}${source.sourceVersion === undefined ? '' : `, 원본 버전 ${source.sourceVersion}`}`}
-    </Text>)}
-  </>;
+function FieldDetails({ item }: { item: ScheduleFields }) {
+  return <View style={styles.fieldGroup}>
+    <Text style={styles.muted}>{kindText(item)} · {item.involvement === 'personal' ? '개인' : '공동'} · {item.flexibility === 'fixed' ? '고정' : '유연'}</Text>
+    <Text style={styles.muted}>소요 {durationText(item.durationMinutes)} · 마감 {deadlineText(item)} · 분류 {categoryText(item.category)}</Text>
+    <Text style={styles.muted}>완료 {completionText[item.completion]}{item.kind === 'event' ? ` · 참석 ${attendanceText(item.attendance)}` : ''}</Text>
+  </View>;
+}
+
+function ChangedDetails({ before, after }: { before?: ScheduleFields; after?: ScheduleFields }) {
+  if (!before || !after) {
+    const item = (after ?? before)!;
+    const details = [
+      kindText(item),
+      item.involvement === 'shared' && '공동',
+      item.flexibility === 'fixed' && '고정',
+      item.durationMinutes !== null && `소요 ${durationText(item.durationMinutes)}`,
+      item.deadline !== null && `마감 ${deadlineText(item)}`,
+      item.category != null && `분류 ${categoryText(item.category)}`,
+      (item.completion === 'completed' || item.completion === 'incomplete') && `완료 ${completionText[item.completion]}`,
+      item.kind === 'event' && (item.attendance === 'attended' || item.attendance === 'absent') && `참석 ${attendanceText(item.attendance)}`,
+    ].filter(Boolean);
+    return <Text style={styles.muted}>{details.join(' · ')}</Text>;
+  }
+  const effectiveCategory = after.category === undefined ? before.category : after.category;
+  const effectiveAttendance = after.attendance === undefined ? before.attendance : after.attendance;
+  const changes = [
+    before.kind !== after.kind && `종류: ${kindText(before)} → ${kindText(after)}`,
+    before.durationMinutes !== after.durationMinutes && `소요 시간: ${durationText(before.durationMinutes)} → ${durationText(after.durationMinutes)}`,
+    before.deadline !== after.deadline && `마감: ${deadlineText(before)} → ${deadlineText(after)}`,
+    before.flexibility !== after.flexibility && `시간 조정: ${before.flexibility === 'fixed' ? '고정' : '유연'} → ${after.flexibility === 'fixed' ? '고정' : '유연'}`,
+    before.involvement !== after.involvement && `참여 범위: ${before.involvement === 'personal' ? '개인' : '공동'} → ${after.involvement === 'personal' ? '개인' : '공동'}`,
+    (before.category ?? null) !== (effectiveCategory ?? null) && `분류: ${categoryText(before.category)} → ${categoryText(effectiveCategory)}`,
+    before.completion !== after.completion && `완료 상태: ${completionText[before.completion]} → ${completionText[after.completion]}`,
+    (before.attendance ?? null) !== (effectiveAttendance ?? null) && `참석 상태: ${attendanceText(before.attendance)} → ${attendanceText(effectiveAttendance)}`,
+  ].filter((line): line is string => !!line);
+  return changes.length ? <View style={styles.fieldGroup}>{changes.map((line, index) => <Text key={index} style={styles.text}>{line}</Text>)}</View> : null;
+}
+
+function conflictText(reason: string): string {
+  const code = reason.split(':', 1)[0];
+  const messages: Record<string, string> = {
+    overlap: '다른 일정과 시간이 겹칩니다.', deadline_exceeded: '제안 시간이 마감을 넘습니다.',
+    insufficient_task_duration: '배정 시간이 필요한 소요 시간보다 짧습니다.', past_placement: '지난 시간에 일정을 배치할 수 없습니다.',
+    contact_required: '공동 일정은 별도의 연락 조정이 필요합니다.', stale_target: '기존 일정이 바뀌어 다시 확인해야 합니다.',
+    stale_coordination_target: '기존 약속이 바뀌어 다시 확인해야 합니다.', no_effective_change: '기존 일정과 달라진 내용이 없습니다.',
+    invalid_field: '일정에 필요한 정보가 올바르지 않습니다.', target_not_found: '대상 일정을 찾을 수 없습니다.',
+  };
+  return messages[code] ?? (/[가-힣]/.test(reason) ? reason : '변경 내용을 다시 확인해 주세요.');
+}
+
+function missingFieldText(path: string): string {
+  const fields: [RegExp, string][] = [
+    [/deadline/i, '마감'], [/duration/i, '소요 시간'], [/start|end|timeSlot/i, '일정 시간'],
+    [/title/i, '제목'], [/preparation/i, '준비 시간'], [/travel/i, '이동 시간'], [/buffer/i, '여유 시간'],
+    [/attendance/i, '참석 상태'], [/involvement/i, '참여 범위'], [/flexibility/i, '시간 조정 여부'],
+  ];
+  return fields.find(([pattern]) => pattern.test(path))?.[1] ?? '필요한 정보';
 }
 
 function ProposalContent({ proposal }: { proposal: Proposal }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const { validation } = proposal;
+  const scheduledChange = proposal.changeSet.changes.find(change => change.operation !== 'delete' && change.after.timeSlot !== null);
+  const expiryTimezone = scheduledChange && scheduledChange.operation !== 'delete' ? scheduledChange.after.timeSlot?.timezone ?? 'UTC'
+    : proposal.beforeItems.find(item => item.timeSlot !== null)?.timeSlot?.timezone ?? 'UTC';
+  const needsReview = !validation.valid || validation.conflicts.length > 0 || validation.missingFields.length > 0 || validation.protectedTargets.length > 0;
+  const titleFor = (id: string) => proposal.beforeItems.find(item => item.id === id)?.title || '관련 일정 확인 필요';
+  const segmentText = (id: string | null) => {
+    if (id === null) return '별도 일정 없음';
+    const change = proposal.changeSet.changes.find(item => item.changeId === id);
+    if (!change) return '연결된 일정 확인 필요';
+    const item = change.operation === 'delete' ? proposal.beforeItems.find(before => before.id === change.targetId) : change.after;
+    return item ? `${item.title || '(빈 제목)'} · ${slotText(item.timeSlot)}${change.operation === 'delete' ? ' (삭제)' : ''}` : '연결된 일정 확인 필요';
+  };
   return <>
-    <Text style={styles.sectionTitle} accessibilityRole="header">제안 상태</Text>
-    <Text style={styles.text}>상태: {statusText[proposal.status]} · 유형: {proposal.mode === 'personal' ? '개인 일정' : '공동 일정 조정'}</Text>
-    <Text style={styles.text}>제안 ID: {proposal.id} · 버전: {proposal.revision}</Text>
-    <Text style={styles.text}>생성: {proposal.createdAt} · 만료: {proposal.expiresAt ?? '미설정'}</Text>
-    <Text style={styles.text}>기준 일정 버전: {proposal.baseScheduleRevision} · 기준 맥락 버전: {proposal.baseContextRevision}</Text>
-    {proposal.coordinationTarget && <Text style={styles.text}>조정 대상: {proposal.coordinationTarget.id} · 예상 버전: {proposal.coordinationTarget.expectedRevision}</Text>}
+    {proposal.status === 'applied' && <Text style={styles.text}>일정에 반영된 제안입니다.</Text>}
+    {proposal.status === 'rejected' && <Text style={styles.text}>거절한 제안입니다.</Text>}
     {proposal.status === 'awaiting_contact' && <Text style={styles.notice}>원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.</Text>}
-    {proposal.status === 'stale' && <Text style={styles.notice}>기준이 바뀐 제안입니다. 새로 검증된 제안을 확인해 주세요.</Text>}
+    {proposal.status === 'stale' && <Text style={styles.notice}>일정이 바뀌어 새 제안을 확인해야 합니다.</Text>}
     {proposal.status === 'expired' && <Text style={styles.notice}>만료된 제안입니다. 새 제안을 확인해 주세요.</Text>}
-
-    <Text style={styles.sectionTitle} accessibilityRole="header">변경 이유</Text>
+    {proposal.status === 'failed' && <Text style={styles.notice}>제안을 처리하지 못했습니다. 다시 확인해 주세요.</Text>}
+    {needsReview && <View style={styles.notice} accessibilityRole="alert">
+      <Text>확인이 필요한 내용이 있어 승인할 수 없습니다.</Text>
+      {validation.conflicts.map((conflict, index) => <Text key={index}>
+        {conflictText(conflict.reason)}{conflict.targetIds.length ? ` (${conflict.targetIds.map(titleFor).join(', ')})` : ''}
+        {conflict.timeSlot ? ` · ${slotText(conflict.timeSlot)}` : ''}
+      </Text>)}
+      {validation.missingFields.length > 0 && <Text>빠진 정보: {[...new Set(validation.missingFields.map(missingFieldText))].join(', ')}. 내용을 보완해 새 제안을 요청해 주세요.</Text>}
+      {validation.protectedTargets.length > 0 && <Text>보호된 일정: {validation.protectedTargets.map(titleFor).join(', ')}</Text>}
+    </View>}
+    {proposal.status === 'pending' && proposal.expiresAt && <Text style={styles.muted}>확인 기한: {instantText(proposal.expiresAt, expiryTimezone)}</Text>}
+    <Text style={styles.sectionTitle} accessibilityRole="header">제안 이유</Text>
     <Text style={styles.text}>{proposal.reason || '이유가 제공되지 않았습니다.'}</Text>
-    <Text style={styles.text}>근거 참조: {proposal.evidenceRefs.length === 0 ? '없음' : proposal.evidenceRefs.join(', ')}</Text>
 
     {!!proposal.changeSet.timingConstraints?.length && <>
-      <Text style={styles.sectionTitle} accessibilityRole="header">제안된 준비·이동 관계</Text>
-      <Text style={styles.text}>아래 시간은 제안에 포함된 값입니다. 실제 경로와 사용자 확인 여부를 별도로 확인해 주세요.</Text>
-      {proposal.changeSet.timingConstraints.map((timing, index) => <View style={styles.card} key={index}>
-        <Text style={styles.text}>{timing.appointment.kind === 'existing'
-          ? `기준 약속: ${timing.appointment.id} · 버전 ${timing.appointment.expectedRevision}`
-          : `기준 약속 변경 ID: ${timing.appointment.changeId}`}</Text>
-        <Text style={styles.text}>제안된 시간: 준비 {timing.preparationMinutes === null ? '미확인' : `${timing.preparationMinutes}분`} · 이동 {timing.travelMinutes === null ? '미확인' : `${timing.travelMinutes}분`} · 여유 {timing.bufferMinutes === null ? '미확인' : `${timing.bufferMinutes}분`}</Text>
-        <Text style={styles.muted}>연결된 변경 ID: 준비 {timing.segments.preparation ?? '없음'} · 이동 {timing.segments.travel ?? '없음'} · 여유 {timing.segments.buffer ?? '없음'}</Text>
-      </View>)}
+      <Text style={styles.sectionTitle} accessibilityRole="header">준비와 이동</Text>
+      <Text style={styles.muted}>제안된 시간입니다. 실제 경로와 사용자 확인 여부를 별도로 확인해 주세요.</Text>
+      {proposal.changeSet.timingConstraints.map((timing, index) => {
+        const appointment = timing.appointment;
+        const target = appointment.kind === 'existing' ? proposal.beforeItems.find(item => item.id === appointment.id)
+          : proposal.changeSet.changes.find(change => change.changeId === appointment.changeId);
+        const title = target && 'title' in target ? target.title : target && 'after' in target ? target.after.title : '관련 약속 확인 필요';
+        return <View style={styles.card} key={index}>
+          <Text style={styles.cardTitle}>{title}</Text>
+          <Text style={styles.text}>준비 {timing.preparationMinutes === null ? '미확인' : `${timing.preparationMinutes}분`} · 이동 {timing.travelMinutes === null ? '미확인' : `${timing.travelMinutes}분`} · 여유 {timing.bufferMinutes === null ? '미확인' : `${timing.bufferMinutes}분`}</Text>
+          <Text style={styles.muted}>준비 일정: {segmentText(timing.segments.preparation)}</Text>
+          <Text style={styles.muted}>이동 일정: {segmentText(timing.segments.travel)}</Text>
+          <Text style={styles.muted}>여유 일정: {segmentText(timing.segments.buffer)}</Text>
+        </View>;
+      })}
     </>}
 
-    <Text style={styles.sectionTitle} accessibilityRole="header">전체 변경 내용</Text>
+    <Text style={styles.sectionTitle} accessibilityRole="header">변경 내용</Text>
     {proposal.changeSet.changes.length === 0 && <Text style={styles.text}>변경 내용이 없습니다.</Text>}
     {proposal.changeSet.changes.map((change, index) => {
       const before = change.operation === 'create' ? undefined : proposal.beforeItems.find((item) => item.id === change.targetId);
+      const after = change.operation === 'delete' ? undefined : change.after;
+      const effectiveAfter = after && before ? { ...after, category: after.category === undefined ? before.category : after.category,
+        attendance: after.attendance === undefined ? before.attendance : after.attendance } : after;
       return <View style={styles.card} key={change.changeId}>
-        <Text style={styles.cardTitle}>{index + 1}. {change.operation === 'create' ? '생성' : change.operation === 'update' ? '수정' : '삭제'}</Text>
-        <Text style={styles.muted}>변경 ID: {change.changeId}</Text>
-        {change.operation !== 'create' && <Text style={styles.muted}>대상: {change.targetId} · 예상 버전: {change.expectedRevision}</Text>}
+        <Text style={styles.cardTitle}>{index + 1}. {change.operation === 'create' ? '일정 추가' : change.operation === 'update' ? '일정 변경' : '일정 삭제'}</Text>
         <Text style={styles.subheading}>변경 전</Text>
-        {before ? <BeforeItem item={before} /> : <Text style={styles.text}>없음 (새 일정)</Text>}
+        {before ? <Fields item={before} /> : <Text style={styles.text}>없음 (새 일정)</Text>}
         <Text style={styles.subheading}>변경 후</Text>
-        {change.operation === 'delete' ? <Text style={styles.text}>없음 (삭제)</Text> : <Fields item={change.after} />}
+        {effectiveAfter ? <Fields item={effectiveAfter} /> : <Text style={styles.text}>없음 (삭제)</Text>}
+        {(before || effectiveAfter) && <ChangedDetails before={before} after={effectiveAfter} />}
+        {before && before.sourceRefs.length > 0 && <Text style={styles.muted}>연결된 원본이 있는 일정입니다.</Text>}
+        {detailsOpen && <View style={styles.fieldGroup}>
+          {before && <><Text style={styles.subheading}>기존 일정 상세</Text><FieldDetails item={before} /></>}
+          {effectiveAfter && <><Text style={styles.subheading}>변경 후 상세</Text><FieldDetails item={effectiveAfter} /></>}
+        </View>}
       </View>;
     })}
-
-    <Text style={styles.sectionTitle} accessibilityRole="header">서버 검증 결과</Text>
-    <Text style={styles.text}>결과: {validation.valid ? '유효' : '유효하지 않음'}</Text>
-    <Text style={styles.text}>검증 시각: {validation.checkedAt}</Text>
-    <Text style={styles.text}>검증한 일정 버전: {validation.checkedScheduleRevision} · 맥락 버전: {validation.checkedContextRevision}</Text>
-    <Text style={styles.text}>부족한 정보: {validation.missingFields.length ? validation.missingFields.join(', ') : '없음'}</Text>
-    <Text style={styles.text}>보호 대상: {validation.protectedTargets.length ? validation.protectedTargets.join(', ') : '없음'}</Text>
-    <Text style={styles.text}>충돌: {validation.conflicts.length ? `${validation.conflicts.length}건` : '없음'}</Text>
-    {validation.conflicts.map((conflict, index) => <Text style={styles.text} key={index}>
-      {`${index + 1}. 대상: ${conflict.targetIds.join(', ') || '없음'} · 이유: ${conflict.reason}${conflict.timeSlot ? ` · 시간: ${slotText(conflict.timeSlot)}` : ''}`}
-    </Text>)}
+    {proposal.changeSet.changes.length > 0 && <Button label={detailsOpen ? '상세 정보 접기' : '상세 정보 보기'} onPress={() => setDetailsOpen(value => !value)} secondary />}
   </>;
 }
 
-function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: {
-  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void; onRequestRevision: (proposal: Proposal) => void;
+function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack, onRequestRevision, onOpenGoogleContacts }: {
+  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void; onRequestRevision: (proposal: Proposal) => void; onOpenGoogleContacts?: () => void;
 }) {
   const [contactProposal, setContactProposal] = useState<Proposal | null>(null);
   const mounted = useRef(false);
@@ -293,7 +370,7 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   // Keep the operation in memory until its error is retried or explicitly cleared.
   const locked = state.status === 'pending' || state.status === 'error';
   const shown = state.status === 'success' ? state.result.proposal : current.status === 'success' ? current.data : null;
-  if (contactProposal) return <ContactPanel api={api} proposalClient={client} proposal={contactProposal}
+  if (contactProposal) return <ContactPanel onOpenGoogleContacts={onOpenGoogleContacts} api={api} proposalClient={client} proposal={contactProposal}
     renderProposal={(item) => <ProposalContent proposal={item} />} onScheduleChanged={onScheduleChanged} onBack={() => {
       setContactProposal(null);
       if (mutation.state.status === 'success') mutation.reset();
@@ -308,11 +385,10 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
     {current.status === 'error' && state.status === 'idle' && <><ErrorNotice error={current.error} /><Button label="제안 다시 조회" onPress={reload} secondary /></>}
     {state.status === 'success' && <View accessibilityLiveRegion="polite">
       <Text style={styles.notice}>
-        {state.result.outcome === 'applied' ? '서버가 개인 일정 적용을 확인했습니다.' :
-          state.result.outcome === 'rejected' ? '서버가 제안 거절을 확인했습니다.' :
+        {state.result.outcome === 'applied' ? '일정이 반영되었습니다.' :
+          state.result.outcome === 'rejected' ? '제안을 거절했습니다.' :
             '원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.'}
       </Text>
-      <Text style={styles.muted}>서버 일정 버전: {state.result.scheduleRevision}</Text>
     </View>}
     {shown && <ProposalContent proposal={shown} />}
     {state.status === 'pending' && <Loading text="결정 결과를 확인하는 중입니다." />}
@@ -327,7 +403,6 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
       <Text style={styles.notice}>수정 요청은 새 제안을 위한 대화 초안입니다. 기존 제안은 그대로이며 새 제안에는 별도 승인이 필요합니다.</Text>
       {shown.status === 'pending' ? <>
         {shown.mode === 'coordination' && <Text style={styles.notice}>승인해도 원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.</Text>}
-        {!canAccept(shown) && <Text style={styles.notice}>검증 결과가 유효하지 않거나 일관되지 않아 승인할 수 없습니다. 거절은 가능합니다.</Text>}
         <View style={styles.actions}>
           <Button label="제안 승인" onPress={() => decide(shown, 'accept')} disabled={!canAccept(shown)} />
           <Button label="제안 거절" onPress={() => decide(shown, 'reject')} secondary />
@@ -339,12 +414,12 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   </ScrollView>;
 }
 
-function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack, onRequestRevision }: Props) {
+function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack, onRequestRevision, onOpenGoogleContacts }: Props) {
   const client = useMemo(() => createProposalClient(api), [api]);
   const [selected, setSelected] = useState<string | null>(null);
   return selected === null
     ? <ProposalList client={client} refreshVersion={refreshVersion} onSelect={setSelected} onBack={onBack} />
-    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} onRequestRevision={onRequestRevision} />;
+    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} onRequestRevision={onRequestRevision} onOpenGoogleContacts={onOpenGoogleContacts} />;
 }
 
 export default function ProposalPanel(props: Props) {
@@ -358,12 +433,12 @@ export default function ProposalPanel(props: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, gap: 10, paddingBottom: 32 },
+  container: { padding: 20, gap: 10, paddingBottom: 32, backgroundColor: '#F2F4FC', flexGrow: 1 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   title: { fontSize: 28, fontWeight: '700', color: colors.text, flexShrink: 1 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: colors.text, marginTop: 12 },
   subheading: { fontWeight: '700', color: colors.text, marginTop: 8 },
-  card: { padding: 18, borderWidth: 1, borderColor: colors.border, borderRadius: 20, gap: 8, backgroundColor: colors.surface },
+  card: { padding: 18, borderWidth: 1, borderColor: '#E5EAF4', borderRadius: 20, gap: 8, backgroundColor: '#FFFFFF' },
   cardTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
   fieldGroup: { gap: 3 },
   text: { color: colors.text, fontSize: 15, lineHeight: 22 },

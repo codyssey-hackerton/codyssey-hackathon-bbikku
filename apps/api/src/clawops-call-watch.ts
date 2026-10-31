@@ -9,6 +9,7 @@ import type { PlanningStore } from './planning-store.ts';
 function requestsHangup(text: string): boolean {
   if (/["'“”‘’「」『』]/u.test(text)) return false;
   const normalized = text.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  if (/^통화\s*그만$/u.test(normalized)) return true;
   return /^(?:(?:네|예|알겠어|알겠어요|알겠습니다|좋아요|좋습니다)[\s,.!?。？！]*)?(?:(?:이제|그럼|이만)\s*)?(?:(?:(?:통화|전화)\s*)?(?:끊어\s*(?:줘|주세요)?|끊어요|끊으세요|끊자|끝내|끝내줘|끝내주세요|종료해|종료해줘|종료해주세요)|왜\s*안\s*끊어(?:요)?)[\s.!?。？！]*$/u.test(normalized);
 }
 
