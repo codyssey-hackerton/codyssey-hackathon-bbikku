@@ -261,7 +261,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       )}
       <Scene visible={!healthOpen && !authOpen}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} /></Scene>
       {healthMounted && <Scene visible={healthOpen && !authOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen && !authOpen} onBack={() => setHealthOpen(false)} /></Scene>}
-      {authOpen && <AuthPanel baseUrl={baseUrl} onBack={() => setAuthOpen(false)} onSignedIn={signedIn} />}
+      {authOpen && <AuthPanel key={baseUrl} baseUrl={baseUrl} onBack={() => setAuthOpen(false)} onSignedIn={signedIn} />}
     </SafeAreaView>
   );
 }

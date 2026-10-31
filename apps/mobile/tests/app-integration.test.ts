@@ -1030,3 +1030,74 @@ test('동기화 쓰기 권한 연결 후 화면에 다시 들어오면 목록을
   visiblePress(view, '뒤로'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
   assert.equal(calendarReads, 2); assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '캘린더 새로 연결된 달력')); view.unmount();
 });
+
+function memberAuthFixture(secret = 'q'.repeat(43)) {
+  const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code', state: `member_${'s'.repeat(43)}`,
+    nonce: 'n'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback', scope: 'openid email profile' })}`;
+  return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: secret } });
+}
+
+test('인증 준비 후 API 서버가 바뀌면 이전 확인 코드를 지우고 새 서버에서 다시 시작한다', async t => {
+  const { App } = await components; const requests: { origin: string; path: string }[] = [];
+  globalThis.fetch = async raw => {
+    const url = new URL(String(raw)); requests.push({ origin: url.origin, path: url.pathname });
+    if (url.pathname === '/v1/auth/google/start') return memberAuthFixture();
+    throw new Error('unexpected synthetic request');
+  };
+  const view = harness.renderer(App); t.after(() => view.unmount());
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43));
+  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용'); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === 'Google 로그인 시작')?.props.disabled, false);
+  assert.doesNotMatch(textOf(view.tree), /zzzzzzzzzz|qqqqqqqqqq/);
+  visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
+  assert.equal(requests.filter(item => item.path === '/v1/auth/google/start').at(-1)?.origin, 'https://new.example.test');
+  assert.equal(requests.some(item => item.path === '/v1/auth/google/complete'), false);
+});
+
+test('인증 시작 요청 중 API 변경은 기존 응답을 버리고 새 화면에서 시작할 수 있다', async t => {
+  const { App } = await components; let resolveOld!: (value: Response) => void; let starts = 0;
+  globalThis.fetch = async raw => {
+    const url = new URL(String(raw));
+    if (url.pathname === '/v1/auth/google/start') {
+      starts++;
+      if (starts === 1) return new Promise<Response>(resolve => { resolveOld = resolve; });
+      assert.equal(url.origin, 'https://new.example.test'); return memberAuthFixture('n'.repeat(43));
+    }
+    throw new Error('unexpected synthetic request');
+  };
+  const view = harness.renderer(App); t.after(() => view.unmount());
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용'); await view.settle();
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === 'Google 로그인 시작')?.props.disabled, false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, false);
+  resolveOld(memberAuthFixture()); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
+  assert.doesNotMatch(textOf(view.tree), /로그인 화면을 준비하고 있습니다/);
+  visiblePress(view, 'Google 로그인 시작'); await view.settle(); assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
+  assert.equal(starts, 2);
+});
+
+test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 원래 요청을 보존한다', async t => {
+  const { App, operationGuard } = await components; let resolveComplete!: (value: Response) => void; const requests: { origin: string; path: string }[] = [];
+  globalThis.fetch = async raw => {
+    const url = new URL(String(raw)); requests.push({ origin: url.origin, path: url.pathname });
+    if (url.pathname === '/v1/auth/google/start') return memberAuthFixture();
+    if (url.pathname === '/v1/auth/google/complete') return new Promise<Response>(resolve => { resolveComplete = resolve; });
+    throw new Error('unexpected synthetic request');
+  };
+  const view = harness.renderer(App); t.after(() => view.unmount());
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true);
+  visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
+  assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  assert.match(textOf(view.tree), /로그인 결과를 확인하고 있습니다/);
+  assert.equal(requests.filter(item => item.path === '/v1/auth/google/complete').length, 1);
+  resolveComplete(Response.json({ requestId: 'r', data: { sessionToken: 'synthetic-session', expiresAt: '2035-01-01T00:00:00Z', member: { id: 'member:synthetic', email: 'test@example.test', displayName: '테스트' } } }));
+  await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
+  visiblePress(view, '개발 연결 설정'); assert.match(textOf(view.tree), /로그인: 테스트/);
+  assert.notEqual(input(view, 'API 서버 주소').props.value, 'https://new.example.test');
+});
