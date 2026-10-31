@@ -16,7 +16,7 @@ import type { ChatClient, ChatContext, ChatEntryContext, ChatResponse, Coordinat
 export type { ChatEntryContext } from './client';
 import { ChatScheduleSummary } from './ChatScheduleSummary';
 
-type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string };
+type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; phoneTarget?: { itemId: string; expectedRevision: number } };
 type Input = Omit<ChatInput, 'requestId'> & { entryContext?: ChatContext };
 const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
 const weekdayLabels: Record<string, string> = { '1': '월', '2': '화', '3': '수', '4': '목', '5': '금', '6': '토', '7': '일' };
@@ -44,7 +44,7 @@ function errorMessage(error: unknown): string {
   return '요청 결과를 확인할 수 없습니다.';
 }
 
-export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft }: {
+export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft, onOpenScheduleCall }: {
   client: ChatClient;
   timezone: string;
   scheduleClient: ScheduleClient;
@@ -60,6 +60,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   entryContext?: ChatEntryContext;
   onClearEntryContext?: () => void;
   onApplyDraft?: (draft: FormDraft) => void;
+  onOpenScheduleCall?: (target: { itemId: string; expectedRevision: number }) => void;
 }) {
   const [draft, setDraft] = useState('');
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryRequest[]>([]);
@@ -114,7 +115,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       const replyId = `reply-${++counter.current}`;
       setEntries((previous) => [
         ...previous,
-        { id: replyId, role: 'assistant', text: result.message },
+        { id: replyId, role: 'assistant', text: result.message, ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) },
         ...(result.kind === 'proposal'
           ? [{ id: `${replyId}-status`, role: 'status' as const, text: '제안 목록에서 변경 전후와 이유를 검토하세요. 승인 전에는 적용되지 않습니다.' }]
           : []),
@@ -288,6 +289,8 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         {entries.map((entry) => <View key={entry.id} style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
           <View style={styles.messageHeading}>{entry.role !== 'user' && <Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} />}<Text style={[styles.messageRole, entry.role === 'user' && styles.userMessageRole]}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>
           <Text style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
+          {entry.phoneTarget && onOpenScheduleCall && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }}
+            onPress={() => onOpenScheduleCall(entry.phoneTarget!)} style={styles.link}><Text style={styles.linkText}>전화 요청 확인</Text></Pressable>}
         </View>)}
         {suggestedDraft && (activeEntry?.kind === 'form' || activeEntry?.kind === 'create') && suggestedDraft.key === activeEntry.key && activeEntry.key === entryContext?.key && !activeRecovery && !activeRevision && <View style={styles.draftCard}>
           <Text style={styles.targetTitle}>입력 제안 · 아직 반영되지 않음</Text>

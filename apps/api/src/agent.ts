@@ -2,11 +2,16 @@ import { END, START, StateGraph, StateSchema } from '@langchain/langgraph';
 import { z } from 'zod';
 import { formDraft } from './chat-context.ts';
 
+export const phoneRequestDecision = z.strictObject({ kind: z.literal('phone_request'), text: z.string().trim().min(1).max(2000),
+  itemId: z.string().trim().min(1).max(200), expectedRevision: z.number().int().positive().safe() });
+export const callReviewDecision = z.strictObject({ kind: z.literal('call_review'), text: z.string().trim().min(1).max(2000),
+  location: z.string().trim().min(1).max(200).nullable() });
 const Decision = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('answer'), text: z.string().min(1) }),
   z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
   z.object({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }).strict(),
   z.object({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.object({ changes: z.array(z.unknown()), timingConstraints: z.array(z.unknown()).optional() }), evidenceRefs: z.array(z.string()) }),
+  phoneRequestDecision, callReviewDecision,
   z.object({ kind: z.literal('tool_call'), name: z.string(), input: z.unknown(), providerTrace: z.unknown().optional() }),
 ]);
 export type AgentDecision = z.infer<typeof Decision>;

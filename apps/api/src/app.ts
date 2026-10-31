@@ -31,6 +31,7 @@ import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
 import { managedCallBindingKey, PhoneDispatch } from './phone-dispatch.ts';
 import { createClawOpsReplies } from './clawops-replies.ts';
 import { createManagedCallWatch } from './clawops-call-watch.ts';
+import { ScheduleCallService } from './schedule-call-service.ts';
 import { VoiceTokens } from './voice-token.ts';
 import { VoiceWebhook } from './voice-webhook.ts';
 import type { VoiceClassifier } from './voice-model.ts';
@@ -133,6 +134,7 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
   const idempotency = options.idempotency ?? (store.durable ? new RepositoryIdempotency(store, options.clock) : new MemoryIdempotency());
   const reviewIdempotency = store.durable ? idempotency : new RepositoryIdempotency(store, options.clock);
   const planning = new PlanningService(store, options.clock);
+  const scheduleCalls = new ScheduleCallService({ store, planning, connections: options.phoneConnections, model: options.model, clock: options.clock });
   const contacts = new ContactService(store, planning, options.clock);
   const contactResponses = new ContactResponseService(store, planning, options.clock);
   let voiceTokens: VoiceTokens | undefined; let voiceWebhook: VoiceWebhook | undefined;
@@ -497,6 +499,36 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
       },
     });
   }
+
+  app.get('/v1/schedule-calls/:id', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    reply.header('Cache-Control', 'no-store');
+    return { requestId: request.id, data: await scheduleCalls.get(authenticated.get(request)!, id) };
+  });
+  app.post('/v1/schedule-calls', async (request, reply) => {
+    const body = parse(z.object({ requestId: nonblank, itemId: identifier, expectedRevision: z.number().int().positive(),
+      toNumber: z.string().trim().min(1).max(30) }).strict(), request.body);
+    const { requestId: _requestId, ...input } = body;
+    const result = await runIdempotent(request, 'schedule_call_create', async () => ({ status: 200,
+      body: { requestId: body.requestId, data: await scheduleCalls.create(authenticated.get(request)!, input) } }));
+    return reply.code(result.status).send(result.body);
+  });
+  for (const action of ['approve', 'check', 'propose'] as const) {
+    app.post(`/v1/schedule-calls/:id/${action}`, async (request, reply) => {
+      const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+      const body = parse(z.object({ requestId: nonblank, revision: z.number().int().positive() }).strict(), request.body);
+      const result = await runIdempotent(request, `schedule_call_${action}`, async () => ({ status: 200,
+        body: { requestId: body.requestId, data: await scheduleCalls[action](authenticated.get(request)!, id, { revision: body.revision }) } }));
+      return reply.code(result.status).send(result.body);
+    });
+  }
+  app.post('/v1/schedule-calls/:id/decision', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const body = parse(z.object({ requestId: nonblank, revision: z.number().int().positive(), decision: z.enum(['accept', 'reject']) }).strict(), request.body);
+    const result = await runIdempotent(request, 'schedule_call_decision', async () => ({ status: 200,
+      body: { requestId: body.requestId, data: await scheduleCalls.decide(authenticated.get(request)!, id, { revision: body.revision, decision: body.decision }) } }));
+    return reply.code(result.status).send(result.body);
+  });
 
   app.post('/v1/calendar/import', async (request, reply) => {
     const result = await runIdempotent(request, 'calendar_import', async (_requestBody, control) => {

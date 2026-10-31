@@ -24,7 +24,14 @@ const unavailableCapabilities = (): AgentCapabilities => ({
 type RunInput = { userId: string; requestId: string; conversationId: string | null; message: string; timezone: string;
   history: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; coordinationTarget?: CoordinationTarget; entryContext?: ChatContext; triggerEvent?: TriggerEvent };
 type FreeSlotRead = { input: z.infer<typeof freeSlotsInput>; slots: { startsAt: string; endsAt: string }[] };
-type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; freeSlotReads: FreeSlotRead[]; entryContext?: ChatContext };
+type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; freeSlotReads: FreeSlotRead[]; entryContext?: ChatContext; phoneEvidence: boolean; phoneConfigured: boolean };
+
+function explicitPhoneRequest(message: string): boolean {
+  // shortcut: 보수적인 한국어 표현만 허용하며 구조화된 전화 요청 입력이 생기면 교체한다.
+  if (/["'“”‘’「」『』]/.test(message) || /(?:라고|달래|달라고|하지\s*마|하지\s*말|하지\s*않|안\s*(?:해|걸|하)|걸지\s*마|전화하지|통화하지|전화\s*말고|통화\s*말고|전화\s*금지|통화\s*금지)/.test(message)) return false;
+  return /(?:전화|통화)\s*(?:를|로|좀|한\s*번|해서|하여|해|걸|부탁)/.test(message) &&
+    /(?:해\s*줘|해\s*주|해주세요|해줘|걸어\s*줘|걸어\s*주|걸어주세요|걸어봐|해봐|부탁|물어봐|확인해\s*줘|확인해\s*주|확인해주세요)/.test(message);
+}
 
 // The graph is read-only. A caller must finish inside its own atomic result/ledger transaction.
 export class PlanningAgentRunner {
@@ -100,8 +107,15 @@ export class PlanningAgentRunner {
       input: freeSlotsInput.parse(observation.input),
       slots: z.object({ slots: z.array(z.object({ startsAt: timestamp, endsAt: timestamp })) }).parse(observation.result).slots,
     }));
+    const phone = state.decision.kind === 'phone_request' ? state.decision : null;
+    const observed = phone && state.observations.some(observation => observation.name === 'read_schedule' &&
+      z.object({ items: z.array(z.object({ id: z.string(), revision: z.number() })) }).safeParse(observation.result).data?.items
+        .some(item => item.id === phone.itemId && item.revision === phone.expectedRevision));
+    const item = phone && baseline.snapshot.items.find(value => value.id === phone.itemId && value.revision === phone.expectedRevision);
+    const selected = phone && input.entryContext?.kind === 'item' && input.entryContext.id === phone.itemId && input.entryContext.expectedRevision === phone.expectedRevision;
+    const phoneEvidence = Boolean(phone && !input.triggerEvent && explicitPhoneRequest(input.message) && item && (selected || observed));
     return { baseline, decision: state.decision, inspected: validation.inspected, failure: validation.failure,
-      entryContext: input.entryContext, freeSlotReads,
+      entryContext: input.entryContext, freeSlotReads, phoneEvidence, phoneConfigured: capabilities.phone.status === 'configured',
       usedSnapshot: input.entryContext?.kind === 'item' || state.observations.some(observation => ['read_schedule', 'read_memory', 'validate_changes', 'find_free_slots'].includes(observation.name)) };
   }
   async finish(prepared: Prepared): Promise<AgentResult | { kind: 'reply'; message: string; draft: FormDraft }> {
@@ -136,6 +150,12 @@ export class PlanningAgentRunner {
     }
     if (decision.kind === 'answer') return { kind: 'reply', message: decision.text };
     if (decision.kind === 'question') return { kind: 'question', message: decision.text, missingFields: decision.missingFields };
+    if (decision.kind === 'phone_request') {
+      if (!prepared.phoneEvidence) return { kind: 'failure', message: '전화할 일정과 요청을 확인해 주세요.', code: 'invalid_request', retryable: false };
+      return { kind: 'phone_request', message: prepared.phoneConfigured ? '전화 요청을 확인해 주세요. 승인 전에는 전화하지 않습니다.' : '전화 연결이 설정되지 않았습니다. 연결과 요청을 확인해 주세요.',
+        itemId: decision.itemId, expectedRevision: decision.expectedRevision };
+    }
+    if (decision.kind === 'call_review') return { kind: 'failure', message: '통화 검토를 확인할 수 없습니다.', code: 'invalid_request', retryable: false };
     if (decision.kind === 'proposal') {
       if (!prepared.inspected) throw new Error('Proposal validation did not run');
       return prepared.failure ?? await this.planning.saveProposal(prepared.baseline, decision);

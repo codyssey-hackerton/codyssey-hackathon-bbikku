@@ -351,3 +351,23 @@ test('재시도 시작 직후의 오래된 조회 버튼은 GET을 보내지 않
   retry.props.onPress(); check.props.onPress(); view.flush(); await view.settle(); assert.equal(calls, 2); assert.equal(checks, 0);
   finish({ conversationId: 'c', result: { kind: 'reply', message: '완료' } }); await view.settle();
 });
+
+test('전화 요청 응답은 사용자가 확인 버튼을 눌러야 대상과 버전을 전달한다', async t => {
+  const Screen = await component; const targets: any[] = [];
+  const view = render(Screen, { ...base, onOpenScheduleCall: (target: any) => targets.push(target),
+    client: { async sendMessage() { return { conversationId: 'c', result: { kind: 'phone_request', message: '전화 내용을 확인해 주세요.', itemId: 'i1', expectedRevision: 2 } }; } } });
+  t.after(view.unmount); type(view, '전화해줘'); press(view, '메시지 보내기'); await view.settle();
+  assert.match(text(view.tree), /전화 내용을 확인/); assert.deepEqual(targets, []);
+  press(view, '전화 요청 확인'); assert.deepEqual(targets, [{ itemId: 'i1', expectedRevision: 2 }]);
+});
+
+test('복구한 전화 요청도 버튼을 직접 누르기 전에는 전화 단계로 이동하지 않는다', async t => {
+  const Screen = await component; const targets: any[] = [];
+  const client = { async sendMessage() { throw new Screen.ApiError('timeout', 'timeout', true); }, async checkRequest() {
+    return { status: 'completed', result: { response: { conversationId: 'c', result: { kind: 'phone_request', message: '전화 확인', itemId: 'i1', expectedRevision: 2 } } } };
+  } };
+  const view = render(Screen, { ...base, client, onOpenScheduleCall: (target: any) => targets.push(target) });
+  t.after(view.unmount); type(view, '전화해줘'); press(view, '메시지 보내기'); await view.settle();
+  press(view, '처리 결과 확인'); await view.settle(); assert.deepEqual(targets, []);
+  press(view, '전화 요청 확인'); assert.deepEqual(targets, [{ itemId: 'i1', expectedRevision: 2 }]);
+});

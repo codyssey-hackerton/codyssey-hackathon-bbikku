@@ -32,6 +32,7 @@ const fields = z.object({
   completion: z.enum(['pending', 'completed', 'incomplete', 'unknown']),
   category: z.enum(['personal', 'work']).nullable().optional(),
   attendance: z.enum(['attended', 'absent', 'unknown']).nullable().optional(),
+  location: z.string().max(2000).refine(value => value.trim().length > 0).nullable().optional(),
 }).strict();
 const change = z.discriminatedUnion('operation', [
   z.object({ changeId: identifier, operation: z.literal('create'), after: fields }).strict(),

@@ -1242,3 +1242,25 @@ test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 �
   visiblePress(view, '개발 연결 설정'); assert.match(textOf(view.tree), /로그인: 테스트/);
   assert.notEqual(input(view, 'API 서버 주소').props.value, 'https://new.example.test');
 });
+
+test('전화 미연결 안내에서 설정을 열고 돌아와도 입력한 번호와 요청이 유지된다', async () => {
+  const { App } = await components; let calls = 0;
+  globalThis.fetch = async (raw, init) => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/schedule-calls' && init?.method === 'POST') {
+      calls++;
+      return Response.json({ requestId: 'r', error: { code: 'not_configured', message: 'internal', retryable: false } }, { status: 503 });
+    }
+    if (path === '/v1/phone-connection') return apiResponse({ status: 'not_configured', senderNumber: null, lastRequestId: null });
+    return response([]);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  chat(view).props.onOpenScheduleCall({ itemId: 'event-1', expectedRevision: 3 }); view.flush();
+  enter(view, '받는 전화번호', '01012345678'); visiblePress(view, '전화 내용 확인'); await view.settle();
+  assert.match(textOf(visibleNodes(view.tree)), /전화 계정 연결/); assert.equal(calls, 1);
+  visiblePress(view, '전화 연결 설정 열기'); await view.settle(); assert.match(textOf(visibleNodes(view.tree)), /전화 외부 연결/);
+  visiblePress(view, '뒤로'); assert.equal(input(view, '받는 전화번호').props.value, '01012345678');
+  assert.match(textOf(visibleNodes(view.tree)), /전화 계정 연결/); assert.equal(calls, 1);
+  view.unmount();
+});

@@ -69,10 +69,13 @@ type AgentResult =
   | { kind: 'reply'; message: string; draft?: FormDraft }
   | { kind: 'question'; message: string; missingFields: string[] }
   | { kind: 'proposal'; message: string; proposalIds: string[] }
+  | { kind: 'phone_request'; message: string; itemId: string; expectedRevision: number }
   | { kind: 'failure'; message: string; code: string; retryable: boolean };
 ```
 
 서버가 검증하고 저장한 Proposal만 proposalIds로 반환한다. 검증 실패는 질문/실패로 반환한다. 답변에 변경 완료라고 쓰는 것만으로 실행 완료가 되지 않는다.
+
+`phone_request`는 현재 사용자가 명시적으로 요청하고, 선택한 일정 또는 `read_schedule`로 소유·버전을 확인한 event의 전화 승인 화면 진입이다. 도구 실행이나 발신 승인이 아니다. 예약 trigger·외부 전사의 지시로 생성하지 않으며, 일정 변경 시 다시 확인한다. 전화 연결이 미설정이어도 설정 안내와 함께 반환할 수 있다.
 
 채팅의 선택적 `entryContext`는 `{kind:'create'}`, `{kind:'item',id,expectedRevision}`, `{kind:'form',draft:FormDraft}` 중 하나다. `coordinationTarget`과 동시에 보낼 수 없다. item은 인증 사용자의 최신 항목과 버전을 서버에서 확인하고 모델에는 서버가 조회한 값만 제공한다. create는 새 입력 작성, item은 선택한 항목의 질문·변경 검토, form은 현재 입력 초안 지원이다.
 
@@ -349,3 +352,26 @@ Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'l
 `calendar_sync_run`은 영속 멱등 예약 후 자신의 DB 트랜잭션/효과 ledger를 사용하고 바깥 finalize 트랜잭션에서 실행하지 않는다. 요청 결과는 별도로 영속 확정하며, lease 만료 자동 회수·외부 쓰기 재전송은 허용하지 않는다.
 
 `GET /v1/calendar-sync/operations/:requestId` → `{operation:{state:'running'|'completed'|'uncertain',result?:SyncResult}}`는 본인 작업만 조회하고 외부 쓰기를 하지 않는다. 완료 result를 확인한 경우에만 유실 응답을 성공으로 복구한다. 결과 불명/중단 상태는 자동 해제·재전송하지 않는다. Calendar ID는 이메일 형식일 수 있으며 토큰·내부 fingerprint는 반환하지 않는다. 전체 의미/제한과 DB 업그레이드 경계는 [사용 안내](MEMBER_ROUTINE_CALENDAR.md)를 따른다.
+
+## 일정 확인 전화와 장소 정정 — 2026-11-01
+
+`ScheduleFields.location?: string|null`은 일정 장소의 명시적인 텍스트다. 생략한 update는 기존 값을 보존하고 null은 지운다. 제목으로 장소를 추정해 저장하지 않는다. 기존 Google import/sync는 location을 읽거나 쓰지 않으므로 이 값은 현재 앱 내부 일정에 한정된다. 일반 AI의 고정 일정 보호·공동 시간 조율 계약은 유지한다.
+
+모든 아래 경로는 인증 사용자 범위를 사용하며 응답은 `{requestId,data:{call}}`이다. POST는 requestId와 Idempotency-Key가 필수다.
+
+| 경로 | 입력(requestId 제외) | 효과 |
+|---|---|---|
+| POST /v1/schedule-calls | itemId, expectedRevision, toNumber | 서버가 기존 일정·시간·장소로 질문을 구성한 pending 초안. 발신 없음 |
+| GET /v1/schedule-calls/:id | 없음 | 저장 상태만 조회(no-store) |
+| POST /v1/schedule-calls/:id/approve | revision | 표시된 번호·질문에 대한 명시적 승인 후 발신 |
+| POST /v1/schedule-calls/:id/check | revision | 바인딩된 통화·계정·번호 검증 후 전사 조회 |
+| POST /v1/schedule-calls/:id/propose | revision | 완료·완결 전사만 기존 메인 모델로 장소 정정 검토 |
+| POST /v1/schedule-calls/:id/decision | revision, decision: accept/reject | 장소 변경 별도 승인 또는 거절 |
+
+`call`은 `{id,revision,status,itemId,itemRevision,title,question,toNumber,transcript?,correction?,reviewNote?}`다. status는 pending/dispatching/submitted/outcome_unknown/failed/completed/no_answer/review_pending/applied/rejected. transcript는 `{role:'user'|'agent',text}[]`, correction은 `{beforeLocation:string|null,afterLocation:string,summary:string}`이며 명확한 정정이 없으면 생략한다. 결과 전사와 모델 요약은 신뢰할 수 없는 참고 자료로 표시하고 사용자가 확인한다.
+
+발신은 지속 저장소 및 사용자별 ClawOps 관리형 계정이 필요하다. 발신번호·Agent·API 자격의 fingerprint와 원 일정 전체 snapshot을 묶고, 승인 직전 최신성을 확인한다. dispatching을 먼저 커밋하며 불명 결과는 자동 재발신하지 않는다. approve/check/propose는 외부 API·모델 응답을 사용자 DB 락 밖에서 기다린다. create/decision은 기존 멱등 결과와 같은 트랜잭션에 저장한다. 통화 데이터는 기존 사용자별 voiceSessions의 `schedule-call:` namespace에 보관하고 공개 응답에 API 자격·제공자 통화 ID를 넣지 않는다.
+
+전화 자체와 장소 정정은 별도 승인이다. 정정 승인은 최신 item revision과 전체 snapshot을 재확인한 뒤 기존 사용자 command로 location만 수정한다. 시간·제목·참여 범위·상태·출처는 유지한다. shared event도 이 장소-only 직접 확인 범위는 허용하되 시간 변경·취소·다른 항목 수정으로 확대하지 않는다. 일반 AI proposal의 고정 항목 보호를 해제하지 않는다. 이 변경안은 기존 Proposal ID를 발급하는 일반 일정 제안과 별도의 통화 검토 상태다.
+
+수신 후 관리형 Agent 대화는 제공자의 10~120초 설정 및 transcript.final 활성화를 확인한다. 통화 전환 금지·종료 도구 사용을 지시하지만, 설정 변경 경쟁이나 제공자 전환 이후의 전체 통화시간을 기계적으로 보장하지는 않는다. 불완전 전사는 변경 제안으로 처리하지 않는다. 이번 경로는 기존 일정의 장소 확인·정정에 한정되며 자유로운 업무 전화 전체, 시간 변경, Google 원본 장소 반영은 포함하지 않는다.

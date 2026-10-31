@@ -64,8 +64,9 @@ export function applyChanges(state: UserPlanningState, changes: ChangeSet, delet
       state.items.set(item.id, item); items.push(item);
     } else if (change.operation === 'update') {
       const before = state.items.get(change.targetId)!;
-      const { category, attendance, ...after } = change.after;
+      const { category, attendance, location, ...after } = change.after;
       const item: ScheduleItem = { ...before, ...after, ...(category === undefined ? {} : { category }), ...(attendance === undefined ? {} : { attendance }),
+        ...(location === undefined ? {} : { location }),
         id: before.id, revision: before.revision + 1, sourceRefs: before.sourceRefs };
       if (before.completion !== item.completion || (before.attendance ?? null) !== (item.attendance ?? null)) {
         const history = state.statusUndo ??= new Map(); const undo = history.get(before.id) ?? {};

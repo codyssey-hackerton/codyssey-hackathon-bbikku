@@ -20,10 +20,11 @@ export function ScheduleCard({ item, timezone, now = Date.now(), variant = 'list
   return <View style={[styles.card, active && styles.active, recordedActive && styles.recordedActive]}>
     {active && <Image source={require('./assets/timeline-active.png')} pointerEvents="none" accessible={false} resizeMode="stretch" style={styles.gradient} />}
     <View style={[styles.stripe, { backgroundColor: active ? 'rgba(255,255,255,0.75)' : recordedActive ? '#8CA0EC' : stripe }]} />
-    <Pressable accessibilityRole={onPress ? 'button' : undefined} accessibilityLabel={`${item.title} · ${time} · ${state.type} · ${state.state}`}
+    <Pressable accessibilityRole={onPress ? 'button' : undefined} accessibilityLabel={`${item.title} · ${time}${item.location ? ` · 장소 ${item.location}` : ''} · ${state.type} · ${state.state}`}
       accessibilityState={onPress ? { disabled } : undefined} disabled={disabled || !onPress} onPress={onPress}
       style={({ pressed }) => [styles.body, pressed && styles.pressed]}>
       <Text numberOfLines={2} style={[styles.title, active && styles.activeText]}>{item.title}</Text>
+      {!!item.location && <Text numberOfLines={2} style={[styles.time, active && styles.activeText]}>장소: {item.location}</Text>}
       {variant === 'list' && <Text numberOfLines={2} style={[styles.time, active && styles.activeText]}>{time}</Text>}
       <Text numberOfLines={2} style={[styles.meta, active && styles.activeText]}>
         {state.type}{item.category === 'work' ? ' · 업무' : item.category === 'personal' ? ' · 개인' : ''}{state.recorded && !state.active ? '' : ` · ${phase}`}

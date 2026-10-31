@@ -31,3 +31,11 @@ test('형식이 틀리거나 예상하지 않은 초안 필드는 응답 오류�
     { kind: 'task', fields: { kind: 'event' } },
   ]) await assert.rejects(setup({ kind: 'reply', message: '초안', draft }).client.sendMessage(request), error => error.code === 'invalid_response');
 });
+
+test('전화 요청은 일정 ID와 버전이 유효할 때만 표시 가능한 응답으로 수용한다', async () => {
+  const valid = { kind: 'phone_request', message: '전화 내용을 확인해 주세요.', itemId: 'item-1', expectedRevision: 3 };
+  assert.deepEqual((await setup(valid).client.sendMessage(request)).result, valid);
+  for (const bad of [{ ...valid, itemId: '' }, { ...valid, expectedRevision: 0 }, { ...valid, expectedRevision: 1.5 }, { ...valid, expectedRevision: '3' }]) {
+    await assert.rejects(setup(bad).client.sendMessage(request), error => error.code === 'invalid_response');
+  }
+});

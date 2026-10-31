@@ -140,6 +140,7 @@ function parseFields(
   if (value.category != null && value.category !== "personal" && value.category !== "work") invalid("category");
   if (value.attendance != null && !["attended", "absent", "unknown"].includes(value.attendance as string)) invalid("attendance");
   if (value.kind === "task" && value.attendance != null) invalid("attendance");
+  if (value.location != null && (typeof value.location !== "string" || !value.location.trim() || Array.from(value.location).length > 2000)) invalid("location");
 
   let interval: Interval | null = null;
   if (value.timeSlot === null && value.kind === "event") {
@@ -193,7 +194,8 @@ function sameFields(before: ScheduleFields, beforeInterval: Interval | null, aft
     before.durationMinutes === after.fields.durationMinutes && sameDeadline && before.flexibility === after.fields.flexibility &&
     before.involvement === after.fields.involvement && before.completion === after.fields.completion &&
     (before.category ?? null) === (after.fields.category === undefined ? before.category ?? null : after.fields.category) &&
-    (before.attendance ?? null) === (after.fields.attendance === undefined ? before.attendance ?? null : after.fields.attendance);
+    (before.attendance ?? null) === (after.fields.attendance === undefined ? before.attendance ?? null : after.fields.attendance) &&
+    (before.location ?? null) === (after.fields.location === undefined ? before.location ?? null : after.fields.location);
 }
 
 function coordinationChange(before: ScheduleItem, beforeInterval: Interval | null, change: Change, after: ParsedFields | null): boolean {
@@ -212,7 +214,8 @@ function coordinationAlternativeKeepsOtherFields(before: ScheduleItem, change: C
     next.deadline === before.deadline && next.flexibility === before.flexibility &&
     next.involvement === before.involvement && next.completion === before.completion &&
     (next.category === undefined || (next.category ?? null) === (before.category ?? null)) &&
-    (next.attendance === undefined || (next.attendance ?? null) === (before.attendance ?? null));
+    (next.attendance === undefined || (next.attendance ?? null) === (before.attendance ?? null)) &&
+    (next.location === undefined || (next.location ?? null) === (before.location ?? null));
 }
 
 // Explicit relationships only: the server must never infer a link from a task title.

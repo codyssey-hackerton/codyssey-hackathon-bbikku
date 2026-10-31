@@ -111,10 +111,12 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
     const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check' || input.operation === 'contact_call_check';
     // Calendar sync owns its durable effect ledger and transactions; an outer transaction would self-lock its final sync-row update.
-    const detachedAttempt = readOnlyAttempt || input.operation === 'calendar_sync_run';
+    const detachedAttempt = readOnlyAttempt || input.operation === 'calendar_sync_run' ||
+      ['schedule_call_approve', 'schedule_call_check', 'schedule_call_propose'].includes(input.operation);
     // Only operations whose entire effect is committed with this record may recover a stale claim.
     const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'schedule_attendance', 'schedule_undo', 'memory_write', 'proposal_decision', 'review_schedule_write',
-      'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);
+      'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm',
+      'schedule_call_create', 'schedule_call_decision'].includes(input.operation);
     const claim = await this.store.transaction(input.userId, state => {
       const previous = state.idempotency.get(identity);
       if (previous) {

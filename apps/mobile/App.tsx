@@ -20,6 +20,7 @@ import { createChatClient } from './src/chat/client';
 import type { ChatEntryContext, CoordinationTarget, FormDraft } from './src/chat/client';
 import ProposalPanel from './src/proposals/ProposalPanel';
 import MemoryPanel from './src/memory/MemoryPanel';
+import ScheduleCallPanel from './src/contacts/ScheduleCallPanel';
 import ReviewPanel from './src/review/ReviewPanel';
 import CalendarScreen from './src/screens/CalendarScreen';
 import CalendarImportPanel from './src/calendar/CalendarImportPanel';
@@ -60,7 +61,9 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 
 function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null }) {
   const [tab, setTab] = useState<Tab>('home');
-  const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem'>('main');
+  const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall'>('main');
+  const [scheduleCallTarget, setScheduleCallTarget] = useState<{ itemId: string; expectedRevision: number } | null>(null);
+  const [phoneReturnToCall, setPhoneReturnToCall] = useState(false);
   const [memoryReturn, setMemoryReturn] = useState<'profile' | 'connections'>('profile');
   const profile = usePlanningProfile(api);
   const [onboarding, setOnboarding] = useState<'check' | 'show' | 'hidden'>(member ? 'check' : 'hidden');
@@ -176,7 +179,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     { label: 'Google 연결', run: () => setPanel('googleConnection') },
     { label: '캘린더 일정 가져오기', run: () => setPanel('calendarImport') },
     { label: 'Google 캘린더 동기화', run: () => { setCalendarSyncOpened(true); setPanel('calendarSync'); } },
-    { label: '전화 외부 연결', run: () => setPanel('phoneConnection') },
+    { label: '전화 외부 연결', run: () => { setPhoneReturnToCall(false); setPanel('phoneConnection'); } },
     { label: '내 정보·선호', run: () => { setMemoryReturn('connections'); setPanel('memory'); } },
     { label: '자동 검토 설정', run: () => { setReviewOpened(true); setPanel('review'); } },
     { label: '계정·앱 설정', run: onOpenSettings },
@@ -203,7 +206,12 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
           onOpenProposals={() => setPanel('proposals')} onOpenReviewSchedule={() => { setReviewOpened(true); setPanel('review'); }} onProposalCreated={refreshProposals}
           coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest}
-          entryContext={entryContext} onClearEntryContext={() => setEntryContext(undefined)} onApplyDraft={applyDraft} />
+          entryContext={entryContext} onClearEntryContext={() => setEntryContext(undefined)} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
+            if (scheduleCallTarget && (scheduleCallTarget.itemId !== target.itemId || scheduleCallTarget.expectedRevision !== target.expectedRevision)) {
+              setNavigationError('진행 중인 전화 요청을 먼저 확인해 주세요.');
+            } else if (!scheduleCallTarget) setScheduleCallTarget(target);
+            setPanel('scheduleCall');
+          }} />
       </Scene>
       <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'month'}><CalendarScreen selectedDate={selectedDate}
         onSelectDate={date => { setSelectedDate(date); setCalendarMode('day'); }} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
@@ -232,13 +240,15 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         setTab('chat'); setPanel('main');
       }} /></Scene>
       {panel === 'calendarImport' && <CalendarImportPanel api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
-      {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
+      {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel(phoneReturnToCall && scheduleCallTarget ? 'scheduleCall' : 'main')} />}
       {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
       <Scene visible={panel === 'profile'}><ProfilePanel profile={profile} member={member} onBack={() => setPanel('main')}
         onOpenGoogle={() => setPanel('googleConnection')} onOpenReview={() => { setReviewOpened(true); setPanel('review'); }}
         onOpenAccount={() => setPanel('connections')} onOpenMemory={() => { setMemoryReturn('profile'); setPanel('memory'); }} /></Scene>
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={() => { refresh(); profile.refresh(); }} onBack={() => setPanel(memoryReturn)} /></Scene>
+      {scheduleCallTarget && <Scene visible={panel === 'scheduleCall'}><ScheduleCallPanel api={api} {...scheduleCallTarget}
+        onClose={() => { setTab('chat'); setPanel('main'); }} onFinish={() => { setScheduleCallTarget(null); setTab('chat'); setPanel('main'); }} onScheduleChanged={refresh} onOpenPhoneSettings={() => { setPhoneReturnToCall(true); setPanel('phoneConnection'); }} /></Scene>}
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
       {addSession && <Scene visible={panel === 'addItem'}><AddItemPanel key={addSession.key} api={api} client={scheduleClient} timezone={timezone}
         selectedDate={addSession.date} kind={addSession.kind} item={addSession.item} pendingDraft={pendingDraft} onDraftHandled={() => setPendingDraft(undefined)}

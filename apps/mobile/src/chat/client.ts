@@ -8,6 +8,7 @@ export type ChatEntryContext = { key: string } & (
   | { kind: 'item'; id: string; expectedRevision: number; title: string }
   | { kind: 'form'; draft: FormDraft }
 );
+export type PhoneRequest = Extract<AgentResult, { kind: 'phone_request' }>;
 export type ChatResponse = { conversationId: string; result: AgentResult | { kind: 'reply'; message: string; draft: FormDraft } };
 
 // Initial development limit, not a model latency or service guarantee.
@@ -50,6 +51,8 @@ function isChatResponse(value: unknown): value is ChatResponse {
     case 'reply': return result.draft === undefined || isFormDraft(result.draft);
     case 'question': return isStringArray(result.missingFields);
     case 'proposal': return isStringArray(result.proposalIds);
+    case 'phone_request': return typeof result.itemId === 'string' && !!result.itemId.trim() && result.itemId.length <= 200 &&
+      typeof result.expectedRevision === 'number' && Number.isSafeInteger(result.expectedRevision) && result.expectedRevision >= 1;
     case 'failure': return typeof result.code === 'string' && typeof result.retryable === 'boolean';
     default: return false;
   }
