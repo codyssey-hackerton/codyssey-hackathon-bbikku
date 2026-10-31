@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, AppState, BackHandler, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import type { AgentResult, ScheduleItem } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { operationGuard } from '../api/operationGuard';
@@ -10,6 +10,9 @@ import type { MemoryFact } from '../memory/client';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
 import { createPreparationClient, parseMinutes } from './client';
+import RoutePlanner from './RoutePlanner';
+import { isTravelFresh, travelRemainingMs, type TravelFreshness } from '../travel/client';
+import SubwayPanel from '../subway/SubwayPanel';
 import type { PreparationProposalInput, PreparationResult } from './client';
 
 export interface PreparationProposalProps {
@@ -22,8 +25,8 @@ export interface PreparationProposalProps {
   onProposalCreated: (result: AgentResult) => void;
 }
 
-function Button({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
+function Button({ label, onPress, disabled = false, expanded }: { label: string; onPress: () => void; disabled?: boolean; expanded?: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ disabled, ...(expanded === undefined ? {} : { expanded }) }} disabled={disabled} onPress={onPress}
     style={[styles.button, disabled && styles.disabled]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
 }
 
@@ -33,7 +36,7 @@ const fields = [
   { key: 'bufferMinutes', label: '여유 시간 (분)' },
 ] as const;
 type FieldKey = typeof fields[number]['key'];
-type Field = { value: string; source: 'empty' | 'saved' | 'user'; validUntil: string | null };
+type Field = { value: string; source: 'empty' | 'saved' | 'user' | 'route' | 'route-stale'; validUntil: string | null; freshness?: TravelFreshness };
 type Form = Record<FieldKey, Field>;
 
 function savedPreferences(facts: MemoryFact[], now: number): Partial<Record<FieldKey, Field>> {
@@ -60,14 +63,27 @@ export default function PreparationProposalPanel({ target, expectedScheduleRevis
   const [memoryStatus, setMemoryStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [memoryAttempt, setMemoryAttempt] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+  const [routeTick, setRouteTick] = useState(0);
+  const [appActive, setAppActive] = useState(() => AppState?.currentState === 'active');
+  const appActiveRef = useRef(appActive);
   const hasSubmitted = useRef(false);
+  const routeLocked = useRef(false);
   const [callbackError, setCallbackError] = useState(false);
+  const [subwayOpen, setSubwayOpen] = useState(false);
   const mutation = useMutation<PreparationProposalInput, PreparationResult>(op => client.create(op), result => {
     if (result.kind === 'proposal') {
       try { onProposalCreated(result); } catch { setCallbackError(true); }
     }
   });
   const unresolved = mutation.state.status === 'pending' || (mutation.state.status === 'error' && mutation.state.uncertain);
+  useEffect(() => {
+    const subscription = AppState?.addEventListener('change', (next) => {
+      const active = next === 'active'; appActiveRef.current = active; setAppActive(active);
+      if (!active) setForm((current) => current.travelMinutes.source === 'route'
+        ? { ...current, travelMinutes: { ...current.travelMinutes, source: 'route-stale' } } : current);
+    });
+    return () => subscription?.remove();
+  }, []);
   useEffect(() => {
     let active = true;
     setMemoryStatus('loading');
@@ -91,6 +107,12 @@ export default function PreparationProposalPanel({ target, expectedScheduleRevis
     const timer = setTimeout(() => setNow(Date.now()), Math.min(Math.max(1, Math.min(...future) - Date.now() + 1), 2_147_483_647));
     return () => clearTimeout(timer);
   }, [form, now]);
+  useEffect(() => {
+    const field = form.travelMinutes;
+    if (field.source !== 'route' || !field.freshness || !isTravelFresh(field.freshness)) return;
+    const timer = setTimeout(() => setRouteTick((value) => value + 1), Math.max(1, travelRemainingMs(field.freshness) + 1));
+    return () => clearTimeout(timer);
+  }, [form.travelMinutes, routeTick]);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   const unresolvedRef = useRef(unresolved);
@@ -110,11 +132,16 @@ export default function PreparationProposalPanel({ target, expectedScheduleRevis
   const complete = preparationMinutes !== null && travelMinutes !== null && bufferMinutes !== null;
   const allZero = complete && preparationMinutes === 0 && travelMinutes === 0 && bufferMinutes === 0;
   const expired = (time: number) => fields.some(({ key }) => form[key].source === 'saved' && form[key].validUntil !== null && Date.parse(form[key].validUntil!) <= time);
+  const routeExpired = () => form.travelMinutes.source === 'route' && (!form.travelMinutes.freshness || !isTravelFresh(form.travelMinutes.freshness));
+  const staleRoute = form.travelMinutes.source === 'route-stale' || routeExpired();
   const locked = mutation.state.status !== 'idle';
+  routeLocked.current = locked;
   function generate() {
-    if (locked || operationGuard.hasUnresolved() || !complete || allZero) return;
+    if (locked || operationGuard.hasUnresolved() || !complete || allZero || form.travelMinutes.source === 'route-stale') return;
+    if (routeExpired() || (form.travelMinutes.source === 'route' && !appActiveRef.current)) { setRouteTick((value) => value + 1); return; }
     if (expired(Date.now())) { setNow(Date.now()); return; }
     hasSubmitted.current = true;
+    routeLocked.current = true;
     mutation.submit({ targetId: target.id, expectedTargetRevision: target.revision, expectedScheduleRevision,
       timezone, preparationMinutes, travelMinutes, bufferMinutes });
   }
@@ -131,16 +158,29 @@ export default function PreparationProposalPanel({ target, expectedScheduleRevis
     {memoryStatus === 'error' && <><Text style={styles.body}>저장된 시간 선호를 불러오지 못했습니다. 직접 입력할 수 있습니다.</Text>
       <Button label="저장된 시간 다시 조회" onPress={() => setMemoryAttempt((value) => value + 1)} disabled={locked} /></>}
     <Text style={styles.body}>제안만 생성합니다. 기존 일정은 그대로이며, 변경 사항은 별도로 검토하고 승인해야 반영됩니다.</Text>
+    <RoutePlanner api={api} appointmentAt={target.timeSlot?.startsAt ?? null} disabled={locked || !appActive} canChange={() => !routeLocked.current && appActiveRef.current} onInvalidate={() => {
+      if (routeLocked.current) return;
+      setForm((current) => current.travelMinutes.source === 'route'
+        ? { ...current, travelMinutes: { ...current.travelMinutes, source: 'route-stale' } } : current);
+    }} onUse={(result) => {
+      if (routeLocked.current || !appActiveRef.current || !isTravelFresh(result.freshness)) return;
+      setForm((current) => ({ ...current, travelMinutes: { value: String(result.durationMinutes), source: 'route', validUntil: null, freshness: result.freshness } }));
+    }} />
+    <Button label={subwayOpen ? '지하철 정보 닫기' : '지하철 정보 열기'} disabled={locked || !appActive} expanded={subwayOpen}
+      onPress={() => { if (!routeLocked.current && appActiveRef.current) setSubwayOpen((open) => !open); }} />
+    {subwayOpen && <SubwayPanel api={api} disabled={locked || !appActive} canChange={() => !routeLocked.current && appActiveRef.current} />}
     {fields.map(({ key, label }) => <View key={key}>
       <Text style={styles.label}>{label}</Text>
       {form[key].source === 'saved' && <Text style={styles.body}>저장된 선호</Text>}
+      {form[key].source === 'route' && <Text style={styles.body}>확인한 경로 조회 결과</Text>}
       <TextInput accessibilityLabel={label} value={form[key].value} editable={!locked} keyboardType="decimal-pad"
         onChangeText={(value) => setForm((current) => ({ ...current, [key]: { value, source: 'user', validUntil: null } }))} style={styles.input} />
     </View>)}
     {expired(now) && <Text accessibilityRole="alert" style={styles.error}>저장된 시간 선호가 만료되었습니다. 해당 값을 직접 확인하고 다시 입력해 주세요.</Text>}
+    {staleRoute && <Text accessibilityRole="alert" style={styles.error}>경로 조회 결과가 만료되었거나 장소·수단 또는 앱 상태가 바뀌어 이전 이동시간을 사용할 수 없습니다. 새 결과를 확인하거나 직접 입력해 주세요.</Text>}
     {!complete && <Text style={styles.body}>세 항목 모두 0 이상이며 밀리초 단위로 안전하게 표현할 수 있는 숫자로 입력해 주세요.</Text>}
     {allZero && <Text accessibilityRole="alert" style={styles.error}>세 시간이 모두 0이면 생성할 변경이 없습니다. 하나 이상 0보다 크게 입력해 주세요.</Text>}
-    <Button label="제안 생성" onPress={generate} disabled={locked || !complete || allZero || expired(now)} />
+    <Button label="제안 생성" onPress={generate} disabled={locked || !complete || allZero || expired(now) || staleRoute} />
     {mutation.state.status === 'pending' && <View accessibilityLiveRegion="polite" accessibilityState={{ busy: true }}>
       <ActivityIndicator /><Text>제안을 생성하고 있습니다.</Text>
     </View>}

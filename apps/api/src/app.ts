@@ -14,6 +14,9 @@ import { createPreparationProposal } from './preparation-service.ts';
 import { getCalendarConnection } from './google-calendar.ts';
 import { CalendarImportService } from './calendar-import.ts';
 import type { createKakaoPlaces } from './kakao-places.ts';
+import type { createKakaoTravel } from './kakao-travel.ts';
+import type { createOpenMeteo } from './open-meteo.ts';
+import type { createSeoulSubway } from './seoul-subway.ts';
 import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
 import { PhoneDispatch } from './phone-dispatch.ts';
 import { VoiceTokens } from './voice-token.ts';
@@ -59,6 +62,10 @@ const preparationMinutes = z.number().finite().nonnegative().refine(value => Num
 const preparationBody = z.object({ requestId: identifier, targetId: identifier, expectedTargetRevision: z.number().int().min(1), expectedScheduleRevision: z.number().int().min(0), timezone, preparationMinutes, travelMinutes: preparationMinutes, bufferMinutes: preparationMinutes }).strict();
 const calendarQuery = z.object({ calendarId: identifier, from: timestamp, to: timestamp }).strict();
 const placesQuery = z.object({ query: z.string().trim().min(1).max(100) }).strict();
+const travelPoint = z.object({ longitude: z.number().finite().min(-180).max(180), latitude: z.number().finite().min(-90).max(90) }).strict();
+const travelBody = z.object({ origin: travelPoint, destination: travelPoint, mode: z.string().min(1).max(30), departureAt: z.string().max(100).optional() }).strict();
+const weatherBody = z.object({ destination: travelPoint, appointmentAt: timestamp }).strict();
+const subwayBody = z.object({ stationName: z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f/\\?#]/.test(value) && value !== '.' && value !== '..') }).strict();
 const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
 const phoneConnectBody = z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict();
@@ -81,7 +88,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; places?: ReturnType<typeof createKakaoPlaces>; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -105,7 +112,27 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     } catch { voiceTokens = undefined; voiceWebhook = undefined; }
   }
   const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens) : undefined;
-  const runner = options.model ? new PlanningAgentRunner(planning, options.model) : undefined;
+  const gmailRepliesFor = (userId: string) => {
+    const connection = options.gmailReplyConnection;
+    return store.durable && connection?.userId === userId && typeof connection.checkReplies === 'function' &&
+      z.email().max(254).safeParse(connection.senderAddress).success ? connection : undefined;
+  };
+  const feature = (configured: boolean) => ({ status: configured ? 'configured' as const : 'not_configured' as const, access: 'app' as const });
+  const agentCapabilities = async (userId: string) => {
+    const schedulerStatus = options.schedulerStatus?.();
+    return {
+    calendar: feature(options.calendarConnection?.userId === userId),
+    email: feature(gmailAvailable(store, options.gmailContact, userId)),
+    emailReplies: feature(!!gmailRepliesFor(userId)),
+    phone: feature(!!voiceWebhook && !!voiceTokens && (await options.phoneConnections?.status(userId))?.status === 'available'),
+    places: feature(!!options.places && options.placesConfigured === true),
+    travelTime: { ...feature(!!options.travel && options.travelConfigured === true), modes: ['walk', 'transit', 'car'] as Array<'walk' | 'transit' | 'car'>,
+      scheduledDeparture: 'unsupported' as const },
+    scheduler: { status: schedulerStatus === 'available' ? 'configured' as const : schedulerStatus === 'degraded' ? 'degraded' as const : 'not_configured' as const,
+      access: 'app' as const },
+    };
+  };
+  const runner = options.model ? new PlanningAgentRunner(planning, options.model, agentCapabilities) : undefined;
   const now = () => options.clock?.() ?? new Date();
   let modelStatus: 'not_configured' | 'available' | 'degraded' = options.model ? 'available' : 'not_configured';
 
@@ -243,7 +270,7 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     data: {
       storage: { mode: planning.store.mode, durable: planning.store.durable },
       model: { id: MODEL_ID, reasoningEffort: REASONING_EFFORT, status: modelStatus },
-      integrations: { calendar: options.calendarConnection?.userId === authenticated.get(request) ? 'available' : 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: 'not_configured' },
+      integrations: { calendar: options.calendarConnection?.userId === authenticated.get(request) ? 'available' : 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: options.travel && options.travelConfigured === true ? 'available' : 'not_configured' },
       scheduler: { status: options.schedulerStatus?.() ?? 'not_configured' },
     },
   }));
@@ -251,11 +278,6 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     const available = gmailAvailable(store, options.gmailContact, authenticated.get(request)!);
     return { requestId: request.id, data: { status: available ? 'available' : 'not_configured', senderAddress: available ? options.gmailContact!.senderAddress : null } };
   });
-  const gmailRepliesFor = (userId: string) => {
-    const connection = options.gmailReplyConnection;
-    return store.durable && connection?.userId === userId && typeof connection.checkReplies === 'function' &&
-      z.email().max(254).safeParse(connection.senderAddress).success ? connection : undefined;
-  };
   app.get('/v1/email-reply-connection', async request => {
     const connection = gmailRepliesFor(authenticated.get(request)!);
     return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', senderAddress: connection?.senderAddress ?? null } };
@@ -278,6 +300,50 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
     if (result.error === 'invalid_query') throw invalidRequest();
     if (result.error === 'not_configured') throw new ApiError(503, 'not_configured', '장소 검색이 설정되지 않았습니다.');
     throw new ApiError(503, 'provider_unavailable', '장소 검색을 사용할 수 없습니다.', true);
+  });
+  app.post('/v1/travel/estimate', async request => {
+    const body = parse(travelBody, request.body);
+    if (!['walk', 'transit', 'car'].includes(body.mode) || body.departureAt !== undefined) {
+      throw new ApiError(422, 'unsupported', '이 이동 수단 또는 출발 시각은 지원하지 않습니다.');
+    }
+    if (!options.travel) throw new ApiError(503, 'not_configured', '이동시간 조회가 설정되지 않았습니다.');
+    const result = await options.travel.estimate(body);
+    if (result.ok) return { requestId: request.id, data: { durationMinutes: result.durationMinutes, provider: result.provider,
+      fetchedAt: result.fetchedAt, expiresAt: result.expiresAt, mode: body.mode } };
+    if (result.error === 'invalid_request') throw invalidRequest();
+    if (result.error === 'unsupported') throw new ApiError(422, 'unsupported', '이 이동 수단 또는 출발 시각은 지원하지 않습니다.');
+    if (result.error === 'no_route') throw new ApiError(404, 'no_route', '이동 경로를 찾지 못했습니다.');
+    if (result.error === 'not_configured') throw new ApiError(503, 'not_configured', '이동시간 조회가 설정되지 않았습니다.');
+    throw new ApiError(503, 'provider_unavailable', '이동시간을 조회할 수 없습니다.', true);
+  });
+  app.post('/v1/weather/forecast', async request => {
+    const body = parse(weatherBody, request.body);
+    if (!options.weather) throw new ApiError(503, 'unavailable', '날씨 조회를 사용할 수 없습니다.', true);
+    const result = await options.weather.forecast(body);
+    if (result.ok) {
+      const remainingTtlMs = Math.max(0, Math.min(300_000, Date.parse(result.forecast.expiresAt) - now().getTime()));
+      return { requestId: request.id, data: { ...result.forecast, remainingTtlMs } };
+    }
+    if (result.error === 'invalid_request') throw invalidRequest();
+    if (result.error === 'unsupported_range') throw new ApiError(422, 'unsupported_range', '해당 시각의 예보를 제공하지 않습니다.');
+    if (result.error === 'timeout') throw new ApiError(504, 'timeout', '날씨 조회 시간이 초과되었습니다.', true);
+    if (result.error === 'invalid_response') throw new ApiError(502, 'invalid_response', '날씨 응답을 확인할 수 없습니다.', true);
+    throw new ApiError(503, 'unavailable', '날씨 조회를 사용할 수 없습니다.', true);
+  });
+  app.post('/v1/subway/arrivals', async request => {
+    const body = parse(subwayBody, request.body);
+    if (!options.subway) throw new ApiError(503, 'not_configured', '지하철 도착 조회가 설정되지 않았습니다.');
+    const result = await options.subway.arrivals(body);
+    if (result.ok) {
+      const { ok: _ok, ...data } = result;
+      return { requestId: request.id, data };
+    }
+    if (result.error === 'invalid_request') throw invalidRequest();
+    if (result.error === 'not_configured') throw new ApiError(503, 'not_configured', '지하철 도착 조회가 설정되지 않았습니다.');
+    if (result.error === 'timeout') throw new ApiError(504, 'timeout', '지하철 도착 조회 시간이 초과되었습니다.', true);
+    if (result.error === 'invalid_response') throw new ApiError(502, 'invalid_response', '지하철 도착 응답을 확인할 수 없습니다.', true);
+    if (result.error === 'rate_limited') throw new ApiError(429, 'rate_limited', '지하철 조회 한도에 도달했습니다.', true);
+    throw new ApiError(503, 'unavailable', '지하철 도착 조회를 사용할 수 없습니다.', true);
   });
   app.get('/v1/phone-connection', async request => ({ requestId: request.id, data: await options.phoneConnections?.status(authenticated.get(request)!) ?? { status: 'not_configured', senderNumber: null, lastRequestId: null } }));
   app.post('/v1/phone-connection', async request => {

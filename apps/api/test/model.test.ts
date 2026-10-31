@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { z } from 'zod';
 import { createPlanningAgent } from '../src/agent.ts';
 import { createResponsesModel } from '../src/model.ts';
+import { PLANNING_PROMPT } from '../src/planning-prompt.ts';
 import { PlanningService } from '../src/planning-service.ts';
 import { MemoryPlanningStore } from '../src/planning-store.ts';
 import { createPlanningTools } from '../src/planning-tools.ts';
@@ -36,10 +37,7 @@ test('sends native tools, exact model settings and only user-facing context', as
     assert.equal(body.previous_response_id, undefined);
     assert.deepEqual(JSON.parse(body.input[1].content), { message: input.message, context: input.context });
     assert.ok(!JSON.stringify(body.input).includes('server-user'));
-    for (const phrase of ['ScheduleFields', 'expectedRevision', 'evidenceRefs', 'coordination target', 'approval',
-      'delay has no schedule impact', 'deadline has passed', 'original date range']) {
-      assert.ok(body.input[0].content.includes(phrase));
-    }
+    assert.deepEqual(body.input[0], { role: 'developer', content: PLANNING_PROMPT });
     return jsonResponse(completed(message('{"kind":"answer","text":"네"}')));
   };
   const model = createResponsesModel('project-test-key', fakeFetch);

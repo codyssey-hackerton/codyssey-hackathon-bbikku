@@ -47,3 +47,19 @@ test('read_memory applies recording and expiry boundaries before checking missin
   });
   await assert.rejects(tool.run({ keys: [], at }, 'bob'), /TOOL_SCOPE_MISMATCH/);
 });
+
+test('validate_changes exposes the actual scope without claiming preparation or travel relationships', async () => {
+  const service = new PlanningService(new MemoryPlanningStore(), () => new Date(at));
+  await service.command('alice', { expectedScheduleRevision: 0, changeSet: { changes: [{ changeId: 'event', operation: 'create', after: {
+    kind: 'event', title: '약속', timeSlot: { startsAt: '2026-11-01T15:00:00Z', endsAt: '2026-11-01T16:00:00Z', timezone: 'UTC' },
+    durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending',
+  } }] } });
+  const tool = createPlanningTools(service, await service.capture('alice', 'UTC')).find(value => value.name === 'validate_changes')!;
+  assert.match(tool.description, /준비·이동 시간과 약속 사이의 관계/);
+  assert.match(tool.description, /검증하지 않습니다/);
+  const result = await tool.run({ changeSet: { changes: [{ changeId: 'prep', operation: 'create', after: {
+    kind: 'task', title: '준비', timeSlot: { startsAt: '2026-11-01T08:00:00Z', endsAt: '2026-11-01T08:30:00Z', timezone: 'UTC' },
+    durationMinutes: 30, deadline: null, flexibility: 'flexible', involvement: 'personal', completion: 'pending',
+  } }] } }, 'alice') as { valid: boolean };
+  assert.equal(result.valid, true);
+});

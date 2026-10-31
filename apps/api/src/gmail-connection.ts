@@ -73,7 +73,7 @@ export async function readGmailCredential(path: string): Promise<GmailCredential
   } finally { await handle?.close(); }
 }
 
-export async function getGmailConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; fetcher?: typeof fetch }) {
+export async function getGmailConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; fetcher?: typeof fetch; userId?: string }) {
   const clientId = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_ID?.trim();
   const clientSecret = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
   if (!!clientId !== !!clientSecret || (clientId && !textValue(clientId)) || (clientSecret && !textValue(clientSecret))) throw unavailable();
@@ -113,5 +113,5 @@ export async function getGmailConnection(options: { env: NodeJS.ProcessEnv; cred
       } catch { throw unavailable(); }
     },
   });
-  return { userId: 'local-developer' as const, senderAddress: saved.senderAddress, dispatch: adapter.dispatch };
+  return { userId: options.userId ?? 'local-developer', senderAddress: saved.senderAddress, dispatch: adapter.dispatch };
 }

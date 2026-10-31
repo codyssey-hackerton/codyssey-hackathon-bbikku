@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +22,8 @@ async function freePort(): Promise<number> {
 function start(env: Record<string, string>): { child: ChildProcess; stderr: () => string } {
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
-    env: { PATH: process.env.PATH ?? '', PIKKU_OPENAI_API_KEY: '', PIKKU_DEV_AUTH: 'true', PIKKU_DEV_SESSION_TOKEN: 'local-test-token-only', ...env },
+    env: { PATH: process.env.PATH ?? '', PIKKU_OPENAI_API_KEY: '', PIKKU_DEV_AUTH: 'true', PIKKU_DEV_SESSION_TOKEN: 'local-test-token-only',
+      PIKKU_GOOGLE_CREDENTIAL_DIR: join(tmpdir(), `pikku-empty-${randomUUID()}`), ...env },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let errors = '';

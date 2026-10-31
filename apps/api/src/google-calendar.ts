@@ -8,7 +8,7 @@ const LIST_SCOPE = 'https://www.googleapis.com/auth/calendar.calendarlist.readon
 const unavailable = () => new PlanningError(503, 'provider_unavailable', '캘린더 조회에 실패했습니다.');
 type CalendarEvent = { id: string; etag: string; title: string; startsAt: string; endsAt: string; timezone: string; involvement: 'personal' | 'shared' };
 
-export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; fetcher?: typeof fetch }) {
+export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; fetcher?: typeof fetch; userId?: string }) {
   const clientId = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_ID?.trim();
   const clientSecret = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
   if (!!clientId !== !!clientSecret) throw unavailable();
@@ -81,7 +81,7 @@ export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; c
     }
     return { events, unsupportedCount };
   }
-  return { userId: 'local-developer' as const, accountRef: `google:${saved.subject}`, accountLabel: saved.senderAddress, listCalendars,
+  return { userId: options.userId ?? 'local-developer', accountRef: `google:${saved.subject}`, accountLabel: saved.senderAddress, listCalendars,
     resolveEvents, async listEvents(input: { calendarId: string; from: string; to: string }) {
       const result = await resolveEvents(input); return { events: result.events.map(({ involvement: _involvement, ...event }) => event), unsupportedCount: result.unsupportedCount };
     } };
