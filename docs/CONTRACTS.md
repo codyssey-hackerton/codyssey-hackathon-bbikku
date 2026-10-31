@@ -164,7 +164,7 @@ allowedOptions는 같은 공동 약속의 독립적인 검증된 대안들이며
 
 Gmail v1 발송은 PostgreSQL 등 영속 저장이 있어야 한다. send 요청은 화면에서 확인한 `expectedSenderAddress`를 포함하고 멱등 지문에도 묶는다. 현재 연결의 발신 주소가 다르면 무발송 충돌로 거절하고 계정을 다시 확인받는다. API는 `submitting`과 요청 식별을 먼저 확정하고 DB 잠금 밖에서 전송한다. 중복 요청이나 중단된 발송을 자동 재전송하지 않는다. 성공 응답의 메시지 ID는 Gmail 접수 증거이며 상대 수락·실제 수신 확인을 의미하지 않는다. `failed/outcome_unknown`을 새 승인 없이 ready로 되돌리는 경로는 제공하지 않는다. 발송 권한과 회신 읽기 권한은 분리하며 회신 처리·사용자 확인·조건부 반영은 §9를 따른다.
 
-Gmail 우선 연결을 선택했고 Google Calendar, Twilio+음성, Kakao/TMAP은 검증 후보다. OAuth 접근 동의는 개별 연락 승인이 아니다. Calendar 읽기/쓰기, Gmail 발송/회신 읽기 권한은 구분한다. 개발용 Gmail OAuth 콜백은 PROVIDER_SETUP에 명시하며 그 밖의 제공자 콜백·운영 DB 스키마·음성 모델·푸시 제공자는 미정으로 이 경계를 유지해 병렬 검증한다. 실제 테스트 발신·발송에는 승인된 테스트 상대와 내용이 필요하다.
+Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기와 Twilio 제한 음성 경로를 구현했으며 실제 검증 상태는 PROVIDER_SETUP을 따른다. 지도는 Kakao를 선택했고 장소 검색은 §10, 경로·이동시간은 별도 검증 대상이다. OAuth 접근 동의는 개별 연락 승인이 아니다. Calendar 읽기/쓰기, Gmail 발송/회신 읽기 권한은 구분한다. 개발용 Gmail OAuth 콜백은 PROVIDER_SETUP에 명시하며 그 밖의 제공자 콜백·운영 DB 스키마·음성 모델·푸시 제공자는 미정으로 이 경계를 유지해 병렬 검증한다. 실제 테스트 발신·발송에는 승인된 테스트 상대와 내용이 필요하다.
 
 ## 8. 첫 Calendar 읽기·선택 가져오기 / Twilio 전화 증분
 
@@ -212,3 +212,9 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 회신 기록·사용자 확인·최종 반영에는 영속 DB가 필요하다. 제공자와 모델 호출은 사용자 DB 잠금 밖에서 수행하며, 최종적으로 승인 스냅샷·수신자·일정/맥락 revision·제안/시간 유효성·충돌을 재검증한다. 적용한 대안은 applied, 같은 연락의 다른 대안은 stale로 바꾸고 결과와 같은 트랜잭션으로 저장한다. 최신성 검사에 실패하면 changed=false/needs_user_review를 반환하며 기존 약속을 유지한다. 전달 성공이나 모호한 회신만으로 적용하지 않는다.
 
 **저장 호환성:** 기존 JSONB에 선택 필드 contactResponses/voiceSessions를 추가하고 과거 row는 빈 Map으로 읽는다. 새 필드가 저장된 row는 이전 서버의 strict decoder와 호환되지 않으므로 같은 DB에 구·신 서버를 혼합 실행하지 않는다. 배포 시 관련 API·예약 프로세스 버전을 함께 맞추고 이전 버전으로 단순 롤백하지 않는다.
+
+## 10. 카카오 장소 검색 읽기 증분
+
+04 어댑터·06 API·00이 합의한 서버 읽기 계약이다. 인증된 `GET /v1/places/search?query=...`는 공백 제거 후 1~100자의 검색어만 받으며 추가/중복 쿼리 항목은 거절한다. 정상 data는 `{places: [{id, name, address, roadAddress, longitude, latitude}]}`다. Kakao 기본 첫 페이지 최대 15개이며 페이지네이션은 제공하지 않는다.
+
+검색어는 Kakao에 전달하고 REST 키는 서버 `PIKKU_KAKAO_REST_API_KEY`에서만 읽는다. 400 `invalid_request`, 미설정 503 `not_configured`, 시간 초과·제공자 오류·잘못된 응답은 503 `provider_unavailable`이며 원문 오류·키를 반환하지 않는다. PostgreSQL 저장이나 일정 변경은 없고 기존 capabilities 형식은 유지한다. 이 결과는 장소·좌표이며 이동시간, 경로, 지도 SDK 화면 또는 일정 장소 저장 계약이 아니다. 앱의 장소 선택 UI는 후속 연결한다.

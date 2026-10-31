@@ -9,6 +9,7 @@ import { startReviewScheduler, type ReviewScheduler } from './scheduler.ts';
 import { getGmailConnection } from './gmail-connection.ts';
 import { getGmailReplyConnection } from './gmail-reply-connection.ts';
 import { getCalendarConnection } from './google-calendar.ts';
+import { createKakaoPlaces } from './kakao-places.ts';
 import { PhoneConnections } from './phone-connection.ts';
 import { createVoiceResponsesModel } from './voice-model.ts';
 
@@ -41,6 +42,7 @@ if (developmentAuth) {
   catch { process.emitWarning('캘린더 연결 설정을 확인해 주세요.'); }
 }
 const phoneConnections = new PhoneConnections({ directory: process.env.PIKKU_PHONE_CREDENTIAL_DIR });
+const places = createKakaoPlaces({ apiKey: process.env.PIKKU_KAKAO_REST_API_KEY });
 // Only the explicitly named project key is used; do not discover global or other application keys.
 const projectKey = process.env.PIKKU_OPENAI_API_KEY;
 const model = projectKey?.trim() ? createResponsesModel(projectKey) : undefined;
@@ -66,7 +68,7 @@ for (const origin of webOrigins) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PIKKU_WEB_ORIGINS must contain exact HTTP(S) origins');
 }
-const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
+const app = buildApp({ previewRateLimit: previewAuth, webOrigins, trustLoopbackProxy, sessions, model, store, gmailContact, gmailReplyConnection, calendarConnection, places, phoneConnections, voice, allowLocalPhoneConnect: developmentAuth && ['127.0.0.1', '::1', 'localhost'].includes(host), schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }

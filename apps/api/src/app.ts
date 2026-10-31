@@ -13,6 +13,7 @@ import { PlanningError, PlanningService } from './planning-service.ts';
 import { createPreparationProposal } from './preparation-service.ts';
 import { getCalendarConnection } from './google-calendar.ts';
 import { CalendarImportService } from './calendar-import.ts';
+import type { createKakaoPlaces } from './kakao-places.ts';
 import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
 import { PhoneDispatch } from './phone-dispatch.ts';
 import { VoiceTokens } from './voice-token.ts';
@@ -57,6 +58,7 @@ const confirmResponseBody = checkRepliesBody.extend({ selectedOptionId: identifi
 const preparationMinutes = z.number().finite().nonnegative().refine(value => Number.isSafeInteger(value * 60_000));
 const preparationBody = z.object({ requestId: identifier, targetId: identifier, expectedTargetRevision: z.number().int().min(1), expectedScheduleRevision: z.number().int().min(0), timezone, preparationMinutes, travelMinutes: preparationMinutes, bufferMinutes: preparationMinutes }).strict();
 const calendarQuery = z.object({ calendarId: identifier, from: timestamp, to: timestamp }).strict();
+const placesQuery = z.object({ query: z.string().trim().min(1).max(100) }).strict();
 const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
 const phoneConnectBody = z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict();
@@ -79,7 +81,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; places?: ReturnType<typeof createKakaoPlaces>; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -268,6 +270,15 @@ export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: str
   });
   app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listCalendars() }));
   app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listEvents(parse(calendarQuery, request.query)) }));
+  app.get('/v1/places/search', async request => {
+    const { query } = parse(placesQuery, request.query);
+    if (!options.places) throw new ApiError(503, 'not_configured', '장소 검색이 설정되지 않았습니다.');
+    const result = await options.places.search(query);
+    if (result.ok) return { requestId: request.id, data: { places: result.places } };
+    if (result.error === 'invalid_query') throw invalidRequest();
+    if (result.error === 'not_configured') throw new ApiError(503, 'not_configured', '장소 검색이 설정되지 않았습니다.');
+    throw new ApiError(503, 'provider_unavailable', '장소 검색을 사용할 수 없습니다.', true);
+  });
   app.get('/v1/phone-connection', async request => ({ requestId: request.id, data: await options.phoneConnections?.status(authenticated.get(request)!) ?? { status: 'not_configured', senderNumber: null, lastRequestId: null } }));
   app.post('/v1/phone-connection', async request => {
     if (request.protocol !== 'https' && !options.allowLocalPhoneConnect) throw new ApiError(403, 'permission_denied', '안전한 연결이 필요합니다.');
