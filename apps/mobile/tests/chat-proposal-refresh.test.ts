@@ -216,7 +216,7 @@ test('validated proposals notify the latest parent callback once per successful 
   const { props, view } = await screen(fetcher, () => { previousCalls += 1; });
   send(view, '일정을 조정해 줘');
   assert.equal(previousCalls, 0);
-  assert.match(textOf(view.tree), /서버 응답을 기다리는 중/);
+  assert.match(textOf(view.tree), /답변을 준비하고 있어요/);
   const updated = { ...props, onProposalCreated: () => { currentCalls += 1; } };
   view.update(updated);
   first.resolve(chatResponse(proposal));
@@ -265,7 +265,7 @@ test('HTTP failure does not notify; a successful retry preserves the request and
   send(view, '일정 검토');
   await view.settle();
   assert.equal(calls, 0);
-  assert.match(textOf(view.tree), /서버 기능이 아직 설정되지 않았습니다/);
+  assert.match(textOf(view.tree), /AI 연결이 아직 설정되지 않았어요/);
   press(view, '같은 요청 다시 시도');
   assert.equal(calls, 0);
   assert.equal(requests[1].body, requests[0].body);
@@ -281,7 +281,7 @@ test('a malformed proposal response is rejected without notifying the parent', a
   send(view, '일정 검토');
   await view.settle();
   assert.equal(calls, 0);
-  assert.match(textOf(view.tree), /서버 응답 형식이 올바르지 않습니다/);
+  assert.match(textOf(view.tree), /서버 응답을 확인하지 못했어요/);
 });
 
 test('a late proposal from a remounted session cannot notify either session', async () => {
@@ -301,7 +301,7 @@ test('a late proposal from a remounted session cannot notify either session', as
   await view.settle();
   assert.equal(oldCalls, 0);
   assert.equal(newCalls, 0);
-  assert.match(textOf(view.tree), /서버 응답을 기다리는 중/);
+  assert.match(textOf(view.tree), /답변을 준비하고 있어요/);
   assert.doesNotMatch(textOf(view.tree), /새 제안을 확인하세요/);
   newResponse.resolve(chatResponse(proposal, 'new-conversation'));
   await view.settle();

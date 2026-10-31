@@ -229,6 +229,22 @@ test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
 });
 
+test('선호·상황에서 뒤로 가면 진입한 프로필 또는 연결 화면으로 돌아간다', async () => {
+  const { App } = await components;
+  globalThis.fetch = async () => response([]);
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, '설정 열기'); visiblePress(view, '내 선호와 상황');
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'MemoryPanel'));
+  node(view, 'MemoryPanel').props.onBack(); view.flush();
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '내 선호와 상황'));
+  visiblePress(view, '계정'); visiblePress(view, '내 정보·선호');
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'MemoryPanel'));
+  node(view, 'MemoryPanel').props.onBack(); view.flush();
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '연결 및 설정 닫기'));
+  view.unmount();
+});
+
 test('폼 AI 초안 왕복에서 원래 날짜와 입력을 보존하고 새 요청을 구분한다', async () => {
   const { App } = await components; let writes = 0;
   globalThis.fetch = async (raw, init) => {
@@ -820,8 +836,8 @@ test('Google 계정 로그인은 기존 세션 없이 인증하고 사용자 교
   operationGuard.clear(owner); press(view, 'Google 로그인 또는 가입');
   press(view, 'Google 로그인 시작'); await view.settle(); press(view, 'Google 로그인 화면 열기'); await view.settle();
   enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
-  assert.match(textOf(view.tree), /PERSONALIZE · 1 \/ 3/);
-  press(view, '다음'); assert.match(textOf(view.tree), /PERSONALIZE · 2 \/ 3/);
+  assert.match(textOf(view.tree), /PERSONALIZE · 1 \/ 2/);
+  press(view, '다음'); assert.match(textOf(view.tree), /PERSONALIZE · 2 \/ 2/);
   press(view, '이전'); press(view, '이전');
   assert.notEqual(chat(view).props.marker, before);
   for (const request of calls.filter(item => item.path.startsWith('/v1/auth/google/'))) {

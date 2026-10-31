@@ -4,7 +4,7 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
-import { AgentExecutionFailure, type ModelPort } from './agent.ts';
+import { AgentExecutionFailure, type AgentMetrics, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
 import { chatContext } from './chat-context.ts';
 import { createExternalTools } from './external-tools.ts';
@@ -50,6 +50,18 @@ class ApiError extends Error {
 class RetryableChatProviderError extends ApiError {
   constructor(message: string) { super(503, 'provider_unavailable', message, true); }
 }
+
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { void work.catch(() => {}); reject(new AgentExecutionFailure('AGENT_DEADLINE')); return; }
+    const abort = () => reject(new AgentExecutionFailure('AGENT_DEADLINE'));
+    signal.addEventListener('abort', abort, { once: true });
+    work.then(value => { signal.removeEventListener('abort', abort); resolve(value); },
+      error => { signal.removeEventListener('abort', abort); reject(error); });
+  });
+}
+
+type ChatMetrics = { requestMs: number; prepareMs: number; finalizeMs: number; modelCalls: number; modelMs: number; toolCalls: number; toolMs: number };
 
 const nonblank = z.string().max(200).refine(value => value.trim().length > 0);
 const requestBody = z.object({ requestId: nonblank }).passthrough();
@@ -107,7 +119,9 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalInsecure?: boolean; routineService?: RoutineService; calendarSync?: CalendarSyncService; previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; googleOAuth?: ReturnType<typeof createGoogleOAuth>; places?: ReturnType<typeof createKakaoPlaces>; travel?: ReturnType<typeof createKakaoTravel>; weather?: ReturnType<typeof createOpenMeteo>; subway?: ReturnType<typeof createSeoulSubway>; subwayConfigured?: boolean; placesConfigured?: boolean; travelConfigured?: boolean; phoneConnections?: PhoneConnections; managedCallWatch?: Pick<ReturnType<typeof createManagedCallWatch>, 'start' | 'stop'>; voice?: { publicBaseUrl: string; sessionKey: string; model?: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void>; chatDeadlineMs?: number; onChatMetrics?: (metrics: ChatMetrics) => void } = {}) {
+  const chatDeadlineMs = options.chatDeadlineMs ?? 120_000;
+  if (!Number.isSafeInteger(chatDeadlineMs) || chatDeadlineMs < 1 || chatDeadlineMs > 2_147_483_647) throw new Error('Invalid chat deadline');
   const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
   if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   if (options.webOrigins?.length) void app.register(cors, {
@@ -509,7 +523,23 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     return reply.code(result.status).send(result.body);
   });
 
+  app.get('/v1/chat/requests/:requestId', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const { requestId: id } = parse(z.object({ requestId: nonblank }).strict(), request.params);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
+    const data = await idempotency.getChat?.(authenticated.get(request)!, key, id);
+    if (!data) throw new ApiError(404, 'not_found', '요청을 찾을 수 없습니다.');
+    return reply.send({ requestId: id, data });
+  });
+
   app.post('/v1/chat', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const started = performance.now();
+    const agentMetrics: AgentMetrics = { modelCalls: 0, modelMs: 0, toolCalls: 0, toolMs: 0 };
+    let prepareMs = 0; let finalizeMs = 0;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), chatDeadlineMs);
+    try {
     const result = await runIdempotent(request, 'chat', async (_requestBody, control) => {
       const body = parse(chatBody, request.body);
       if (!runner) throw new ApiError(503, 'not_configured', 'AI 연결이 설정되지 않았습니다.');
@@ -527,16 +557,25 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
       let completed = false;
       try {
         let prepared;
+        const prepareStarted = performance.now();
         try {
-          prepared = await runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
-            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext });
+          if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
+          prepared = await untilAborted(runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
+            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext },
+          { signal: controller.signal, metrics: agentMetrics }), controller.signal);
+          if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
           modelStatus = 'available';
         } catch (error) {
           if (!(error instanceof AgentExecutionFailure)) throw error;
           modelStatus = 'degraded';
           throw new RetryableChatProviderError('AI 요청을 처리하지 못했습니다.');
-        }
-        const result = await control.finalize(() => store.atomic(userId, async () => {
+        } finally { prepareMs += performance.now() - prepareStarted; }
+        // Once finalization starts its transaction, wait for its definitive outcome.
+        clearTimeout(deadline);
+        const finalizeStarted = performance.now();
+        let result: HttpResult;
+        let finished = false;
+        try { result = await control.finalize(() => store.atomic(userId, async () => {
           const conversation = (await store.read(userId)).conversations.get(conversationId);
           if (conversation?.lock?.token !== conversationToken || Date.parse(conversation.lock.until) <= now().getTime()) {
             throw new ApiError(409, 'operation_in_progress', '이 대화의 실행 권한이 만료되었습니다.', true, { conversationId });
@@ -548,9 +587,10 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
               ...(prepared.baseline.externalExpiresAt ? { externalExpiresAt: prepared.baseline.externalExpiresAt } : {}) }].slice(-20);
             delete current.lock;
           });
+          finished = true;
           return { status: 200, body: { requestId: body.requestId, data: { conversationId, result: agentResult } } };
-        }));
-        completed = true;
+        })); } finally { finalizeMs += performance.now() - finalizeStarted; }
+        completed = finished;
         return result;
       } finally {
         if (!completed) await store.transaction(userId, state => {
@@ -562,6 +602,14 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
       }
     });
     return reply.code(result.status).send(result.body);
+    } finally {
+      clearTimeout(deadline);
+      const end = performance.now();
+      const metrics: ChatMetrics = { requestMs: end - started, prepareMs, finalizeMs,
+        modelCalls: agentMetrics.modelCalls, modelMs: agentMetrics.modelMs + (agentMetrics.modelActiveAt === undefined ? 0 : end - agentMetrics.modelActiveAt),
+        toolCalls: agentMetrics.toolCalls, toolMs: agentMetrics.toolMs + (agentMetrics.toolActiveAt === undefined ? 0 : end - agentMetrics.toolActiveAt) };
+      try { if (options.onChatMetrics) options.onChatMetrics(metrics); else console.info('chat_metrics', metrics); } catch { /* Metrics never affect the request. */ }
+    }
   });
 
   app.get('/v1/schedule', async request => {

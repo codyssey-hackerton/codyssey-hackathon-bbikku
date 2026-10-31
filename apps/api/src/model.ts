@@ -9,7 +9,7 @@ import { formDraft } from './chat-context.ts';
 export const MODEL_ID = 'gpt-6.1-terra';
 export const REASONING_EFFORT = 'high';
 
-const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes',
+const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes', 'find_free_slots',
   'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
   'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
 const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authorization', 'permissions', 'coordinationTarget']);
@@ -98,7 +98,8 @@ export function createResponsesModel(apiKey: string, fetcher: typeof fetch = fet
   // Weak keys verify provenance without retaining transcripts beyond the graph run.
   const trustedTraces = new WeakMap<object, { scope: string; name: string }>();
   return {
-    async decide(input) {
+    async decide(input, options) {
+      options?.signal?.throwIfAborted();
       const { functions, validators } = prepareTools(input.tools);
       let scope: string;
       const entry = input.context.entryContext;
@@ -132,7 +133,7 @@ export function createResponsesModel(apiKey: string, fetcher: typeof fetch = fet
         response = await fetcher('https://api.openai.com/v1/responses', {
           method: 'POST',
           headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-          signal: AbortSignal.timeout(60_000),
+          signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
           body: JSON.stringify({
             model: MODEL_ID,
             reasoning: { effort: REASONING_EFFORT },

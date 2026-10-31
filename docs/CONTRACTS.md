@@ -6,7 +6,7 @@
 
 - JSON HTTP, 기본 경로 `/v1`, 최초 구현은 비스트리밍 요청/응답. 식별자는 불투명한 문자열이다. 엔터티 `revision`은 1부터, 사용자별 `scheduleRevision`·`contextRevision`은 0부터 증가하는 정수다.
 - 인증은 `Authorization: Bearer <session token>`. 사용자 범위는 서버가 확인한다. 본문/Tool의 `userId`로 권한을 얻을 수 없다. 인증 제공자는 미정이며 로컬 개발용 단일 사용자 세션은 명시적으로 켠 환경에서만 허용한다. 공개 시연 서버에 무인증 개발 모드를 노출하지 않는다.
-- 모든 POST 본문에 `requestId`, 쓰기/승인/대화 재전송에는 `Idempotency-Key` 헤더가 필요하다. 추적 ID와 중복 키는 별개다. 같은 사용자·작업 종류·키에 같은 본문이면 첫 결과를 반환하고, 다른 본문이면 `idempotency_conflict`다. 중복 키 해시에서 `requestId`는 제외한다. 예외: 제안 저장 전의 AI/읽기 Tool 실패처럼 서버가 부작용 없음을 확인한 대화 실패는 같은 키·같은 본문으로 다시 처리할 수 있다. 이때도 다른 본문은 충돌이며 동시 재시도는 하나만 실행한다. 저장/발송 결과 불명은 이 예외가 아니다.
+- 모든 POST 본문에 `requestId`, 쓰기/승인/대화 재전송에는 `Idempotency-Key` 헤더가 필요하다. 추적 ID와 중복 키는 별개다. 같은 사용자·작업 종류·키에 같은 본문이면 첫 결과를 반환하고, 다른 본문이면 `idempotency_conflict`다. 중복 키 해시에서 `requestId`는 제외한다. 다만 새 chat ledger는 상태 조회의 원 요청 바인딩을 위해 최초 requestId를 별도 보존하고, 다른 requestId 재사용은409로 거절한다(기존 미기록 레코드는 종전 POST 동작 유지). 예외: 제안 저장 전의 AI/읽기 Tool 실패처럼 서버가 부작용 없음을 확인한 대화 실패는 같은 키·같은 본문으로 다시 처리할 수 있다. 이때도 다른 본문은 충돌이며 동시 재시도는 하나만 실행한다. 저장/발송 결과 불명은 이 예외가 아니다.
 - 시점은 오프셋 포함 ISO 8601, 시간대는 IANA(예: `Asia/Seoul`), 시간 길이는 분이다. 구간은 `[시작, 종료)`. 상대 날짜는 서버 시각·사용자 시간대로 해석한다.
 - `?`는 생략 가능, `null`은 명시적 미설정이다. 배열의 빈 값은 `[]`. 조회 실패·미설정과 실제 빈 결과를 구별한다. 샘플을 실제 AI/외부 서비스 성공으로 표시하지 않는다.
 - 아래에서 `data`는 성공 응답의 본문이다. 성공: `{requestId, data}`. 오류: `{requestId, error: {code, message, retryable, details?}}`. 비밀값은 반환하지 않는다.
@@ -81,6 +81,7 @@ type AgentResult =
 | 읽기/계산 Tool | 입력 | 출력 |
 |---|---|---|
 | `read_schedule` | `{from, to, timezone}` | `{items, scheduleRevision}` |
+| `find_free_slots` | `{from, to, timezone, durationMinutes}` | 지정 구간의 최대 연속 빈 구간 `slots[{startsAt,endsAt}]`, `truncated`, `scheduleRevision`, `timezone`, `asOf`; 최대20개 |
 | `read_memory` | `{keys: string[], at: string}` | `{facts, contextRevision, missingFields}`; keys=[]이면 유효한 사실 전체, 지정하면 해당 키만 |
 | `calculate_timing` | `{appointmentStart, preparationMinutes, travelMinutes, bufferMinutes}` | `{ready: true, departureAt, preparationStartAt}` 또는 `{ready: false, missingFields, message}` |
 | `validate_changes` | `{changeSet}` | 서버가 최신 snapshot을 조회한 `ValidationResult` |
@@ -92,6 +93,8 @@ type AgentResult =
 | `read_calendar_events` | `{calendarId, from, to}` | 해당 Calendar의 일정(최대 31일·50개), 미지원 건수 |
 | `list_contact_requests` | `{proposalId?}` | 사용자 소유 연락 이력(최대 20개) |
 | `read_contact_replies` | `{contactRequestId}` | 발송 완료 이메일의 회신 후보(최대 20개), 사용자 확인 필요 |
+
+`find_free_slots`는 인증 사용자 실행의 동일 스냅샷을 읽는 순수 계산이다. from/to는 offset 포함 ISO 시각이며 범위는 최대31일, durationMinutes는 1~44640 정수다. 유효한 IANA timezone을 받고 반환하지만 baseline 시간대와 같을 필요는 없다. 절대시각 기준 반열림 구간에서 모든 시간 지정 일정을 점유로 취급하며 겹침을 병합하고 snapshot.now 이전을 제외한다. 반환은 요청 길이 이상의 최대 연속 빈 구간이지 자동 생성된 일정이 아니다. 시간대 표시는 최상위 timezone, 구간 ISO는 경계 원본 offset을 보존한다. 미배치 작업·미가져온 Calendar·미입력 준비/이동시간까지 가용성을 보장하지 않는다. asOf는 조회 스냅샷 시각이다. 답변 완료 시 스냅샷 최신성을 확인하고 현재 시각으로 재계산해 원 반환 구간마다 같은 종료 경계의 충분한 잔여 구간이 있는지 확인한다. durationMinutes를 확보할 수 없어진 후보가 있으면 stale_snapshot이며, 큰 구간의 시작이 지났다는 이유만으로 실패시키지는 않는다. 과거 시작은 지금부터 남은 구간으로 해석하도록 프롬프트에 명시한다. 제안 저장·승인 시 실제 선택 시각은 기존 현재 시각·충돌 검증을 적용한다.
 
 Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못된 인수/권한 밖 조회는 거절한다. 외부 조회 어댑터는 §7 포트로 추가한다. LLM에 쓰기·발송 Executor를 직접 노출하지 않는다. 적용 직전 검증은 Tool 선택과 별개로 필수다. AI가 새로 배치하거나 시간을 바꾸는 일정의 시작이 검증 시점보다 과거이면 거절한다. 사용자 명시적 과거 기록과 시간이 그대로인 메타데이터 편집을 일괄 금지하는 규칙은 아니다.
 
@@ -118,6 +121,7 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 | `GET /health` | 없음, 인증 불필요 | `{status: 'ok'}` (프로세스 생존만 뜻함) |
 | `GET /v1/capabilities` | 인증 | `{storage: {mode: memory/postgres, durable: boolean}, model: {id, reasoningEffort, status}, integrations: {calendar, email, phone, travel}, scheduler: {status}}`; 각 status는 not_configured/available/degraded. available은 실행 경로 사용 가능이며 이번 호출 성공 보장 아님 |
 | `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}, entryContext?: ChatContext}` (두 context 동시 사용 불가) | `{conversationId, result: AgentResult}`; 초안은 §3 참고 |
+| `GET /v1/chat/requests/:requestId` | 인증 + 원 요청의 `Idempotency-Key` 헤더 | `{status: running/retryable/completed, result?: {status,body}}`; completed만 원 HTTP 결과 포함 |
 | `GET /v1/schedule` | query `from`, `to`, `timezone`, `includeUnscheduled=true/false` (기본 false) | `{items: ScheduleItem[], scheduleRevision}`; 겹치는 구간 조회, true이면 미배치 task도 포함 |
 | `POST /v1/schedule/commands` | `{requestId, expectedScheduleRevision, changeSet}` | `{outcome: 'applied', items: ScheduleItem[], deletedIds: string[], scheduleRevision}` |
 | `GET /v1/proposals` | query `status?`, `cursor?`, `limit?` (기본50, 최대100) | `{proposals: Proposal[], nextCursor: string/null}`; 현재 사용자, createdAt·id 내림차순. 예약 생성안도 같은 목록에서 조회 |
@@ -137,6 +141,12 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 | `POST /v1/contact-requests/:id/decision` | `{requestId, contactRevision, decision: accept/reject}` | `{contactRequest}`; accept는 최신 내용 재검증 후 ready, reject는 rejected로 종료, 실행기는 ready만 수신 |
 | `GET /v1/email-connection` | 인증 | `{status: available/not_configured, senderAddress: string/null}`; 현재 사용자에게 묶인 Gmail 연결, 토큰 반환 없음 |
 | `POST /v1/contact-requests/:id/send` | `{requestId, contactRevision, expectedSenderAddress}` + `Idempotency-Key` | `{contactRequest}`; ready·승인 스냅샷·최신 기준 재검증 후 영속 실행 의도 기록, Gmail 단일 시도 |
+
+### 채팅 처리 제한과 결과 확인
+
+채팅 상태 조회는 동일 사용자·chat operation·Idempotency-Key·최초 requestId에 묶이며 쓰기나 모델 재실행을 하지 않는다. completed는 성공 여부와 무관한 저장된 원 응답이므로 내부 HTTP status/body를 검증해야 한다. retryable은 해당 시도에 확정된 쓰기가 없음을 서버가 확인한 경우이며 기존 입력·requestId·키로 재시도한다. running은 아직 결과 미확정이다. 조회 실패·404·구 ledger의 requestId 미기록은 효과가 없다는 증거가 아니므로 앱의 결과 불명 보호를 풀지 않는다. 원 requestId는 기존 사용자 JSONB의 ledger 레코드에 선택적으로 저장하며 최상위 스키마를 늘리지 않는다. 새 chat 레코드는 같은 키·본문이어도 최초 requestId가 다르면 409 idempotency_conflict다. 기존 requestId 미기록 레코드의 재시도 동작은 보존하며 새 상태조회만 거절한다. 프로세스 중단으로 running이 남아도 조회가 임의로 retryable로 바꾸지 않는다. 같은 POST 재시도에서 유효 lease는409, 만료 lease는 기존 token fencing을 거쳐 회수한다. 따라서 running 조회 후에도 동일 요청 재시도를 막지 않는다.
+
+기본 전체 준비 제한은120초로 모델·조회 작업과 최종 저장 진입 전까지 적용한다. 모델의 호출별60초·최대10단계·클라이언트180초 제한도 유지한다. finalize에 진입한 DB 트랜잭션을 타이머로 중도 포기하지 않으므로 잠금·commit 지연까지 포함한 HTTP120초 hard 상한은 아니다. 늦게 끝난 준비 작업은 결과를 저장하지 못하게 차단한다. 상태 조회는 중단 버튼이나 서버 강제 취소를 뜻하지 않는다. 내용 없는 시간 계측으로 병목을 확인하며 모델·개인 입력·도구 출력·자격 원문은 계측에 넣지 않는다.
 
 일정 commands는 직접 폼 저장 경로이며 AI 추가 변경을 끼워 넣지 않는다. 충돌은 409로 거절하고 해결 선택을 받는다. **이미 존재하는 공동 약속의 시간 변경·취소는 `contact_required`로 분기**하며 직접 저장으로 상대 수락을 우회하지 않는다. 공동 약속 최초 등록은 이미 정해진 약속의 기록이며 연락 승인을 뜻하지 않는다. 메모·제목·본인 체크인 같은 비조정 변경은 해당 권한만 검증한다. 공동 약속의 involvement를 personal로 바꿔 이 경계를 우회할 수 없다. 외부 쓰기 권한은 별도다.
 

@@ -2,6 +2,14 @@
 
 2026-10-31 · 00 MAIN. 기준: PRD §2 / ADR v1 / CONTRACTS v1. 문서 PR #1은 병합됐으며 이 계획은 그 기준의 개발·검증 진행을 기록한다. 아키텍처를 다시 선택하지 않는다.
 
+## 선호 UX·채팅 복구 보완 — 2026-11-01 브랜치 작업
+
+`codex/preferences-chat-ux`에서 선호 화면 간소화·2단계 온보딩·선택적 기존 시간 수정에 이어 채팅 준비120초 제한, 내용 없는 단계별 계측, 원 요청의 읽기 전용 상태 복구, 서버 빈 시간 도구와 응답 직전 잔여 구간 재검증을 구현했다. 단일 Terra/high·서버 정본·명시 승인·기존 사용자 데이터 계약을 유지한다. [현재 UX/제한](DESIGN_INTEGRATION.md#지연-제한처리-결과-복구빈-시간-계산--최신-증분) · [HTTP 계약](CONTRACTS.md#채팅-처리-제한과-결과-확인)
+
+검증: 최종 상태/deadline/빈 시간/클라이언트 분실 응답 복구 집중16개(skip0), 별도 격리 PostgreSQL 기존 멱등성3개(skip0), workspace typecheck·web export·diff 검사 통과. 모바일415개·도메인44개 통과와 API 전체 성공도 확인했으나 전체·집중 검사는 중복되므로 합산하지 않는다. PG는 독립 임시 DB에서 새 store/app 인스턴스·lease 회수·구 token 차단·완료 결과 재생을 확인했으며 실제 프로세스 kill 또는 운영 장애 복구 검증은 아니다. 실제 모델·제공자·기기 성능 측정은 하지 않았다. 기존 미리보기 서버와 공개 URL을 이 산출물로 교체하지 않았다.
+
+이 브랜치 작업은 아직 커밋·푸시·공개 배포하지 않았다. 아래 공개 배포 기록은 이전 소스에 해당한다. AI 인터뷰·반복 규칙 AI 일괄 승인·DB 이관·공유 캐시 및 실제 속도 우위 주장은 이번 작업에 포함하지 않는다.
+
 ## 디자인·회원 통합 공개 배포 — 2026-11-01
 
 소스 `1bfa5befbbd78b7bb44d23a5f93cc6bb7aec46b6`를 `codex/figma-design-integration`에 게시하고 [공개 웹](https://pikku-bbikku-web-preview.vercel.app)과 기존 공개·VPN API에 배포했다. Vercel 배포는 `dpl_J22fuiv5Kr6uU5orTTX522xJjNvw`다. `main`과 Draft PR #17은 변경하지 않았다.

@@ -118,3 +118,45 @@ test('chat timeout can be configured independently of the shared default', async
   await client.sendMessage({ requestId: 'r', idempotencyKey: 'i', conversationId: null, message: 'hello', timezone: 'Asia/Seoul' });
   assert.equal(timeout, 90_000);
 });
+
+test('chat status lookup uses the original request ID and idempotency key as an authenticated GET', async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  let data: unknown = { status: 'running' };
+  const api = createApiClient({ baseUrl: 'http://localhost:3001', getSessionToken: () => 'session', fetcher: async (url, init) => {
+    calls.push({ url: String(url), init: init! }); return json({ requestId: 'request /+1', data });
+  } });
+  const client = createChatClient(api), original = { requestId: 'request /+1', idempotencyKey: 'original-key', conversationId: 'conversation-1' };
+  assert.deepEqual(await client.checkRequest!(original), { status: 'running' });
+  assert.equal(calls[0].url, 'http://localhost:3001/v1/chat/requests/request%20%2F%2B1');
+  assert.equal(calls[0].init.method, 'GET'); assert.equal(calls[0].init.body, undefined);
+  assert.equal((calls[0].init.headers as Record<string, string>).Authorization, 'Bearer session');
+  assert.equal((calls[0].init.headers as Record<string, string>)['Idempotency-Key'], 'original-key');
+  data = { status: 'retryable' }; assert.deepEqual(await client.checkRequest!(original), { status: 'retryable' });
+  const reply = { conversationId: 'conversation-1', result: { kind: 'proposal', message: '검토', proposalIds: ['p'] } };
+  data = { status: 'completed', result: { status: 200, body: { requestId: original.requestId, data: reply } } };
+  assert.deepEqual(await client.checkRequest!(original), { status: 'completed', result: { response: reply } });
+  data = { status: 'completed', result: { status: 409, body: { requestId: original.requestId, error: { code: 'conflict', message: 'changed', retryable: false } } } };
+  const recovered = await client.checkRequest!(original);
+  assert.equal(recovered.status, 'completed');
+  if (recovered.status === 'completed' && 'error' in recovered.result) { assert.equal(recovered.result.error.code, 'conflict'); assert.equal(recovered.result.error.status, 409); }
+  else assert.fail('expected stored error');
+});
+
+test('chat status lookup rejects mismatched and malformed saved results', async () => {
+  const original = { requestId: 'req', idempotencyKey: 'key', conversationId: 'conv' };
+  const bad = [
+    { status: 'running', result: {} }, { status: 'retryable', result: null }, { status: 'unknown' },
+    { status: 'completed', result: { status: 200, body: { requestId: 'other', data: { conversationId: 'conv', result: { kind: 'reply', message: 'ok' } } } } },
+    { status: 'completed', result: { status: 200, body: { requestId: 'req', data: { conversationId: 'other', result: { kind: 'reply', message: 'ok' } } } } },
+    { status: 'completed', result: { status: 200, body: { requestId: 'req', data: { conversationId: 'conv', result: { kind: 'proposal', message: 'ok', proposalIds: 'invalid' } } } } },
+    { status: 'completed', result: { status: 409, body: { requestId: 'req', error: { code: 'conflict', message: 'bad', retryable: 'yes' } } } },
+    { status: 'completed', result: { status: 302, body: { requestId: 'req' } } },
+  ];
+  for (const data of bad) {
+    const api = createApiClient({ baseUrl: 'http://localhost:3001', getSessionToken: () => 'session', fetcher: async () => json({ requestId: 'req', data }) });
+    await assert.rejects(createChatClient(api).checkRequest!(original), (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
+  }
+  const wrongEnvelope = createApiClient({ baseUrl: 'http://localhost:3001', getSessionToken: () => 'session',
+    fetcher: async () => json({ requestId: 'other', data: { status: 'running' } }) });
+  await assert.rejects(createChatClient(wrongEnvelope).checkRequest!(original), (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
+});

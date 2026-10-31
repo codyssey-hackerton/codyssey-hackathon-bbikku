@@ -21,7 +21,7 @@ export class ApiError extends Error {
 }
 
 export interface ApiClient {
-  get<T>(path: string): Promise<T>;
+  get<T>(path: string, options?: { idempotencyKey?: string; expectedRequestId?: string }): Promise<T>;
   post<T>(path: string, body: object, options: { idempotencyKey: string; timeoutMs?: number }): Promise<T>;
   patch?<T>(path: string, body: object, options: { idempotencyKey: string; timeoutMs?: number }): Promise<T>;
 }
@@ -42,7 +42,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const fetcher = options.fetcher ?? fetch;
   const defaultTimeoutMs = options.timeoutMs ?? 20_000;
 
-  async function request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: object, idempotencyKey?: string, timeoutOverrideMs?: number): Promise<T> {
+  async function request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: object, idempotencyKey?: string, timeoutOverrideMs?: number, expectedRequestId?: string): Promise<T> {
     const token = options.getSessionToken().trim();
     if (!token) throw new ApiError('unauthenticated', '개발 세션 토큰을 입력해 주세요.');
     if (baseUrl === null || !path.startsWith('/')) {
@@ -87,7 +87,8 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
         }
         throw new ApiError('invalid_response', '서버 오류 응답 형식이 올바르지 않습니다.', false, response.status);
       }
-      if (!isRecord(payload) || typeof payload.requestId !== 'string' || !('data' in payload)) {
+      if (!isRecord(payload) || typeof payload.requestId !== 'string' || !('data' in payload) ||
+          (expectedRequestId !== undefined && payload.requestId !== expectedRequestId)) {
         throw new ApiError('invalid_response', '서버 응답 형식이 올바르지 않습니다.', false, response.status);
       }
       return payload.data as T;
@@ -101,7 +102,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   }
 
   return {
-    get: <T>(path: string) => request<T>('GET', path),
+    get: <T>(path: string, options?: { idempotencyKey?: string; expectedRequestId?: string }) => request<T>('GET', path, undefined, options?.idempotencyKey, undefined, options?.expectedRequestId),
     post: <T>(path: string, body: object, { idempotencyKey, timeoutMs }: { idempotencyKey: string; timeoutMs?: number }) =>
       request<T>('POST', path, body, idempotencyKey, timeoutMs),
     patch: <T>(path: string, body: object, { idempotencyKey, timeoutMs }: { idempotencyKey: string; timeoutMs?: number }) =>

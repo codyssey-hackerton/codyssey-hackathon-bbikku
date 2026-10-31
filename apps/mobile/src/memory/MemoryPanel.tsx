@@ -3,10 +3,11 @@ import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, Pressable,
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
 import type { ApiClient } from '../api/http';
+import { operationGuard } from '../api/operationGuard';
 import { useMutation } from '../api/useMutation';
 import { createMemoryClient } from './client';
 import type { MemoryFact, MemoryWriteInput, MemoryWriteResult } from './client';
-import { parseMemoryDraft, userMemory } from './form';
+import { editableMemory, memoryDisplay, parseMemoryDraft, userMemory } from './form';
 import type { MemoryDraft } from './form';
 import { useMemory } from './useMemory';
 
@@ -16,13 +17,7 @@ interface MemoryPanelProps {
   onBack: () => void;
 }
 
-const initialDraft: MemoryDraft = { kind: 'preference', key: '', value: '', valueMode: 'text', validUntil: '' };
-const setupFields = [
-  { key: 'preparationMinutes', label: '준비시간' },
-  { key: 'travelMinutes', label: '이동시간' },
-  { key: 'bufferMinutes', label: '도착 여유시간' },
-] as const;
-type SetupKey = typeof setupFields[number]['key'];
+const initialDraft: MemoryDraft = { kind: 'preference', key: '', value: '', expiry: null };
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
@@ -65,7 +60,7 @@ function Button({ label, onPress, disabled = false, secondary = false }: {
 }
 
 function Choice<T extends string>({ label, options, value, onChange, disabled }: {
-  label: string; options: { value: T; label: string }[]; value: T; onChange: (value: T) => void; disabled: boolean;
+  label: string; options: { value: T; label: string }[]; value: T | null; onChange: (value: T) => void; disabled: boolean;
 }) {
   return (
     <View>
@@ -89,13 +84,14 @@ function Choice<T extends string>({ label, options, value, onChange, disabled }:
   );
 }
 
-function FactRow({ fact }: { fact: MemoryFact }) {
-  const value = typeof fact.value === 'string' ? (fact.value === '' ? '(빈 문자열)' : fact.value) : JSON.stringify(fact.value);
+function FactRow({ fact, disabled, onEdit }: { fact: MemoryFact; disabled: boolean; onEdit: (fact: MemoryFact) => void }) {
+  const display = memoryDisplay(fact);
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>{fact.kind === 'preference' ? '명시 선호' : '일시 상황'} · {fact.key}</Text>
-      <Text style={styles.body}>{value}</Text>
-      <Text style={styles.hint}>{fact.validUntil === null ? '만료 시각 없음' : `유효 종료: ${fact.validUntil}`}</Text>
+      <Text style={styles.cardTitle}>{fact.kind === 'preference' ? '선호' : '일시 상황'} · {display.title}</Text>
+      {display.lines.map((line, index) => <Text key={index} style={styles.body}>{line}</Text>)}
+      {fact.validUntil !== null && <Text style={styles.hint}>{new Date(fact.validUntil).toLocaleString('ko-KR')}까지</Text>}
+      {editableMemory(fact) && <Button label={`${display.title} 수정`} onPress={() => onEdit(fact)} disabled={disabled} secondary />}
     </View>
   );
 }
@@ -104,9 +100,10 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
   const client = useMemo(() => createMemoryClient(api), [api]);
   const { load, refresh } = useMemory(client);
   const [draft, setDraft] = useState<MemoryDraft>(initialDraft);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<MemoryFact | null>(null);
   const submittedDraft = useRef<MemoryDraft | null>(null);
-  const [setup, setSetup] = useState<Record<SetupKey, string>>({ preparationMinutes: '', travelMinutes: '', bufferMinutes: '' });
-  const submittedSetup = useRef<{ key: SetupKey; value: string } | null>(null);
+  const submittedEdit = useRef<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [parentRefreshError, setParentRefreshError] = useState(false);
   const mutation = useMutation<MemoryWriteInput, MemoryWriteResult>(
@@ -114,17 +111,13 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
     () => {
       if (!isCurrent()) return;
       const submitted = submittedDraft.current;
-      setDraft((current) => {
-        return submitted && current.kind === submitted.kind && current.key === submitted.key &&
-          current.value === submitted.value && current.valueMode === submitted.valueMode &&
-          current.validUntil === submitted.validUntil ? initialDraft : current;
-      });
-      submittedDraft.current = null;
-      const setupSubmission = submittedSetup.current;
-      if (setupSubmission) {
-        setSetup((current) => current[setupSubmission.key] === setupSubmission.value ? { ...current, [setupSubmission.key]: '' } : current);
-        submittedSetup.current = null;
+      if (submitted && draft.kind === submitted.kind && draft.key === submitted.key &&
+          draft.value === submitted.value && draft.expiry === submitted.expiry && (editing?.id ?? null) === submittedEdit.current) {
+        setDraft(initialDraft);
+        setEditing(null);
       }
+      submittedDraft.current = null;
+      submittedEdit.current = null;
       setFormError(null);
       refresh();
       try {
@@ -149,30 +142,46 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
 
   function save() {
     if (disabled || load.status !== 'success') return;
-    const parsed = parseMemoryDraft(draft, load.data.contextRevision, Date.now());
+    if (operationGuard.hasUnresolved()) {
+      setFormError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.');
+      return;
+    }
+    let timezone = '';
+    try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* validation below */ }
+    const parsed = parseMemoryDraft(draft, load.data.contextRevision, Date.now(), timezone, editing?.validUntil ?? null);
     if (!parsed.ok) {
       setFormError(parsed.message);
       return;
     }
+    const existing = load.data.facts.find((fact) => fact.kind === parsed.input.kind && fact.key === parsed.input.key);
+    if (editing && (!existing || existing.id !== editing.id || existing.revision !== editing.revision ||
+        existing.source.type !== 'user' || !editableMemory(existing))) {
+      setFormError('저장된 내용이 변경되었어요. 목록에서 다시 선택해 주세요.');
+      return;
+    }
+    if (!editing && existing) {
+      setFormError('이미 저장된 이름이에요. 기존 내용을 보호하기 위해 다른 이름을 입력해 주세요.');
+      return;
+    }
     submittedDraft.current = { ...draft };
-    submittedSetup.current = null;
+    submittedEdit.current = editing?.id ?? null;
     if (mutation.state.status === 'success' || mutation.state.status === 'error') mutation.reset();
     mutation.submit(parsed.input);
   }
 
-  function saveSetup(key: SetupKey, label: string) {
-    if (disabled || load.status !== 'success') return;
-    const raw = setup[key].trim();
-    const value = Number(raw);
-    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) || !Number.isFinite(value)) {
-      setFormError(`${label}은 0 이상의 숫자로 입력해 주세요.`);
-      return;
-    }
+  function editFact(fact: MemoryFact) {
+    if (disabled || !editableMemory(fact) || typeof fact.value !== 'string') return;
+    setEditing(fact);
+    setDraft({ kind: fact.kind as MemoryDraft['kind'], key: fact.key, value: fact.value,
+      expiry: fact.kind === 'situation' ? 'keep' : null });
     setFormError(null);
-    submittedDraft.current = null;
-    submittedSetup.current = { key, value: setup[key] };
-    if (mutation.state.status === 'success' || mutation.state.status === 'error') mutation.reset();
-    mutation.submit({ expectedContextRevision: load.data.contextRevision, kind: 'preference', key, value, validUntil: null });
+    setFormOpen(true);
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+    setDraft(initialDraft);
+    setFormError(null);
   }
 
   function refreshAfterConflict() {
@@ -194,7 +203,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
       <FlatList
         data={entries.set}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <FactRow fact={item} />}
+        renderItem={({ item }) => <FactRow fact={item} disabled={disabled} onEdit={editFact} />}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.content}
         ListHeaderComponent={(
@@ -203,9 +212,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
               <Text accessibilityRole="header" style={styles.title}>내 선호와 상황</Text>
               <Button label="뒤로" onPress={onBack} secondary />
             </View>
-            <Text style={styles.body}>직접 입력한 선호와 만료 시각이 있는 일시 상황을 관리합니다.</Text>
-            <Text style={styles.hint}>관찰·추정과 사용자 입력이 아닌 정보는 이 목록에 표시하지 않습니다.</Text>
-
+            <Text style={styles.body}>저장된 선호와 일시 상황을 확인할 수 있어요.</Text>
             {load.status === 'loading' && (
               <View style={styles.status} accessibilityLiveRegion="polite"><ActivityIndicator /><Text>메모리를 불러오는 중입니다.</Text></View>
             )}
@@ -215,30 +222,6 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
                 <Button label="목록 다시 불러오기" onPress={refresh} secondary />
               </View>
             )}
-            {load.status === 'success' && (
-              <View style={styles.statusBlock}>
-                <Text style={styles.hint}>조회 기준: {load.at}</Text>
-                <Button label="목록 새로고침" onPress={refresh} disabled={saving} secondary />
-              </View>
-            )}
-
-            <Text accessibilityRole="header" style={styles.subtitle}>시간 최소 설정</Text>
-            <Text style={styles.hint}>알고 있는 시간만 분 단위로 각각 저장하세요. 비워 둔 항목은 변경되지 않으며 나중에 설정할 수 있습니다. 이동시간은 직접 입력한 값입니다.</Text>
-            {setupFields.map(({ key, label }) => {
-              const saved = entries.set.find((fact) => fact.kind === 'preference' && fact.key === key);
-              return (
-                <View key={key} style={styles.statusBlock}>
-                  <Text style={styles.label}>{label} (분)</Text>
-                  {saved && <Text style={styles.hint}>현재 저장값: {typeof saved.value === 'number' ? `${saved.value}분` : JSON.stringify(saved.value)}</Text>}
-                  <TextInput accessibilityLabel={`${label} 분`} accessibilityHint="0 이상의 숫자를 입력하세요. 비워 두면 변경되지 않습니다."
-                    value={setup[key]} onChangeText={(value) => { setSetup((current) => ({ ...current, [key]: value })); setFormError(null); }}
-                    editable={!disabled} keyboardType="decimal-pad" style={[styles.input, disabled && styles.disabled]} placeholder="분 입력" />
-                  <Button label={`${label} 저장`} onPress={() => saveSetup(key, label)} disabled={disabled} secondary />
-                </View>
-              );
-            })}
-            <Button label="나중에 설정" onPress={onBack} secondary />
-            {formError && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{formError}</Text>}
             {saving && <View style={styles.status} accessibilityLiveRegion="polite"><ActivityIndicator /><Text>저장 요청을 처리 중입니다.</Text></View>}
             {mutation.state.status === 'success' && <Text accessibilityLiveRegion="polite" style={styles.success}>서버에 저장했습니다.</Text>}
             {mutation.state.status === 'error' && (
@@ -259,43 +242,43 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
               </View>
             )}
 
-            <Text accessibilityRole="header" style={styles.subtitle}>선호 또는 상황 입력</Text>
-            <Choice label="종류" value={draft.kind} disabled={disabled} onChange={(kind) => updateDraft({ kind })} options={[
-              { value: 'preference', label: '명시 선호' }, { value: 'situation', label: '일시 상황' },
-            ]} />
-            <View>
-              <Text style={styles.label}>항목 이름</Text>
-              <TextInput accessibilityLabel="항목 이름" value={draft.key} onChangeText={(key) => updateDraft({ key })}
-                editable={!disabled} autoCapitalize="none" style={[styles.input, disabled && styles.disabled]} placeholder="예: 공부 시간대" />
-            </View>
-            <Choice label="값 입력 방식" value={draft.valueMode} disabled={disabled} onChange={(valueMode) => updateDraft({ valueMode })} options={[
-              { value: 'text', label: '일반 텍스트' }, { value: 'json', label: 'JSON' },
-            ]} />
-            <View>
-              <Text style={styles.label}>값</Text>
-              <TextInput accessibilityLabel="값" accessibilityHint={draft.valueMode === 'json' ? '유효한 JSON 값을 입력하세요.' : '일반 텍스트로 입력하세요.'}
-                value={draft.value} onChangeText={(value) => updateDraft({ value })} editable={!disabled} multiline
-                style={[styles.input, styles.valueInput, disabled && styles.disabled]} placeholder={draft.valueMode === 'json' ? '예: ["오전", "오후"]' : '예: 오전이 좋아요'} />
-              {draft.valueMode === 'json' && <Text style={styles.hint}>JSON의 null은 미설정으로 표시됩니다.</Text>}
-            </View>
-            <View>
-              <Text style={styles.label}>만료 시각 {draft.kind === 'situation' ? '(필수)' : '(선택)'}</Text>
-              <TextInput accessibilityLabel={`만료 시각 ${draft.kind === 'situation' ? '필수' : '선택'}`}
-                accessibilityHint="날짜, 시각과 UTC 오프셋을 입력하세요. 예: 2026-11-01T18:00:00+09:00"
-                value={draft.validUntil} onChangeText={(validUntil) => updateDraft({ validUntil })} editable={!disabled}
-                autoCapitalize="none" autoCorrect={false} style={[styles.input, disabled && styles.disabled]}
-                placeholder="2026-11-01T18:00:00+09:00" />
-              <Text style={styles.hint}>오프셋을 포함해 입력하세요. 선호는 비워 두면 만료 시각이 없습니다.</Text>
-            </View>
-            <Button label="저장" onPress={save} disabled={disabled} />
-            <Text accessibilityRole="header" style={styles.subtitle}>입력된 선호와 상황</Text>
+            <Text accessibilityRole="header" style={styles.subtitle}>저장된 선호와 상황</Text>
           </View>
         )}
-        ListEmptyComponent={load.status === 'success' ? <Text style={styles.hint}>설정된 선호와 상황이 없습니다.</Text> : undefined}
-        ListFooterComponent={load.status === 'success' && entries.unset.length > 0 ? (
+        ListEmptyComponent={load.status === 'success' ? <Text style={styles.hint}>저장된 선호와 상황이 없습니다.</Text> : undefined}
+        ListFooterComponent={load.status === 'success' ? (
           <View style={styles.section}>
-            <Text accessibilityRole="header" style={styles.subtitle}>미설정 항목</Text>
-            {entries.unset.map((fact) => <Text key={fact.id} style={styles.hint}>{fact.key} · 값 미설정</Text>)}
+            {entries.unset.length > 0 && <View style={styles.section}>
+              <Text accessibilityRole="header" style={styles.subtitle}>미설정 항목</Text>
+              {entries.unset.map((fact) => <Text key={fact.id} style={styles.hint}>{memoryDisplay(fact).title} · 값 미설정</Text>)}
+            </View>}
+            <Button label={formOpen ? '입력 접기' : '선호 또는 상황 추가'} onPress={() => setFormOpen(!formOpen)} secondary />
+            {formOpen && <>
+              {editing && <Text style={styles.body}>{editing.key} 수정 중</Text>}
+              <Choice label="종류" value={draft.kind} disabled={disabled || !!editing} onChange={(kind) => updateDraft({ kind, expiry: null })} options={[
+                { value: 'preference', label: '선호' }, { value: 'situation', label: '일시 상황' },
+              ]} />
+              <View>
+                <Text style={styles.label}>항목 이름</Text>
+                <TextInput accessibilityLabel="항목 이름" value={draft.key} onChangeText={(key) => updateDraft({ key })}
+                  editable={!disabled && !editing} autoCapitalize="none" style={[styles.input, (disabled || !!editing) && styles.disabled]} placeholder="예: 공부 시간대" />
+              </View>
+              <View>
+                <Text style={styles.label}>내용</Text>
+                <TextInput accessibilityLabel="내용" value={draft.value} onChangeText={(value) => updateDraft({ value })} editable={!disabled} multiline
+                  style={[styles.input, styles.valueInput, disabled && styles.disabled]} placeholder="예: 오전이 좋아요" />
+              </View>
+              {draft.kind === 'situation' && <>
+                <Choice label="언제까지 유지할까요?" value={draft.expiry} disabled={disabled} onChange={(expiry) => updateDraft({ expiry })} options={[
+                  ...(editing?.validUntil ? [{ value: 'keep' as const, label: `기존 기간 유지 (${new Date(editing.validUntil).toLocaleString('ko-KR')}까지)` }] : []),
+                  { value: 'today', label: '오늘까지' }, { value: 'week', label: '7일 동안' },
+                ]} />
+                <Text style={styles.hint}>기기 시간대 기준이에요. 7일은 오늘을 포함하며 마지막 날이 끝나면 만료돼요.</Text>
+              </>}
+              {formError && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{formError}</Text>}
+              <Button label="저장" onPress={save} disabled={disabled} />
+              {editing && <Button label="수정 취소" onPress={cancelEdit} disabled={disabled} secondary />}
+            </>}
           </View>
         ) : undefined}
       />

@@ -26,31 +26,30 @@ function OnboardingContent({ profile, onComplete, onBack }: OnboardingPanelProps
   useEffect(() => {
     if (profile.mutation.state.status !== 'success' || !profile.mutation.canRetry || !submitted.current) return;
     const action = submitted.current; submitted.current = null;
-    if (action === 'skip') onComplete(); else setStep(3);
+    if (action === 'skip') onComplete(); else setStep(2);
   }, [profile.mutation.state, profile.mutation.canRetry, onComplete]);
   const locked = profileLocked(profile);
   const navigationLocked = profile.mutation.state.status === 'pending' || (profile.mutation.state.status === 'error' && profile.mutation.state.uncertain);
   function save() {
     const value = fromDraft(draft, 'completed');
-    if (!value) { setFormError('시간은 0부터 1440까지의 정수로 입력하거나 비워 주세요.'); return; }
     setFormError('');
     if (baseline.current !== null && profile.save(value, baseline.current)) submitted.current = 'complete';
     else setFormError('설정을 다시 불러온 뒤 저장해 주세요.');
   }
   function skip() { if (profile.skip()) submitted.current = 'skip'; else setFormError('설정을 다시 불러온 뒤 건너뛰어 주세요.'); }
-  const sections = ['goals', 'timing', 'period'] as const;
-  const titles = ['어떤 하루를\n만들고 싶나요?', '나에게 필요한\n시간이 있나요?', '편한 시간대가\n있나요?'];
-  const hints = ['관심 있는 활동을 선택해 주세요. 선택하지 않아도 돼요.', '모르는 시간은 빈 값으로 남겨주세요.', '생활 패턴은 선택사항이며 자동 추정하지 않아요.'];
+  const sections = ['goals', 'period'] as const;
+  const titles = ['어떤 하루를\n만들고 싶나요?', '편한 시간대가\n있나요?'];
+  const hints = ['관심 있는 활동을 선택해 주세요. 선택하지 않아도 돼요.', '생활 패턴은 선택사항이며 자동 추정하지 않아요.'];
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-    {step < 3 ? <>
-      <Text style={styles.eyebrow}>PERSONALIZE · {step + 1} / 3</Text>
+    {step < 2 ? <>
+      <Text style={styles.eyebrow}>PERSONALIZE · {step + 1} / 2</Text>
       <Text accessibilityRole="header" style={styles.title}>{titles[step]}</Text><Text style={styles.hint}>{hints[step]}</Text>
-      <View style={styles.track}><View style={[styles.progress, { width: `${(step + 1) * 100 / 3}%` }]} /></View>
+      <View style={styles.track}><View style={[styles.progress, { width: `${(step + 1) * 100 / 2}%` }]} /></View>
       <ProfileStatus profile={profile} />
       {profile.load.status === 'success' && <PreferenceFields section={sections[step]} draft={draft} setDraft={setDraft} disabled={locked} />}
       {!!formError && <Text accessibilityRole="alert" style={styles.error}>{formError}</Text>}
       <View style={styles.actions}>
-        {step < 2 ? <ActionButton label="다음" disabled={locked} onPress={() => { if (step === 1 && !fromDraft(draft, 'completed')) { setFormError('시간은 0부터 1440까지의 정수로 입력하거나 비워 주세요.'); return; } setFormError(''); setStep(step + 1); }} />
+        {step < 1 ? <ActionButton label="다음" disabled={locked} onPress={() => { setFormError(''); setStep(step + 1); }} />
           : <ActionButton label="저장하고 완료" disabled={locked} onPress={save} />}
         <ActionButton label="설정은 모두 나중에" secondary disabled={locked} onPress={skip} />
         <Text style={styles.hint}>지금까지 선택한 내용은 저장하지 않아요. 기존에 저장된 설정은 유지됩니다.</Text>

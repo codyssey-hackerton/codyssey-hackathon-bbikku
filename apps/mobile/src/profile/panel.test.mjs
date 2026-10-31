@@ -44,15 +44,17 @@ function render(Component, props) {
 function nodes(v) { if (!v || typeof v !== 'object') return []; if (Array.isArray(v)) return v.flatMap(nodes); return [v, ...nodes(v.children)]; }
 function text(v) { if (v == null) return ''; if (typeof v === 'string' || typeof v === 'number') return String(v); if (Array.isArray(v)) return v.map(text).join(''); return text(v.children); }
 function press(view, label) { const n = nodes(view.tree).find(n => n.type === 'Pressable' && (n.props.accessibilityLabel === label || text(n.children) === label)); assert.ok(n, `missing ${label}`); assert.notEqual(n.props.disabled, true); n.props.onPress(); view.flush(); }
-function input(view, label, value) { const n = nodes(view.tree).find(n => n.type === 'TextInput' && n.props.accessibilityLabel === label); assert.ok(n); n.props.onChangeText(value); view.flush(); }
+function input(view, label, value) { const n = nodes(view.tree).find(n => n.type === 'TextInput' && n.props.accessibilityLabel === label); assert.ok(n, label); if (value !== undefined) { n.props.onChangeText(value); view.flush(); return; } return n.props.value; }
 const fact = value => ({ id: 'f', revision: 1, kind: 'preference', key: 'planning_preferences', value, source: { type: 'user', ref: 'a' }, recordedAt: '2026-11-01T00:00:00Z', validUntil: null });
 function root({ api, onComplete }) { const profile = usePlanningProfile(api); return jsx(OnboardingPanel, { profile, onComplete }); }
 test('onboarding saves selected inputs only and completion follows explicit success', async t => {
  let finish, completed = 0, sent;
  const api = { async get() { return { facts: [], contextRevision: 2 }; }, post(path, body) { sent = body; return new Promise(resolve => { finish = resolve; }); } };
  const view = render(root, { api, onComplete: () => completed++ }); t.after(view.close); await view.settle();
- press(view, '운동·건강건강한 루틴 이어가기'); press(view, '다음'); input(view, '준비시간 분', '0'); press(view, '다음'); press(view, '저장하고 완료'); await view.settle();
- assert.equal(completed, 0); assert.deepEqual(sent.value.goals, ['health']); assert.equal(sent.value.timing.preparationMinutes, 0); assert.equal(sent.value.timing.bufferMinutes, null); assert.equal(sent.value.preferredPeriod, null);
+ assert.match(text(view.tree), /1 \/ 2/); press(view, '운동·건강건강한 루틴 이어가기'); press(view, '다음');
+ assert.match(text(view.tree), /2 \/ 2/); assert.doesNotMatch(text(view.tree), /준비시간|이동시간|여유시간/);
+ press(view, '오전이 편해요'); press(view, '저장하고 완료'); await view.settle();
+ assert.equal(completed, 0); assert.deepEqual(sent.value.goals, ['health']); assert.deepEqual(sent.value.timing, { preparationMinutes: null, travelEstimateMinutes: null, bufferMinutes: null }); assert.equal(sent.value.preferredPeriod, 'morning');
  finish({ fact: fact(sent.value), contextRevision: 3 }); await view.settle(); assert.match(text(view.tree), /준비가 끝났어요/); assert.equal(completed, 0);
  press(view, '시작하기'); assert.equal(completed, 1);
 });
@@ -67,14 +69,39 @@ test('skip does not complete after a timeout; successful retry retains the opera
  assert.equal(completed, 1); assert.deepEqual(calls[0], calls[1]);
 });
 function profileRoot({ api, callbacks }) { const profile = usePlanningProfile(api); return jsx(ProfilePanel, { profile, member: { id: 'member', displayName: '실제 사용자', email: 'member@example.test' }, ...callbacks }); }
-test('profile edits keep unrelated fields and pass only explicit member info', async t => {
+test('profile goal and period edits preserve existing timing and explicit member info', async t => {
  const initial = { version: 1, goals: ['work'], timing: { preparationMinutes: 0, travelEstimateMinutes: 22, bufferMinutes: null }, preferredPeriod: 'morning', onboardingStatus: 'completed' };
  let saved; const api = { async get() { return { facts: [fact(initial)], contextRevision: 7 }; }, async post(path, body) { saved = body; return { fact: fact(body.value), contextRevision: 8 }; } };
  const callbacks = { onBack() {}, onOpenGoogle() {}, onOpenReview() {}, onOpenAccount() {}, onOpenMemory() {} };
  const view = render(profileRoot, { api, callbacks }); t.after(view.close); await view.settle(); assert.match(text(view.tree), /실제 사용자/);
- press(view, '준비·이동·여유시간'); input(view, '도착 여유시간 분', '12'); press(view, '저장'); await view.settle();
- assert.deepEqual(saved.value, { ...initial, timing: { ...initial.timing, bufferMinutes: 12 } }); assert.equal(saved.expectedContextRevision, 7);
+ assert.doesNotMatch(text(view.tree), /준비·이동·여유시간/);
+ press(view, '목표·활동 및 선호'); press(view, '운동·건강건강한 루틴 이어가기'); press(view, '오후가 편해요'); press(view, '저장'); await view.settle();
+ assert.deepEqual(saved.value, { ...initial, goals: ['work', 'health'], preferredPeriod: 'afternoon' }); assert.equal(saved.expectedContextRevision, 7);
  assert.match(text(view.tree), /내 프로필/);
+});
+test('optional time editor preserves null and zero, validates, and saves only explicit changes', async t => {
+ const initial = { version: 1, goals: ['work'], timing: { preparationMinutes: 0, travelEstimateMinutes: 22, bufferMinutes: null }, preferredPeriod: 'morning', onboardingStatus: 'completed' };
+ const writes = []; const api = { async get() { return { facts: [fact(initial)], contextRevision: 7 }; }, async post(path, body) { writes.push(body); return { fact: fact(body.value), contextRevision: 8 }; } };
+ const callbacks = { onBack() {}, onOpenGoogle() {}, onOpenReview() {}, onOpenAccount() {}, onOpenMemory() {} };
+ const view = render(profileRoot, { api, callbacks }); t.after(view.close); await view.settle();
+ assert.doesNotMatch(text(view.tree), /저장된 시간 기준 수정/); press(view, '목표·활동 및 선호');
+ const toggle = nodes(view.tree).find(node => node.props?.accessibilityLabel === '저장된 시간 기준 수정');
+ assert.equal(toggle.props.accessibilityState.expanded, false);
+ assert.ok(!nodes(view.tree).some(node => node.type === 'TextInput')); press(view, '저장된 시간 기준 수정');
+ assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '저장된 시간 기준 수정').props.accessibilityState.expanded, true);
+ assert.equal(input(view, '준비시간 분'), '0'); assert.equal(input(view, '이동 예상시간 분'), '22'); assert.equal(input(view, '도착 여유시간 분'), '');
+ input(view, '도착 여유시간 분', '1441'); press(view, '저장'); assert.equal(writes.length, 0); assert.match(text(view.tree), /0부터 1440/);
+ input(view, '준비시간 분', ''); input(view, '이동 예상시간 분', '0'); input(view, '도착 여유시간 분', '25');
+ press(view, '저장된 시간 기준 수정'); press(view, '저장'); await view.settle();
+ assert.equal(writes.length, 1); assert.equal(writes[0].expectedContextRevision, 7);
+ assert.deepEqual(writes[0].value, { ...initial, timing: { preparationMinutes: null, travelEstimateMinutes: 0, bufferMinutes: 25 } });
+});
+test('onboarding completion retains previously saved timing exactly', async t => {
+ const initial = { version: 1, goals: ['work'], timing: { preparationMinutes: 0, travelEstimateMinutes: 42, bufferMinutes: null }, preferredPeriod: null, onboardingStatus: 'skipped' };
+ let saved; const api = { async get() { return { facts: [fact(initial)], contextRevision: 7 }; }, async post(path, body) { saved = body; return { fact: fact(body.value), contextRevision: 8 }; } };
+ const view = render(root, { api, onComplete() {} }); t.after(view.close); await view.settle();
+ press(view, '다음'); press(view, '오전이 편해요'); press(view, '저장하고 완료'); await view.settle();
+ assert.deepEqual(saved.value.timing, initial.timing); assert.equal(saved.value.onboardingStatus, 'completed');
 });
 test('a failed profile load still permits returning to the previous screen', async t => {
  let back = 0; const api = { async get() { throw new ApiError('network', 'offline', true); } };

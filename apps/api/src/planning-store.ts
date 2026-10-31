@@ -7,7 +7,7 @@ import type { HttpResult } from './idempotency.ts';
 export type StoredApproval = { approval: Approval; subject: Proposal };
 export type Conversation = { turns: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; lock?: { token: string; until: string } };
 export type DurableIdempotencyRecord = { fingerprint: string; operationId: string; state: 'running' | 'retryable' | 'completed';
-  result?: HttpResult; token?: string; leaseUntil?: string };
+  result?: HttpResult; token?: string; leaseUntil?: string; requestId?: string };
 export type StatusUndo = {
   completion?: { previous: ScheduleItem['completion']; current: ScheduleItem['completion'] };
   attendance?: { previous: NonNullable<ScheduleItem['attendance']> | null; current: NonNullable<ScheduleItem['attendance']> | null };

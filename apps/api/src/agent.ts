@@ -18,8 +18,9 @@ export interface ModelPort {
   decide(input: AgentInput & {
     observations: Observation[];
     tools: { name: string; description: string; inputSchema: unknown }[];
-  }): Promise<unknown>;
+  }, options?: { signal?: AbortSignal }): Promise<unknown>;
 }
+export type AgentMetrics = { modelCalls: number; modelMs: number; toolCalls: number; toolMs: number; modelActiveAt?: number; toolActiveAt?: number };
 // Only read/calculation tools are exposed to the reasoning loop.
 // Approved mutations belong to a separate application service.
 export interface ReadTool {
@@ -33,6 +34,8 @@ export function createPlanningAgent(options: {
   tools: ReadTool[];
   validateProposal: (decision: Extract<AgentDecision, { kind: 'proposal' }>, userId: string) => Promise<string[]>;
   maxSteps?: number;
+  signal?: AbortSignal;
+  metrics?: AgentMetrics;
 }) {
   const tools = new Map(options.tools.map(tool => [tool.name, tool]));
   if (tools.size !== options.tools.length) throw new Error('Duplicate tool name');
@@ -48,29 +51,44 @@ export function createPlanningAgent(options: {
     .addNode('reason', async state => {
       if (state.steps >= maxSteps) throw new AgentExecutionFailure('AGENT_STEP_LIMIT');
       try {
-        const decision = Decision.parse(await options.model.decide({
+        options.signal?.throwIfAborted();
+        const started = performance.now();
+        if (options.metrics) { options.metrics.modelCalls++; options.metrics.modelActiveAt = started; }
+        let output: unknown;
+        try { output = await options.model.decide({
           userId: state.userId, message: state.message, context: state.context,
           observations: state.observations,
           tools: options.tools.map(t => ({ name: t.name, description: t.description, inputSchema: z.toJSONSchema(t.input) })),
-        }));
+        }, { signal: options.signal }); } finally { if (options.metrics) { options.metrics.modelMs += performance.now() - started; delete options.metrics.modelActiveAt; } }
+        options.signal?.throwIfAborted();
+        const decision = Decision.parse(output);
         return { decision, steps: state.steps + 1 };
       } catch { throw new AgentExecutionFailure('AGENT_MODEL_FAILURE'); }
     })
     .addNode('read_tool', async state => {
       try {
+        options.signal?.throwIfAborted();
         const decision = state.decision;
         if (decision?.kind !== 'tool_call') throw new Error('Unexpected tool transition');
         const tool = tools.get(decision.name);
         if (!tool) throw new Error('TOOL_NOT_ALLOWED');
         const input = tool.input.parse(decision.input);
-        const result = await tool.run(input, state.userId);
+        const started = performance.now();
+        if (options.metrics) { options.metrics.toolCalls++; options.metrics.toolActiveAt = started; }
+        let result: unknown;
+        try { result = await tool.run(input, state.userId); }
+        finally { if (options.metrics) { options.metrics.toolMs += performance.now() - started; delete options.metrics.toolActiveAt; } }
+        options.signal?.throwIfAborted();
         return { observations: [...state.observations, { name: tool.name, input, result,
           ...(decision.providerTrace === undefined ? {} : { providerTrace: decision.providerTrace }) }] };
       } catch { throw new AgentExecutionFailure('AGENT_READ_FAILURE'); }
     })
     .addNode('validate', async state => {
       if (state.decision?.kind !== 'proposal') throw new Error('Unexpected proposal transition');
-      return { validationErrors: await options.validateProposal(state.decision, state.userId) };
+      options.signal?.throwIfAborted();
+      const validationErrors = await options.validateProposal(state.decision, state.userId);
+      options.signal?.throwIfAborted();
+      return { validationErrors };
     })
     .addEdge(START, 'reason')
     .addConditionalEdges('reason', state => state.decision?.kind === 'tool_call' ? 'read_tool' : state.decision?.kind === 'proposal' ? 'validate' : END)

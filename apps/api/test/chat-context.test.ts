@@ -51,7 +51,7 @@ test('폼과 신규 작성은 구조화된 초안만 반환하고 일정 및 제
   const first = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'form'), payload: { ...body, entryContext } });
   assert.equal(first.statusCode, 200);
   assert.deepEqual(first.json().data.result, { kind: 'reply', message: '초안을 확인해 주세요.', draft: { kind: 'routine', fields: { title: '운동', weekdays: ['1', '3'] } } });
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'form'), payload: { ...body, requestId: 'r2', entryContext } });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'form'), payload: { ...body, entryContext } });
   assert.deepEqual(replay.json(), first.json());
   assert.equal(calls, 1);
   const fresh = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'create'), payload: { ...body, entryContext: { kind: 'create' } } });

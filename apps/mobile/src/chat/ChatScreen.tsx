@@ -26,21 +26,25 @@ export type RevisionRequest = { key: string; proposalId: string; text: string; c
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     switch (error.code) {
-      case 'unauthenticated': return '개발 연결 설정에서 세션 토큰을 확인해 주세요.';
-      case 'not_configured': return '필요한 서버 기능이 아직 설정되지 않았습니다.';
-      case 'not_implemented': return '대화 기능이 서버에 아직 구현되지 않았습니다.';
-      case 'timeout': return '서버 응답 시간이 초과되어 요청 처리 결과를 확인할 수 없습니다.';
-      case 'network': return '서버에 연결할 수 없습니다. 서버 주소와 네트워크를 확인해 주세요.';
-      case 'invalid_configuration': return 'API 서버 주소를 확인해 주세요.';
-      case 'invalid_response': return '서버 응답 형식이 올바르지 않습니다.';
-      case 'stale_proposal': case 'conflict': return '기준 정보가 변경되었습니다. 최신 일정을 확인해 주세요.';
+      case 'unauthenticated': return '로그인 상태를 확인해 주세요.';
+      case 'not_configured': return 'AI 연결이 아직 설정되지 않았어요.';
+      case 'not_implemented': return '대화 기능을 아직 사용할 수 없어요.';
+      case 'timeout': return '응답 시간이 지나 요청 결과를 확인하지 못했어요.';
+      case 'network': return '서버에 연결하지 못했어요. 네트워크를 확인해 주세요.';
+      case 'invalid_configuration': return '서버 주소를 확인해 주세요.';
+      case 'invalid_response': return '서버 응답을 확인하지 못했어요.';
+      case 'provider_unavailable': return 'AI 연결을 사용할 수 없어요. 잠시 후 다시 확인해 주세요.';
+      case 'operation_in_progress': return '이전 요청을 처리 중이에요. 잠시 후 다시 확인해 주세요.';
+      case 'rate_limited': return '요청이 많아요. 잠시 후 다시 확인해 주세요.';
+      case 'invalid_request': return '입력 내용을 확인해 주세요.';
+      case 'stale_proposal': case 'conflict': return '기준 정보가 바뀌었어요. 최신 일정을 확인해 주세요.';
       default: return '서버 요청에 실패했습니다. 잠시 후 다시 시도해 주세요.';
     }
   }
   return '요청 결과를 확인할 수 없습니다.';
 }
 
-export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenMemory, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft }: {
+export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft }: {
   client: ChatClient;
   timezone: string;
   scheduleClient: ScheduleClient;
@@ -48,7 +52,6 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   refreshVersion: number;
   onOpenProposals: () => void;
   onProposalCreated: () => void;
-  onOpenMemory: () => void;
   onOpenReviewSchedule: () => void;
   coordinationTarget?: CoordinationTarget & { title: string };
   onClearCoordinationTarget: () => void;
@@ -69,6 +72,9 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const [agentError, setAgentError] = useState<string | null>(null);
   const [activeEntry, setActiveEntry] = useState<ChatEntryContext | undefined>();
   const [suggestedDraft, setSuggestedDraft] = useState<{ key: string; draft: FormDraft } | null>(null);
+  const [longWait, setLongWait] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkMessage, setCheckMessage] = useState('');
   const counter = useRef(0);
   const scrollRef = useRef<ScrollViewInstance>(null);
   const sentRecovery = useRef<string | null>(null);
@@ -76,8 +82,12 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const sentTarget = useRef<(CoordinationTarget & { title: string }) | undefined>(undefined);
   const sentEntry = useRef<ChatEntryContext | undefined>(undefined);
   const previousTarget = useRef(coordinationTarget);
+  const requestClient = useRef<ChatClient | null>(null);
+  const currentClient = useRef(client); currentClient.current = client;
+  const checkingRef = useRef(false), mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const action = useMutation<Input, ChatResponse>(
-    (operation) => client.sendMessage({ ...operation.input, requestId: operation.requestId, idempotencyKey: operation.idempotencyKey }),
+    (operation) => requestClient.current!.sendMessage({ ...operation.input, requestId: operation.requestId, idempotencyKey: operation.idempotencyKey }),
     (response) => {
       setConversationId(response.conversationId);
       const result = response.result;
@@ -119,6 +129,12 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const messageDraft = activeRecovery?.text ?? activeRevision?.text ?? draft;
   const displayedTarget = busy ? sentTarget.current : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
   useEffect(() => { if (action.state.status === 'success') action.reset(); }, [action.state.status]);
+  useEffect(() => {
+    setLongWait(false);
+    if (action.state.status !== 'pending') return;
+    const timer = setTimeout(() => setLongWait(true), 15_000);
+    return () => clearTimeout(timer);
+  }, [action.state.status]);
   useEffect(() => {
     if (busy || activeEntry === entryContext) return;
     const changedKey = activeEntry?.key !== entryContext?.key;
@@ -183,7 +199,31 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       ? { kind: 'item', id: selectedEntry.id, expectedRevision: selectedEntry.expectedRevision }
       : selectedEntry?.kind === 'form' ? { kind: 'form', draft: selectedEntry.draft }
       : selectedEntry?.kind === 'create' ? { kind: 'create' } : undefined;
+    requestClient.current = client; setCheckMessage('');
     action.submit({ message, conversationId, timezone, ...(target ? { coordinationTarget: { id: target.id, expectedRevision: target.expectedRevision } } : {}), ...(context ? { entryContext: context } : {}) });
+  }
+
+  async function checkResult() {
+    const original = requestClient.current;
+    if (checkingRef.current || !original?.checkRequest || original !== currentClient.current) return;
+    checkingRef.current = true; setChecking(true); setCheckMessage('');
+    try {
+      const status = await action.check(async operation => {
+        const result = await original.checkRequest!({ requestId: operation.requestId, idempotencyKey: operation.idempotencyKey, conversationId: operation.input.conversationId });
+        if (currentClient.current !== original) throw new Error('connection_changed');
+        return result;
+      }, result => result.status !== 'completed' ? null : 'response' in result.result
+        ? { result: result.result.response } : { error: result.result.error });
+      if (!mounted.current || !status) return;
+      if (status.status === 'running') setCheckMessage('서버에서 요청을 처리 중입니다. 잠시 후 다시 확인해 주세요.');
+      else if (status.status === 'retryable') setCheckMessage('같은 요청을 다시 시도할 수 있습니다.');
+      else if (status.status === 'completed' && 'error' in status.result) setCheckMessage('서버에 저장된 요청 오류를 확인했습니다.');
+    } catch {
+      if (mounted.current) setCheckMessage('결과를 확인하지 못했습니다. 기존 요청은 계속 보존됩니다.');
+    } finally {
+      checkingRef.current = false;
+      if (mounted.current) setChecking(false);
+    }
   }
 
   return (
@@ -193,7 +233,6 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         <Text style={styles.title} accessibilityRole="header">AI 비서</Text>
         <View style={styles.links}>
           <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 검토</Text></Pressable>
-          <Pressable accessibilityRole="button" onPress={onOpenMemory} style={styles.pill}><Icon name="memory" size={16} /><Text style={styles.pillText}>선호·상황</Text></Pressable>
           <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.pill}><Icon name="clock" size={16} /><Text style={styles.pillText}>자동 검토 설정</Text></Pressable>
         </View>
         {activeEntry && !activeRecovery && !activeRevision && <View style={styles.target}>
@@ -256,12 +295,16 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
           <Text style={styles.targetHint}>입력 화면에서 기존 값과 비교하고 반영할 항목을 선택하세요.</Text>
           {onApplyDraft && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => onApplyDraft(suggestedDraft.draft)} style={styles.draftButton}><Text style={styles.draftButtonText}>입력 화면에서 검토</Text></Pressable>}
         </View>}
-        {action.state.status === 'pending' && <View style={styles.loading} accessibilityLiveRegion="polite"><ActivityIndicator size="small" color={colors.primary} /><Text style={styles.loadingText}>서버 응답을 기다리는 중입니다.</Text></View>}
+        {action.state.status === 'pending' && <View style={styles.loading} accessibilityLiveRegion="polite"><ActivityIndicator size="small" color={colors.primary} /><Text style={styles.loadingText}>{longWait ? '답변이 오래 걸리고 있어요. 다른 화면을 확인해도 요청은 취소되지 않아요.' : '답변을 준비하고 있어요.'}</Text></View>}
         {agentError && <Text style={styles.error} accessibilityRole="alert">{agentError}</Text>}
         {action.state.status === 'error' && <View style={styles.errorBox}>
           <Text style={styles.error} accessibilityRole="alert">{errorMessage(action.state.error)}</Text>
           {action.state.uncertain && <Text style={styles.error}>결과를 확인할 때까지 같은 요청만 다시 시도합니다.</Text>}
-          <Pressable accessibilityRole="button" onPress={action.retry} style={styles.link}><Text style={styles.linkText}>같은 요청 다시 시도</Text></Pressable>
+          {!!checkMessage && <Text accessibilityLiveRegion="polite" style={styles.error}>{checkMessage}</Text>}
+          {action.state.uncertain && requestClient.current?.checkRequest && <Pressable accessibilityRole="button" accessibilityState={{ disabled: checking || requestClient.current !== client }}
+            disabled={checking || requestClient.current !== client} onPress={checkResult} style={styles.link}><Text style={styles.linkText}>{checking ? '처리 결과 확인 중' : '처리 결과 확인'}</Text></Pressable>}
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: checking || requestClient.current !== client }}
+            disabled={checking || requestClient.current !== client} onPress={action.retry} style={styles.link}><Text style={styles.linkText}>같은 요청 다시 시도</Text></Pressable>
           {!action.state.uncertain && <Pressable accessibilityRole="button" onPress={() => {
             action.reset(); if (sentRecovery.current === null && sentRevision.current === null) setDraft(lastSent); sentRecovery.current = null; sentRevision.current = null;
           }} style={styles.link}><Text style={styles.linkText}>메시지 수정</Text></Pressable>}

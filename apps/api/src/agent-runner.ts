@@ -1,9 +1,11 @@
 import type { AgentResult, ChatContext, CoordinationTarget, FormDraft } from '@pikku/domain';
-import { AgentExecutionFailure, createPlanningAgent, type AgentDecision, type ModelPort, type ReadTool } from './agent.ts';
+import { AgentExecutionFailure, createPlanningAgent, type AgentDecision, type AgentMetrics, type ModelPort, type ReadTool } from './agent.ts';
 import { createPlanningTools } from './planning-tools.ts';
 import { PlanningError, type PlanningService } from './planning-service.ts';
 import type { TriggerEvent } from './scheduler.ts';
 import { compareInstants, timestamp } from './planning-schemas.ts';
+import { findFreeSlots, freeSlotsInput } from './free-slots.ts';
+import { z } from 'zod';
 
 type AppFeature = { status: 'configured' | 'not_configured'; access: 'app' };
 export type AgentCapabilities = {
@@ -21,15 +23,18 @@ const unavailableCapabilities = (): AgentCapabilities => ({
 });
 type RunInput = { userId: string; requestId: string; conversationId: string | null; message: string; timezone: string;
   history: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; coordinationTarget?: CoordinationTarget; entryContext?: ChatContext; triggerEvent?: TriggerEvent };
-type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; entryContext?: ChatContext };
+type FreeSlotRead = { input: z.infer<typeof freeSlotsInput>; slots: { startsAt: string; endsAt: string }[] };
+type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; freeSlotReads: FreeSlotRead[]; entryContext?: ChatContext };
 
 // The graph is read-only. A caller must finish inside its own atomic result/ledger transaction.
 export class PlanningAgentRunner {
   constructor(private readonly planning: PlanningService, private readonly model: ModelPort,
     private readonly capabilities: (userId: string) => Promise<AgentCapabilities> = async () => unavailableCapabilities(),
     private readonly toolFactory: (userId: string) => Promise<ReadTool[]> = async () => []) {}
-  async prepare(input: RunInput): Promise<Prepared> {
+  async prepare(input: RunInput, options: { signal?: AbortSignal; metrics?: AgentMetrics } = {}): Promise<Prepared> {
+    options.signal?.throwIfAborted();
     const baseline = await this.planning.capture(input.userId, input.timezone, input.coordinationTarget);
+    options.signal?.throwIfAborted();
     let selectedItem;
     if (input.entryContext?.kind === 'item') {
       const { id, expectedRevision } = input.entryContext;
@@ -51,9 +56,11 @@ export class PlanningAgentRunner {
       return { role: turn.role, content: turn.content };
     });
     const capabilities = await this.capabilities(input.userId);
+    options.signal?.throwIfAborted();
     const externalTools = (await this.toolFactory(input.userId)).map(tool => ({ ...tool,
       run: async (value: unknown, userId: string) => {
         const result = await tool.run(value, userId);
+        options.signal?.throwIfAborted();
         if (!result || typeof result !== 'object' || !('ok' in result) || typeof result.ok !== 'boolean') {
           throw new Error('INVALID_EXTERNAL_RESULT');
         }
@@ -70,9 +77,10 @@ export class PlanningAgentRunner {
         return result;
       },
     }));
+    options.signal?.throwIfAborted();
     const validation: { inspected: boolean; failure: AgentResult | null } = { inspected: false, failure: null };
     const agent = createPlanningAgent({
-      model: this.model, tools: [...createPlanningTools(this.planning, baseline), ...externalTools],
+      model: this.model, tools: [...createPlanningTools(this.planning, baseline), ...externalTools], signal: options.signal, metrics: options.metrics,
       validateProposal: async (decision, actor) => {
         if (actor !== input.userId) throw new Error('AGENT_SCOPE_MISMATCH');
         validation.failure = await this.planning.inspectProposal(baseline, decision);
@@ -86,14 +94,19 @@ export class PlanningAgentRunner {
         ...(input.entryContext ? { entryContext: input.entryContext.kind === 'item' ? { kind: 'item', item: selectedItem } : input.entryContext } : {}),
         ...(input.triggerEvent ? { triggerEvent: { reason: input.triggerEvent.reason, scheduledFor: input.triggerEvent.scheduledFor,
           timezone: input.triggerEvent.timezone, targetDate: input.triggerEvent.targetDate, sourceRevision: input.triggerEvent.sourceRevision } } : {}) } });
+    options.signal?.throwIfAborted();
     if (!state.decision) throw new AgentExecutionFailure('AGENT_OUTPUT_INVALID');
+    const freeSlotReads = state.observations.filter(observation => observation.name === 'find_free_slots').map(observation => ({
+      input: freeSlotsInput.parse(observation.input),
+      slots: z.object({ slots: z.array(z.object({ startsAt: timestamp, endsAt: timestamp })) }).parse(observation.result).slots,
+    }));
     return { baseline, decision: state.decision, inspected: validation.inspected, failure: validation.failure,
-      entryContext: input.entryContext,
-      usedSnapshot: input.entryContext?.kind === 'item' || state.observations.some(observation => ['read_schedule', 'read_memory', 'validate_changes'].includes(observation.name)) };
+      entryContext: input.entryContext, freeSlotReads,
+      usedSnapshot: input.entryContext?.kind === 'item' || state.observations.some(observation => ['read_schedule', 'read_memory', 'validate_changes', 'find_free_slots'].includes(observation.name)) };
   }
   async finish(prepared: Prepared): Promise<AgentResult | { kind: 'reply'; message: string; draft: FormDraft }> {
     const decision = prepared.decision;
-    const current = prepared.baseline.externalExpiresAt || (decision.kind !== 'proposal' && prepared.usedSnapshot)
+    const current = prepared.baseline.externalExpiresAt || prepared.freeSlotReads.length || (decision.kind !== 'proposal' && prepared.usedSnapshot)
       ? await this.planning.latest(prepared.baseline) : null;
     if (prepared.baseline.externalExpiresAt && current && compareInstants(current.now, prepared.baseline.externalExpiresAt) >= 0) {
       return { kind: 'failure', message: '조회한 정보가 만료되었습니다. 다시 요청해 주세요.', code: 'external_data_expired', retryable: true };
@@ -101,6 +114,13 @@ export class PlanningAgentRunner {
     if (decision.kind !== 'proposal' && prepared.usedSnapshot &&
       current && !this.planning.baselineCurrent(prepared.baseline, current)) {
       return { kind: 'failure', message: '조회 중 일정 또는 맥락이 변경되었습니다. 다시 요청해 주세요.', code: 'stale_snapshot', retryable: true };
+    }
+    if (current && prepared.freeSlotReads.some(read => {
+      const refreshed = findFreeSlots({ ...prepared.baseline.snapshot, now: current.now }, read.input);
+      return read.slots.some(original => !refreshed.slots.some(slot =>
+        compareInstants(slot.endsAt, original.endsAt) === 0 && compareInstants(slot.startsAt, original.startsAt) >= 0));
+    })) {
+      return { kind: 'failure', message: '조회한 빈 시간이 달라졌습니다. 다시 요청해 주세요.', code: 'stale_snapshot', retryable: true };
     }
     if (prepared.entryContext?.kind === 'form' && decision.kind === 'proposal') {
       return { kind: 'failure', message: '입력 초안에서는 일정을 저장하지 않습니다. 입력값을 확인해 주세요.', code: 'invalid_request', retryable: false };

@@ -21,7 +21,7 @@ test('the default 10,000-entry limit is per user, including validation failures'
   const other = await idempotency.execute({ userId: 'bob', operation: 'schedule_command', key: 'new', requestId: 'bob', payload: { title: 'valid' },
     async run() { return { status: 200, body: { requestId: 'bob', data: { outcome: 'applied' } } }; } });
   assert.equal(other.status, 200);
-  const replay = await idempotency.execute({ userId: 'alice', operation: 'chat', key: 'invalid-0', requestId: 'retry', payload: { message: '' },
+  const replay = await idempotency.execute({ userId: 'alice', operation: 'chat', key: 'invalid-0', requestId: 'request-0', payload: { message: '' },
     async run() { throw new Error('must replay'); } });
   assert.equal(replay.status, 400);
   assert.equal((replay.body as { requestId: string }).requestId, 'request-0');
@@ -45,7 +45,7 @@ test('one users malformed HTTP requests cannot prevent another users normal writ
   const bob = await app.inject({ method: 'POST', url: '/v1/schedule/commands', headers: headers('bob', 'b-1'), payload: command('b-1') });
   assert.equal(bob.statusCode, 200, bob.body);
   assert.equal(bob.json().data.outcome, 'applied');
-  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'a-1'), payload: invalid('retry') });
+  const replay = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'a-1'), payload: invalid('a-1') });
   assert.equal(replay.statusCode, 400);
   assert.equal(replay.json().requestId, 'a-1');
   const conflict = await app.inject({ method: 'POST', url: '/v1/chat', headers: headers('alice', 'a-1'), payload: { ...invalid('changed'), message: '다른 본문' } });
@@ -65,7 +65,7 @@ test('at capacity, a known-no-effect chat retry preserves fingerprint and concur
   const first = idempotency.execute(input);
   await running;
   try {
-    const concurrent = await idempotency.execute({ ...input, requestId: 'concurrent' });
+    const concurrent = await idempotency.execute(input);
     assert.equal((concurrent.body as { error: { code: string } }).error.code, 'operation_in_progress');
     const conflict = await idempotency.execute({ ...input, payload: { message: 'y' } });
     assert.equal((conflict.body as { error: { code: string } }).error.code, 'idempotency_conflict');
@@ -75,9 +75,9 @@ test('at capacity, a known-no-effect chat retry preserves fingerprint and concur
     assert.equal(otherUser.status, 200);
   } finally { release(); }
   assert.equal((await first).status, 503);
-  const retried = await idempotency.execute({ ...input, requestId: 'retry', async run() { calls++; return { status: 200, body: { requestId: 'retry', data: 'done' } }; } });
+  const retried = await idempotency.execute({ ...input, async run() { calls++; return { status: 200, body: { requestId: 'first', data: 'done' } }; } });
   assert.equal(retried.status, 200);
-  const replay = await idempotency.execute({ ...input, requestId: 'again', async run() { throw new Error('must replay'); } });
+  const replay = await idempotency.execute({ ...input, async run() { throw new Error('must replay'); } });
   assert.deepEqual(replay, retried);
   assert.equal(calls, 2);
   const changed = await idempotency.execute({ ...input, payload: { message: 'different' } });

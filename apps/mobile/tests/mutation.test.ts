@@ -112,3 +112,41 @@ test('a running action cannot be replaced by a second submission or retried conc
   await tick();
   assert.equal(machine.getState().status, 'success');
 });
+
+test('status lookup serializes with retry and retains the original uncertain request', async () => {
+  const attempts: Mutation<{ value: number }>[] = [];
+  let finishLookup!: (value: { status: 'running' }) => void;
+  const machine = createMutationMachine({ execute: async (op: Mutation<{ value: number }>) => {
+    attempts.push(op); if (attempts.length === 1) throw new ApiError('timeout', 'timeout', true); return 'done';
+  }, changed: () => {} });
+  machine.submit({ value: 1 }); await tick();
+  const lookup = machine.check(op => { assert.deepEqual(op, attempts[0]); return new Promise<{ status: 'running' }>(resolve => { finishLookup = resolve; }); }, () => null);
+  machine.retry(); const concurrent = await machine.check(async () => ({ status: 'running' }), () => null);
+  assert.equal(concurrent, undefined); assert.equal(attempts.length, 1);
+  finishLookup({ status: 'running' }); assert.deepEqual(await lookup, { status: 'running' });
+  assert.equal(machine.getState().status, 'error'); machine.retry(); await tick();
+  assert.deepEqual(attempts[1], attempts[0]); assert.equal(machine.getState().status, 'success');
+});
+
+test('completed lookup runs the ordinary success path once and ignores invalidated results', async () => {
+  let complete!: (value: string) => void; let successes = 0;
+  const machine = createMutationMachine({ execute: async (_op: Mutation<number>): Promise<string> => { throw new ApiError('timeout', 'timeout', true); },
+    changed: () => {}, succeeded: () => { successes++; } });
+  machine.submit(1); await tick();
+  const lookup = machine.check(() => new Promise<string>(resolve => { complete = resolve; }), result => ({ result }));
+  complete('recovered'); assert.equal(await lookup, 'recovered'); assert.equal(successes, 1);
+  assert.deepEqual(machine.getState(), { status: 'success', result: 'recovered' });
+  machine.reset(); machine.submit(2); await tick();
+  const late = machine.check(() => new Promise<string>(resolve => { complete = resolve; }), result => ({ result }));
+  machine.invalidate(); complete('late'); assert.equal(await late, undefined);
+  assert.equal(successes, 1); assert.equal(machine.getState().status, 'idle');
+});
+
+test('failed lookup keeps uncertainty and allows the original retry', async () => {
+  let attempts = 0;
+  const machine = createMutationMachine({ execute: async (_op: Mutation<number>): Promise<string> => { attempts++; throw new ApiError('network', 'network', true); }, changed: () => {} });
+  machine.submit(1); await tick();
+  await assert.rejects(machine.check(async () => { throw new Error('offline'); }, () => null));
+  assert.equal(machine.getState().status, 'error'); machine.retry(); await tick(); assert.equal(attempts, 2);
+  const state = machine.getState(); assert.equal(state.status, 'error'); if (state.status === 'error') assert.equal(state.uncertain, true);
+});

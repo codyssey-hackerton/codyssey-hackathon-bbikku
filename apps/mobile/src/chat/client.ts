@@ -20,7 +20,10 @@ export interface ChatRequest extends ChatInput {
 
 export interface ChatClient {
   sendMessage(request: ChatRequest): Promise<ChatResponse>;
+  checkRequest?(request: { requestId: string; idempotencyKey: string; conversationId: string | null }): Promise<ChatRequestStatus>;
 }
+export type ChatRequestStatus = { status: 'running' | 'retryable' } |
+  { status: 'completed'; result: { response: ChatResponse } | { error: ApiError } };
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
@@ -63,6 +66,31 @@ export function createChatClient(api: ApiClient, options: { timeoutMs?: number }
       );
       if (!isChatResponse(data)) throw new ApiError('invalid_response', '대화 응답 형식이 올바르지 않습니다.');
       return data;
+    },
+    async checkRequest({ requestId, idempotencyKey, conversationId }) {
+      const invalid = () => new ApiError('invalid_response', '저장된 대화 응답을 확인할 수 없습니다.');
+      if (!requestId || !idempotencyKey) throw invalid();
+      const value = await api.get<unknown>(`/v1/chat/requests/${encodeURIComponent(requestId)}`, { idempotencyKey, expectedRequestId: requestId });
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalid();
+      const data = value as Record<string, unknown>;
+      if (data.status === 'running' || data.status === 'retryable') {
+        if ('result' in data) throw invalid();
+        return { status: data.status };
+      }
+      if (data.status !== 'completed' || typeof data.result !== 'object' || data.result === null || Array.isArray(data.result)) throw invalid();
+      const result = data.result as Record<string, unknown>;
+      if (!Number.isInteger(result.status) || typeof result.status !== 'number' || result.status < 200 || result.status > 599 ||
+          typeof result.body !== 'object' || result.body === null || Array.isArray(result.body)) throw invalid();
+      const body = result.body as Record<string, unknown>;
+      if (body.requestId !== requestId) throw invalid();
+      if (result.status < 300) {
+        if (!isChatResponse(body.data) || (conversationId !== null && body.data.conversationId !== conversationId)) throw invalid();
+        return { status: 'completed', result: { response: body.data } };
+      }
+      if (result.status < 400 || typeof body.error !== 'object' || body.error === null || Array.isArray(body.error)) throw invalid();
+      const error = body.error as Record<string, unknown>;
+      if (typeof error.code !== 'string' || !error.code || typeof error.message !== 'string' || typeof error.retryable !== 'boolean') throw invalid();
+      return { status: 'completed', result: { error: new ApiError(error.code, error.message, error.retryable, result.status) } };
     },
   };
 }
