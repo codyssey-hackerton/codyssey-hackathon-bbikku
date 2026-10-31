@@ -123,9 +123,12 @@ const bundled = await build({
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   plugins: [{ name: 'mock-native', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native)$/ }, (args) => ({ path: args.path, namespace: 'test-native' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ }, (args) => ({ path: args.path, namespace: 'test-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'test-native' }, ({ path }) => ({
-      contents: path === 'react' ? 'module.exports = globalThis.__memoryPanelHarness.react' :
+      contents: path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+        path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
+        path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
+        path === 'react' ? 'module.exports = globalThis.__memoryPanelHarness.react' :
         path === 'react-native' ? 'module.exports = globalThis.__memoryPanelHarness.native' :
           'exports.jsx = exports.jsxs = globalThis.__memoryPanelHarness.jsx; exports.Fragment = globalThis.__memoryPanelHarness.fragment',
       loader: 'js',

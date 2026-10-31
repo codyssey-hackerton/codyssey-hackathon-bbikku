@@ -78,9 +78,10 @@ test('a stubbed two-step provider response validates the real adapter and regist
       assert.equal(body.parallel_tool_calls, false);
       assert.deepEqual(body.tools.map((tool: { name: string }) => tool.name), ['calculate_timing']);
       assert.ok(!JSON.stringify(body.input).includes(fakeKey));
-      if (calls === 1) return providerResponse([{ type: 'reasoning', summary: [] }, toolCall()]);
-      const input = JSON.parse(body.input[1].content);
-      assert.deepEqual(input.observations, [{ name: 'calculate_timing', input: timing, result: toolResult }]);
+      const reasoning = { type: 'reasoning', id: 'rs_synthetic', summary: [], encrypted_content: 'encrypted-synthetic' };
+      if (calls === 1) return providerResponse([reasoning, toolCall()]);
+      assert.deepEqual(body.input.slice(2), [reasoning, toolCall(), { type: 'function_call_output', call_id: 'synthetic-call', output: JSON.stringify(toolResult) }]);
+      assert.equal(JSON.parse(body.input[1].content).observations, undefined);
       return providerResponse([answer]);
     },
     write: line => { lines.push(line); },

@@ -16,15 +16,16 @@
   },
   "dependencies": {
     "expo": "58.0.21",
+    "expo-font": "~58.0.11",
     "expo-status-bar": "58.0.4",
     "react": "19.3.0",
     "react-native": "0.88.1",
     "react-native-safe-area-context": "5.10.1"
   },
   "devDependencies": {
+    "@pikku/domain": "0.0.0",
     "@types/react": "19.3.0",
     "tsx": "4.23.15",
-    "typescript": "6.0.3",
-    "@pikku/domain": "0.0.0"
+    "typescript": "6.0.3"
   }
 }

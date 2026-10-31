@@ -59,18 +59,18 @@ test('invalid input and missing model configuration are explicit errors', async 
   assert.equal(malformed.json().error.code, 'invalid_request');
 });
 
-test('unimplemented external routes remain explicit 501 responses', async t => {
+test('contact routes validate input and hide absent contact requests', async t => {
   const app = buildApp({ sessions });
   t.after(() => app.close());
   for (const url of ['/v1/contact-requests/c1']) {
     const response = await app.inject({ method: 'GET', url, headers: headers() });
-    assert.equal(response.statusCode, 501, url);
-    assert.equal(response.json().error.code, 'not_implemented');
+    assert.equal(response.statusCode, 404, url);
+    assert.equal(response.json().error.code, 'not_found');
   }
   for (const url of ['/v1/recipients', '/v1/contact-requests', '/v1/contact-requests/c1/decision']) {
     const response = await app.inject({ method: 'POST', url, headers: headers(), payload: { requestId: 'r' } });
-    assert.equal(response.statusCode, 501, url);
-    assert.equal(response.json().error.code, 'not_implemented');
+    assert.equal(response.statusCode, 400, url);
+    assert.equal(response.json().error.code, 'invalid_request');
   }
   const missingKey = await app.inject({ method: 'POST', url: '/v1/recipients', headers: { authorization: 'Bearer alice' }, payload: { requestId: 'r' } });
   assert.equal(missingKey.statusCode, 400);

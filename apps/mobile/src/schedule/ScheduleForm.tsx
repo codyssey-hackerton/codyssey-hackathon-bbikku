@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { Text, TextInput } from '../ui/typography';
+import { colors } from '../ui/theme';
 import type { ScheduleFields, ScheduleItem } from './client';
 import { scheduleDraft, scheduleFields } from './form';
 import type { ScheduleDraft } from './form';
@@ -108,22 +110,22 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
 }
 
 const styles = StyleSheet.create({
-  form: { marginTop: 20, padding: 14, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, gap: 12 },
-  heading: { color: '#172033', fontSize: 18, fontWeight: '700' },
+  form: { marginTop: 20, padding: 14, borderWidth: 1, borderColor: colors.border, borderRadius: 14, gap: 12 },
+  heading: { color: colors.text, fontSize: 18, fontWeight: '700' },
   field: { gap: 5 },
-  label: { color: '#172033', fontSize: 15, fontWeight: '600' },
-  input: { minHeight: 44, borderWidth: 1, borderColor: '#94a3b8', borderRadius: 6, paddingHorizontal: 10, color: '#172033' },
-  hint: { color: '#475569', fontSize: 14, lineHeight: 20 },
+  label: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  input: { minHeight: 44, borderWidth: 1, borderColor: '#94a3b8', borderRadius: 12, paddingHorizontal: 10, color: colors.text },
+  hint: { color: colors.muted, fontSize: 14, lineHeight: 20 },
   choices: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  choice: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 6, borderWidth: 1, borderColor: '#94a3b8' },
-  selectedChoice: { backgroundColor: '#1d4ed8', borderColor: '#1d4ed8' },
-  choiceText: { color: '#172033' },
+  choice: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: '#94a3b8' },
+  selectedChoice: { backgroundColor: colors.primary, borderColor: '#1d4ed8' },
+  choiceText: { color: colors.text },
   selectedChoiceText: { color: '#ffffff', fontWeight: '700' },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  primary: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, borderRadius: 6, backgroundColor: '#1d4ed8' },
+  primary: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.primary },
   primaryText: { color: '#ffffff', fontWeight: '700' },
-  secondary: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, borderRadius: 6, backgroundColor: '#e2e8f0' },
-  secondaryText: { color: '#172033', fontWeight: '700' },
+  secondary: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.primarySoft },
+  secondaryText: { color: colors.text, fontWeight: '700' },
   disabled: { opacity: 0.5 },
   error: { color: '#a01818', fontSize: 14, lineHeight: 20 },
 });

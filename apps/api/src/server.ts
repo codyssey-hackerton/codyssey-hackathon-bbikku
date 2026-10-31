@@ -5,6 +5,7 @@ import { assertDevelopmentBinding } from './development.ts';
 import pg from 'pg';
 import { PostgresPlanningStore } from './postgres-store.ts';
 import { startReviewScheduler, type ReviewScheduler } from './scheduler.ts';
+import { getGmailConnection } from './gmail-connection.ts';
 
 const port = Number(process.env.PORT ?? 3001);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -12,6 +13,11 @@ const host = process.env.HOST ?? '127.0.0.1';
 const developmentAuth = process.env.PIKKU_DEV_AUTH === 'true';
 assertDevelopmentBinding(process.env, host);
 const sessions = developmentAuth ? localDevelopmentSession(process.env.PIKKU_DEV_SESSION_TOKEN ?? '') : undefined;
+let gmailContact: Awaited<ReturnType<typeof getGmailConnection>>;
+if (developmentAuth) {
+  try { gmailContact = await getGmailConnection({ env: process.env }); }
+  catch { process.emitWarning('Gmail 연결 설정을 확인해 주세요.'); }
+}
 // Only the explicitly named project key is used; do not discover global or other application keys.
 const projectKey = process.env.PIKKU_OPENAI_API_KEY;
 const model = projectKey?.trim() ? createResponsesModel(projectKey) : undefined;
@@ -28,7 +34,7 @@ if (connectionString) {
 }
 let scheduler: ReviewScheduler | undefined;
 let schedulerState: 'not_configured' | 'available' | 'degraded' = schedulerEnabled ? 'degraded' : 'not_configured';
-const app = buildApp({ sessions, model, store, schedulerStatus: () => schedulerState,
+const app = buildApp({ sessions, model, store, gmailContact, schedulerStatus: () => schedulerState,
   onReviewScheduleChanged: async () => {
     if (!scheduler) return;
     try { await scheduler.reconcile(); schedulerState = 'available'; }

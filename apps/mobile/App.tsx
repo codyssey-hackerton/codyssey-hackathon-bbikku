@@ -1,6 +1,12 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { useFonts } from 'expo-font';
+import { FontReadyContext, Text, TextInput } from './src/ui/typography';
+import { colors } from './src/ui/theme';
+import { TabIcon } from './src/ui/TabIcon';
+import { Icon } from './src/ui/Icon';
+import { GlassSurface } from './src/ui/GlassSurface';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { createApiClient } from './src/api/http';
@@ -20,8 +26,8 @@ import { createScheduleClient } from './src/schedule/client';
 type Tab = 'chat' | 'calendar' | 'day';
 const tabs: { id: Tab; label: string }[] = [
   { id: 'chat', label: 'AI 채팅' },
-  { id: 'calendar', label: '월별' },
-  { id: 'day', label: '하루' },
+  { id: 'calendar', label: '캘린더' },
+  { id: 'day', label: '하루 일정' },
 ];
 
 // Public Expo variables are embedded in the app. Never place credentials here.
@@ -71,15 +77,16 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
     </View>
-    {panel === 'main' && <View style={styles.tabs} accessibilityRole="tablist">
+    {panel === 'main' && <View style={styles.tabBar}><GlassSurface><View style={styles.tabs} accessibilityRole="tablist">
       {tabs.map((item) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={[styles.tab, tab === item.id && styles.activeTab]}>
+        <TabIcon name={item.id} color={tab === item.id ? colors.primary : colors.muted} />
         <Text style={[styles.tabText, tab === item.id && styles.activeTabText]}>{item.label}</Text>
       </Pressable>)}
-    </View>}
+    </View></GlassSurface></View>}
   </>;
 }
 
-function MobileApp() {
+function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
   const [baseUrl, setBaseUrl] = useState(defaultApiUrl);
   const [sessionToken, setSessionToken] = useState('');
   const [urlDraft, setUrlDraft] = useState(defaultApiUrl);
@@ -135,10 +142,15 @@ function MobileApp() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
+      {fontUnavailable && <Text accessibilityRole="alert" style={styles.fontNotice}>글꼴을 불러오지 못해 기본 글꼴로 표시합니다.</Text>}
       <View style={styles.topBar}>
-        <Text style={styles.brand} accessibilityRole="header">PIKKU</Text>
-        <Pressable accessibilityRole="button" accessibilityState={{ expanded: showSettings }} onPress={toggleSettings} style={styles.settingsToggle}>
-          <Text style={styles.settingsToggleText}>개발 연결 설정</Text>
+        <View style={styles.brandGroup}>
+          <View style={styles.brandMark} accessible={false}><Text style={styles.brandMarkText}>p</Text></View>
+          <Text style={styles.brand} accessibilityRole="header">pikku</Text>
+        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel="개발 연결 설정" accessibilityState={{ expanded: showSettings }} onPress={toggleSettings} style={styles.settingsToggle}>
+          <Icon name="settings" size={18} />
+          <Text style={styles.settingsToggleText}>설정</Text>
         </Pressable>
       </View>
       {showSettings && (
@@ -158,28 +170,45 @@ function MobileApp() {
 }
 
 export default function App() {
-  return <SafeAreaProvider><MobileApp /></SafeAreaProvider>;
+  const [fontsLoaded, fontError] = useFonts({
+    Lucide: require('./assets/icons/lucide.ttf'),
+    'Pretendard-Regular': require('./assets/fonts/Pretendard-Regular.otf'),
+    'Pretendard-Medium': require('./assets/fonts/Pretendard-Medium.otf'),
+    'Pretendard-SemiBold': require('./assets/fonts/Pretendard-SemiBold.otf'),
+    'Pretendard-Bold': require('./assets/fonts/Pretendard-Bold.otf'),
+  });
+  return <SafeAreaProvider><FontReadyContext.Provider value={fontsLoaded}>
+    {!fontsLoaded && !fontError
+      ? <SafeAreaView style={styles.loading}><ActivityIndicator color={colors.primary} /><Text>하루를 준비하고 있어요</Text></SafeAreaView>
+      : <MobileApp fontUnavailable={!!fontError} />}
+  </FontReadyContext.Provider></SafeAreaProvider>;
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#fff' },
-  topBar: { minHeight: 48, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderColor: '#ddd' },
-  brand: { color: '#172033', fontSize: 18, fontWeight: '700' },
-  settingsToggle: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 8 },
-  settingsToggleText: { color: '#334155' },
-  settings: { padding: 12, gap: 6, borderBottomWidth: 1, borderColor: '#ddd' },
-  settingLabel: { color: '#334155', fontWeight: '600' },
-  input: { minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#aaa', borderRadius: 6, color: '#171717' },
-  hint: { color: '#555', fontSize: 12 },
-  error: { color: '#a01818' },
-  apply: { alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 14, justifyContent: 'center', backgroundColor: '#334155', borderRadius: 6 },
-  applyText: { color: '#fff', fontWeight: '600' },
+  safeArea: { flex: 1, backgroundColor: colors.background },
+  topBar: { minHeight: 58, paddingHorizontal: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  brandGroup: { flexDirection: 'row', gap: 9, alignItems: 'center' },
+  brandMark: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  brandMarkText: { color: colors.surface, fontSize: 24, fontWeight: '700', lineHeight: 28 },
+  brand: { color: colors.text, fontSize: 23, fontWeight: '700', letterSpacing: -0.7 },
+  settingsToggle: { minHeight: 44, minWidth: 56, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: colors.surface, borderRadius: 22 },
+  settingsToggleText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  settings: { margin: 16, marginTop: 4, padding: 16, gap: 8, backgroundColor: colors.surface, borderRadius: 20 },
+  settingLabel: { color: colors.text, fontWeight: '600' },
+  input: { minHeight: 48, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: 12, color: colors.text },
+  hint: { color: colors.muted, fontSize: 12 },
+  error: { color: colors.error },
+  apply: { alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 18, justifyContent: 'center', backgroundColor: colors.primary, borderRadius: 14 },
+  applyText: { color: colors.surface, fontWeight: '600' },
   screenContainer: { flex: 1 },
   screen: { flex: 1 },
   hidden: { display: 'none' },
-  tabs: { flexDirection: 'row', borderTopWidth: 1, borderColor: '#ddd' },
-  tab: { flex: 1, minHeight: 52, alignItems: 'center', justifyContent: 'center' },
-  activeTab: { backgroundColor: '#e7eaf0' },
-  tabText: { color: '#475569' },
-  activeTabText: { color: '#172033', fontWeight: '700' },
+  tabBar: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 6, backgroundColor: colors.background },
+  tabs: { flexDirection: 'row', padding: 5 },
+  tab: { flex: 1, minHeight: 58, paddingVertical: 7, gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: 21 },
+  activeTab: { backgroundColor: colors.primarySoft },
+  tabText: { color: colors.muted, fontSize: 12, fontWeight: '500' },
+  activeTabText: { color: colors.primary, fontWeight: '700' },
+  loading: { flex: 1, backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center', gap: 14 },
+  fontNotice: { padding: 12, color: colors.error, backgroundColor: colors.surface },
 });

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { Text, TextInput } from '../ui/typography';
+import { colors } from '../ui/theme';
 import type { ReviewSchedule } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
@@ -179,20 +181,20 @@ export default function ReviewPanel({ api, deviceTimezone, onBack }: { api: ApiC
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 20, paddingBottom: 36, gap: 14 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   section: { gap: 8 },
-  title: { flexShrink: 1, fontSize: 24, fontWeight: '700', color: '#171717' },
-  subtitle: { fontSize: 18, fontWeight: '700', color: '#171717' },
-  label: { color: '#334155', fontWeight: '600' },
-  body: { color: '#171717', lineHeight: 22 },
-  hint: { color: '#555', lineHeight: 20 },
-  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: '#aaa', borderRadius: 8, color: '#171717' },
-  button: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: '#334155', borderRadius: 8 },
+  title: { flexShrink: 1, fontSize: 28, fontWeight: '700', color: colors.text },
+  subtitle: { fontSize: 18, fontWeight: '700', color: colors.text },
+  label: { color: colors.text, fontWeight: '600' },
+  body: { color: colors.text, lineHeight: 22 },
+  hint: { color: colors.muted, lineHeight: 20 },
+  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: colors.border, borderRadius: 14, color: colors.text },
+  button: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: colors.primary, borderRadius: 14 },
   buttonText: { color: '#fff', fontWeight: '700' },
-  secondary: { backgroundColor: '#eef1f5', borderWidth: 1, borderColor: '#64748b' },
-  secondaryText: { color: '#172033' },
+  secondary: { backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: colors.border },
+  secondaryText: { color: colors.text },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
   error: { color: '#a01818', lineHeight: 22 },

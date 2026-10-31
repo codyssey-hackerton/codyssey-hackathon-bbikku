@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
-  StyleSheet, Text, TextInput, View,
+  StyleSheet, View,
 } from 'react-native';
 import type { ScrollViewInstance } from 'react-native';
 import type { ChatInput } from '@pikku/domain';
+import { Text, TextInput } from '../ui/typography';
+import { colors } from '../ui/theme';
+import { Icon } from '../ui/Icon';
 import { ApiError } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import type { ScheduleClient } from '../schedule/client';
@@ -94,61 +97,89 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       <View style={styles.heading}>
         <Text style={styles.title} accessibilityRole="header">AI 채팅</Text>
         <View style={styles.links}>
-          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.link}><Text>제안 검토</Text></Pressable>
-          <Pressable accessibilityRole="button" onPress={onOpenMemory} style={styles.link}><Text>선호·상황</Text></Pressable>
-          <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.link}><Text>자동 검토 설정</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 검토</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onOpenMemory} style={styles.pill}><Icon name="memory" size={16} /><Text style={styles.pillText}>선호·상황</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.pill}><Icon name="clock" size={16} /><Text style={styles.pillText}>자동 검토 설정</Text></Pressable>
         </View>
         {coordinationTarget && <View style={styles.target}>
-          <Text>조정 검토 대상: {coordinationTarget.title}</Text>
-          <Text>대상 선택은 일정 변경이나 연락 승인이 아닙니다.</Text>
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClearCoordinationTarget} style={styles.link}><Text>대상 선택 해제</Text></Pressable>
+          <Text style={styles.targetTitle}>조정 검토 대상: {coordinationTarget.title}</Text>
+          <Text style={styles.targetHint}>대상 선택은 일정 변경이나 연락 승인이 아닙니다.</Text>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClearCoordinationTarget} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>
         </View>}
       </View>
       <ScrollView ref={scrollRef} style={styles.conversation} contentContainerStyle={styles.messages} keyboardShouldPersistTaps="handled" onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}>
         <ChatScheduleSummary client={scheduleClient} selectedDate={selectedDate} timezone={timezone} refreshVersion={refreshVersion} />
-        {entries.length === 0 && <Text style={styles.empty}>메시지를 입력해 대화를 시작하세요.</Text>}
-        {entries.map((entry) => <View key={entry.id} style={[styles.message, entry.role === 'user' && styles.userMessage]}>
-          <Text style={styles.messageRole}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text>
-          <Text style={styles.messageText}>{entry.text}</Text>
+        {entries.length === 0 && <View style={styles.welcome}>
+          <View style={styles.welcomeMark}><Icon name="sparkles" size={24} color={colors.primary} /></View>
+          <Text style={styles.welcomeTitle}>어떤 하루를 보내고 싶으세요?</Text>
+          <Text style={styles.empty}>할 일이나 달라진 상황을 편하게 이야기해 주세요.
+일정 변경은 제안을 확인하고 승인한 뒤 반영해요.</Text>
+          {!draft.trim() && <View style={styles.starters}>
+            {['오늘 일정을 함께 정리해줘.', '지금 상황에 맞게 계획을 검토해줘.'].map((message) =>
+              <Pressable key={message} accessibilityRole="button" accessibilityLabel={`${message} 입력`} disabled={busy}
+                accessibilityState={{ disabled: busy }} onPress={() => setDraft(message)} style={[styles.starter, busy && styles.disabled]}>
+                <Text style={styles.starterText}>{message}</Text><Icon name="arrowRight" size={16} color={colors.primary} />
+              </Pressable>)}
+          </View>}
+        </View>}
+        {entries.map((entry) => <View key={entry.id} style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
+          <View style={styles.messageHeading}>{entry.role !== 'user' && <Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} />}<Text style={[styles.messageRole, entry.role === 'user' && styles.userMessageRole]}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>
+          <Text style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
         </View>)}
-        {action.state.status === 'pending' && <View style={styles.loading} accessibilityLiveRegion="polite"><ActivityIndicator size="small" /><Text>서버 응답을 기다리는 중입니다.</Text></View>}
+        {action.state.status === 'pending' && <View style={styles.loading} accessibilityLiveRegion="polite"><ActivityIndicator size="small" color={colors.primary} /><Text style={styles.loadingText}>서버 응답을 기다리는 중입니다.</Text></View>}
         {agentError && <Text style={styles.error} accessibilityRole="alert">{agentError}</Text>}
         {action.state.status === 'error' && <View style={styles.errorBox}>
           <Text style={styles.error} accessibilityRole="alert">{errorMessage(action.state.error)}</Text>
           {action.state.uncertain && <Text style={styles.error}>결과를 확인할 때까지 같은 요청만 다시 시도합니다.</Text>}
-          <Pressable accessibilityRole="button" onPress={action.retry} style={styles.link}><Text>같은 요청 다시 시도</Text></Pressable>
-          {!action.state.uncertain && <Pressable accessibilityRole="button" onPress={() => { action.reset(); setDraft(lastSent); }} style={styles.link}><Text>메시지 수정</Text></Pressable>}
+          <Pressable accessibilityRole="button" onPress={action.retry} style={styles.link}><Text style={styles.linkText}>같은 요청 다시 시도</Text></Pressable>
+          {!action.state.uncertain && <Pressable accessibilityRole="button" onPress={() => { action.reset(); setDraft(lastSent); }} style={styles.link}><Text style={styles.linkText}>메시지 수정</Text></Pressable>}
         </View>}
       </ScrollView>
       <View style={styles.composer}>
-        <TextInput accessibilityLabel="채팅 메시지" multiline placeholder="메시지 입력" value={draft} onChangeText={setDraft} editable={!busy} style={styles.input} />
-        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || !draft.trim() }} disabled={busy || !draft.trim()} onPress={send} style={({ pressed }) => [styles.send, (busy || !draft.trim()) && styles.disabled, pressed && styles.pressed]}><Text style={styles.sendText}>보내기</Text></Pressable>
+        <TextInput accessibilityLabel="채팅 메시지" multiline placeholder="메시지 입력" placeholderTextColor="#58667E" selectionColor="#3563E9" value={draft} onChangeText={setDraft} editable={!busy} style={styles.input} />
+        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || !draft.trim() }} disabled={busy || !draft.trim()} onPress={send} style={({ pressed }) => [styles.send, (busy || !draft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  heading: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
-  title: { fontSize: 24, fontWeight: '700', color: '#171717' },
-  links: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  link: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, alignSelf: 'flex-start' },
-  target: { padding: 10, gap: 4, backgroundColor: '#e7eaf0', borderRadius: 8 },
+  welcomeMark: { width: 48, height: 48, borderRadius: 17, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  messageHeading: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  welcomeTitle: { color: colors.text, fontSize: 20, fontWeight: '700', marginBottom: 8 },
+  starters: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 16 },
+  starter: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'space-between', padding: 12, borderRadius: 16, backgroundColor: colors.primarySoft },
+  starterText: { flexShrink: 1, color: colors.primary, fontSize: 13, fontWeight: '600' },
+  container: { flex: 1, backgroundColor: colors.background },
+  heading: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 },
+  title: { fontSize: 26, fontWeight: '700', color: colors.text },
+  links: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
+  pill: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6, justifyContent: 'center', paddingHorizontal: 13, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#E8EDF6', borderRadius: 16 },
+  pillText: { color: '#34435D', fontSize: 13, fontWeight: '600' },
+  link: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, alignSelf: 'flex-start' },
+  linkText: { color: '#2851C7', fontSize: 14, fontWeight: '700' },
+  target: { marginTop: 12, padding: 14, gap: 4, backgroundColor: '#EEF3FF', borderRadius: 18 },
+  targetTitle: { color: colors.text, fontWeight: '700' },
+  targetHint: { color: '#52627C', fontSize: 13, lineHeight: 20 },
   conversation: { flex: 1 },
-  messages: { paddingHorizontal: 20, paddingVertical: 12, gap: 12 },
-  empty: { color: '#666', lineHeight: 22 },
-  message: { alignSelf: 'stretch', padding: 12, backgroundColor: '#f1f1f1', borderRadius: 8 },
-  userMessage: { backgroundColor: '#e7eaf0' },
-  messageRole: { color: '#444', fontSize: 12, fontWeight: '700', marginBottom: 4 },
-  messageText: { color: '#171717', lineHeight: 22 },
-  loading: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  errorBox: { alignItems: 'flex-start' },
-  error: { color: '#a01818', lineHeight: 22 },
-  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 12, borderTopWidth: 1, borderColor: '#ddd' },
-  input: { flex: 1, minHeight: 44, maxHeight: 120, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: '#aaa', borderRadius: 8, color: '#171717' },
-  send: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, backgroundColor: '#333', borderRadius: 8 },
-  sendText: { color: '#fff', fontWeight: '700' },
+  messages: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 18, gap: 12 },
+  welcome: { paddingHorizontal: 4, paddingVertical: 8 },
+  empty: { color: colors.muted, fontSize: 14, lineHeight: 22 },
+  message: { alignSelf: 'stretch', padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#EDF0F7', borderRadius: 20 },
+  userMessage: { alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: colors.primary, borderColor: colors.primary, borderBottomRightRadius: 7 },
+  statusMessage: { backgroundColor: '#EEF3FF', borderColor: '#E5ECFF' },
+  messageRole: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  userMessageRole: { color: '#F2F5FF' },
+  messageText: { color: colors.text, fontSize: 15, lineHeight: 23 },
+  userMessageText: { color: colors.surface },
+  loading: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 14, backgroundColor: colors.surface, borderRadius: 18 },
+  loadingText: { color: colors.muted, fontSize: 14 },
+  errorBox: { alignItems: 'flex-start', padding: 14, backgroundColor: '#FFF5F5', borderRadius: 18 },
+  error: { color: '#A01818', lineHeight: 22 },
+  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 20, paddingTop: 10, paddingBottom: 12, backgroundColor: colors.background },
+  input: { flex: 1, minHeight: 50, maxHeight: 120, paddingHorizontal: 16, paddingVertical: 13, borderWidth: 1, borderColor: '#E4EAF4', borderRadius: 18, backgroundColor: colors.surface, color: colors.text },
+  send: { minHeight: 50, minWidth: 50, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: colors.primary, borderRadius: 18 },
+  sendText: { color: colors.surface, fontSize: 10, fontWeight: '600' },
   disabled: { opacity: 0.4 },
   pressed: { opacity: 0.7 },
 });

@@ -1,8 +1,13 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Text } from '../ui/typography';
+import { colors } from '../ui/theme';
+import { ActionButton } from '../ui/ActionButton';
+import { Icon } from '../ui/Icon';
 import type { ScheduleItem, TimeSlot } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
+import ContactPanel from '../contacts/ContactPanel';
 import { canAccept, createProposalClient, type DecisionInput, type DecisionResult, type Proposal, type ProposalClient, type ProposalPage, type ScheduleFields } from './client';
 
 interface Props {
@@ -48,12 +53,8 @@ function errorMessage(error: unknown): string {
 function Button({ label, onPress, disabled = false, secondary = false }: {
   label: string; onPress: () => void; disabled?: boolean; secondary?: boolean;
 }) {
-  return (
-    <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [styles.button, secondary && styles.secondaryButton, disabled && styles.disabled, pressed && styles.pressed]}>
-      <Text style={[styles.buttonText, secondary && styles.secondaryText]}>{label}</Text>
-    </Pressable>
-  );
+  return <ActionButton label={label} onPress={onPress} disabled={disabled} secondary={secondary}
+    icon={label === '제안 승인' ? 'check' : label === '제안 거절' ? 'close' : label === '뒤로' || label === '목록으로' ? 'chevronLeft' : undefined} />;
 }
 
 function Loading({ text }: { text: string }) {
@@ -141,7 +142,7 @@ function ProposalList({ client, refreshVersion, onSelect, onBack }: {
         {current.data.proposals.map((proposal) => (
           <Pressable key={proposal.id} accessibilityRole="button" accessibilityLabel={`제안 ${proposal.reason || proposal.id}, ${statusText[proposal.status]}, 상세 보기`}
             onPress={() => onSelect(proposal.id)} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
-            <Text style={styles.cardTitle}>{proposal.reason || '이유 없음'}</Text>
+            <View style={styles.row}><Icon name="sparkles" color={colors.primary} /><Text style={[styles.cardTitle, { flex: 1 }]}>{proposal.reason || '이유 없음'}</Text><Icon name="chevronRight" size={18} /></View>
             <Text style={styles.text}>{proposal.mode === 'personal' ? '개인 일정' : '공동 일정 조정'} · {statusText[proposal.status]}</Text>
             <Text style={styles.muted}>제안 ID: {proposal.id} · 버전: {proposal.revision}</Text>
             <Text style={styles.muted}>생성: {proposal.createdAt}</Text>
@@ -194,7 +195,7 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
     <Text style={styles.text}>생성: {proposal.createdAt} · 만료: {proposal.expiresAt ?? '미설정'}</Text>
     <Text style={styles.text}>기준 일정 버전: {proposal.baseScheduleRevision} · 기준 맥락 버전: {proposal.baseContextRevision}</Text>
     {proposal.coordinationTarget && <Text style={styles.text}>조정 대상: {proposal.coordinationTarget.id} · 예상 버전: {proposal.coordinationTarget.expectedRevision}</Text>}
-    {proposal.status === 'awaiting_contact' && <Text style={styles.notice}>원 일정 유지. 연락 준비/발송은 미구현입니다.</Text>}
+    {proposal.status === 'awaiting_contact' && <Text style={styles.notice}>원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.</Text>}
     {proposal.status === 'stale' && <Text style={styles.notice}>기준이 바뀐 제안입니다. 새로 검증된 제안을 확인해 주세요.</Text>}
     {proposal.status === 'expired' && <Text style={styles.notice}>만료된 제안입니다. 새 제안을 확인해 주세요.</Text>}
 
@@ -230,9 +231,10 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
   </>;
 }
 
-function ProposalDetail({ client, id, refreshVersion, onScheduleChanged, onBack }: {
-  client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void;
+function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, onBack }: {
+  api: ApiClient; client: ProposalClient; id: string; refreshVersion: number; onScheduleChanged: () => void; onBack: () => void;
 }) {
+  const [contactProposal, setContactProposal] = useState<Proposal | null>(null);
   const mounted = useRef(false);
   useLayoutEffect(() => {
     mounted.current = true;
@@ -278,6 +280,8 @@ function ProposalDetail({ client, id, refreshVersion, onScheduleChanged, onBack 
   // Keep the operation in memory until its error is retried or explicitly cleared.
   const locked = state.status === 'pending' || state.status === 'error';
   const shown = state.status === 'success' ? state.result.proposal : current.status === 'success' ? current.data : null;
+  if (contactProposal) return <ContactPanel api={api} proposalClient={client} proposal={contactProposal}
+    renderProposal={(item) => <ProposalContent proposal={item} />} onBack={() => setContactProposal(null)} />;
   return <ScrollView contentContainerStyle={styles.container}>
     <View style={styles.row}>
       <Text style={styles.title} accessibilityRole="header">제안 상세</Text>
@@ -289,7 +293,7 @@ function ProposalDetail({ client, id, refreshVersion, onScheduleChanged, onBack 
       <Text style={styles.notice}>
         {state.result.outcome === 'applied' ? '서버가 개인 일정 적용을 확인했습니다.' :
           state.result.outcome === 'rejected' ? '서버가 제안 거절을 확인했습니다.' :
-            '원 일정 유지. 연락 준비/발송은 미구현입니다.'}
+            '원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.'}
       </Text>
       <Text style={styles.muted}>서버 일정 버전: {state.result.scheduleRevision}</Text>
     </View>}
@@ -303,7 +307,7 @@ function ProposalDetail({ client, id, refreshVersion, onScheduleChanged, onBack 
     </>}
     {shown && state.status === 'idle' && <>
       {shown.status === 'pending' ? <>
-        {shown.mode === 'coordination' && <Text style={styles.notice}>승인해도 원 일정은 유지됩니다. 연락 준비/발송은 미구현입니다.</Text>}
+        {shown.mode === 'coordination' && <Text style={styles.notice}>승인해도 원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.</Text>}
         {!canAccept(shown) && <Text style={styles.notice}>검증 결과가 유효하지 않거나 일관되지 않아 승인할 수 없습니다. 거절은 가능합니다.</Text>}
         <View style={styles.actions}>
           <Button label="제안 승인" onPress={() => decide(shown, 'accept')} disabled={!canAccept(shown)} />
@@ -311,6 +315,8 @@ function ProposalDetail({ client, id, refreshVersion, onScheduleChanged, onBack 
         </View>
       </> : <Button label="제안 다시 조회" onPress={reload} secondary />}
     </>}
+    {shown && !locked && shown.mode === 'coordination' && (shown.status === 'pending' || shown.status === 'awaiting_contact') &&
+      <Button label="연락 준비" onPress={() => setContactProposal(shown)} />}
   </ScrollView>;
 }
 
@@ -319,7 +325,7 @@ function ProposalSession({ api, refreshVersion, onScheduleChanged, onBack }: Pro
   const [selected, setSelected] = useState<string | null>(null);
   return selected === null
     ? <ProposalList client={client} refreshVersion={refreshVersion} onSelect={setSelected} onBack={onBack} />
-    : <ProposalDetail key={selected} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} />;
+    : <ProposalDetail key={selected} api={api} client={client} id={selected} refreshVersion={refreshVersion} onScheduleChanged={onScheduleChanged} onBack={() => setSelected(null)} />;
 }
 
 export default function ProposalPanel(props: Props) {
@@ -335,22 +341,22 @@ export default function ProposalPanel(props: Props) {
 const styles = StyleSheet.create({
   container: { padding: 20, gap: 10, paddingBottom: 32 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
-  title: { fontSize: 24, fontWeight: '700', color: '#172033', flexShrink: 1 },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#172033', marginTop: 12 },
-  subheading: { fontWeight: '700', color: '#172033', marginTop: 8 },
-  card: { padding: 14, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, gap: 4, backgroundColor: '#fff' },
-  cardTitle: { color: '#172033', fontSize: 16, fontWeight: '700' },
+  title: { fontSize: 28, fontWeight: '700', color: colors.text, flexShrink: 1 },
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: colors.text, marginTop: 12 },
+  subheading: { fontWeight: '700', color: colors.text, marginTop: 8 },
+  card: { padding: 18, borderWidth: 1, borderColor: colors.border, borderRadius: 20, gap: 8, backgroundColor: colors.surface },
+  cardTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
   fieldGroup: { gap: 3 },
-  text: { color: '#334155', fontSize: 15, lineHeight: 22 },
-  muted: { color: '#475569', fontSize: 13, lineHeight: 20 },
-  notice: { color: '#713f12', backgroundColor: '#fef3c7', padding: 10, lineHeight: 22, borderRadius: 6 },
+  text: { color: colors.text, fontSize: 15, lineHeight: 22 },
+  muted: { color: colors.muted, fontSize: 13, lineHeight: 20 },
+  notice: { color: '#713f12', backgroundColor: '#fef3c7', padding: 10, lineHeight: 22, borderRadius: 12 },
   error: { color: '#a01818', lineHeight: 22 },
   loading: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  button: { minHeight: 44, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#334155', alignSelf: 'flex-start' },
-  secondaryButton: { backgroundColor: '#e2e8f0' },
+  button: { minHeight: 44, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 14, backgroundColor: colors.primary, alignSelf: 'flex-start' },
+  secondaryButton: { backgroundColor: colors.primarySoft },
   buttonText: { color: '#fff', fontWeight: '700' },
-  secondaryText: { color: '#172033' },
+  secondaryText: { color: colors.text },
   disabled: { opacity: 0.4 },
   pressed: { opacity: 0.7 },
 });

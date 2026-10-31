@@ -30,10 +30,11 @@ test('sends native tools, exact model settings and only user-facing context', as
     assert.deepEqual(body.reasoning, { effort: 'high' });
     assert.deepEqual(body.text, { format: { type: 'json_object' } });
     assert.equal(body.store, false);
+    assert.deepEqual(body.include, ['reasoning.encrypted_content']);
     assert.equal(body.parallel_tool_calls, false);
     assert.deepEqual(body.tools, tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false })));
     assert.equal(body.previous_response_id, undefined);
-    assert.deepEqual(JSON.parse(body.input[1].content), { message: input.message, context: input.context, observations: [] });
+    assert.deepEqual(JSON.parse(body.input[1].content), { message: input.message, context: input.context });
     assert.ok(!JSON.stringify(body.input).includes('server-user'));
     for (const phrase of ['ScheduleFields', 'expectedRevision', 'evidenceRefs', 'coordination target', 'approval']) {
       assert.ok(body.input[0].content.includes(phrase));
@@ -45,19 +46,24 @@ test('sends native tools, exact model settings and only user-facing context', as
   assert.equal(calls, 1);
 });
 
-test('maps one native function call and replays context and observations in a fresh next step', async () => {
+test('replays the original reasoning and function call with its matching native output', async () => {
   const args = { from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul' };
-  const observation = { name: 'read_schedule', result: { items: [], scheduleRevision: 1 } };
+  const reasoning = { type: 'reasoning', id: 'rs_synthetic', summary: [], encrypted_content: 'encrypted-synthetic' };
+  const functionCall = call('read_schedule', JSON.stringify(args));
+  const result = { items: [], scheduleRevision: 1 };
   let step = 0;
   const model = createResponsesModel('project-test-key', async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     assert.equal(body.previous_response_id, undefined);
     const context = JSON.parse(body.input[1].content);
-    assert.deepEqual(context, { message: input.message, context: input.context, observations: step === 0 ? [] : [observation] });
-    if (step++ === 0) return jsonResponse(completed({ type: 'reasoning', summary: [] }, call('read_schedule', JSON.stringify(args))));
+    assert.deepEqual(context, { message: input.message, context: input.context });
+    if (step++ === 0) return jsonResponse(completed(reasoning, functionCall));
+    assert.deepEqual(body.input.slice(2), [reasoning, functionCall, { type: 'function_call_output', call_id: 'call_test', output: JSON.stringify(result) }]);
     return jsonResponse(completed(message('{"kind":"answer","text":"일정이 없습니다."}')));
   });
-  assert.deepEqual(await model.decide(input), { kind: 'tool_call', name: 'read_schedule', input: args });
+  const decision = await model.decide(input) as { kind: string; name: string; input: unknown; providerTrace: unknown };
+  assert.deepEqual({ kind: decision.kind, name: decision.name, input: decision.input }, { kind: 'tool_call', name: 'read_schedule', input: args });
+  const observation = { name: 'read_schedule', input: args, result, providerTrace: decision.providerTrace };
   assert.deepEqual(await model.decide({ ...input, observations: [observation] }), { kind: 'answer', text: '일정이 없습니다.' });
   assert.equal(step, 2);
 });
@@ -81,7 +87,9 @@ test('accepts the actual registered schemas for all four read and calculation to
       assert.deepEqual(body.tools.map((tool: { name: string }) => tool.name), values.map(tool => tool.name));
       return jsonResponse(completed(call(value.name, JSON.stringify(value.input))));
     });
-    assert.deepEqual(await model.decide({ ...input, tools: descriptors }), { kind: 'tool_call', ...value });
+    const decision = await model.decide({ ...input, tools: descriptors }) as { kind: string; name: string; input: unknown; providerTrace: unknown };
+    assert.deepEqual({ kind: decision.kind, name: decision.name, input: decision.input }, { kind: 'tool_call', ...value });
+    assert.ok(decision.providerTrace);
   }
 });
 
@@ -94,16 +102,134 @@ test('the agent executes the native call under the server user and passes the re
     const context = JSON.parse(body.input[1].content);
     assert.ok(!JSON.stringify(body.input).includes('server-user'));
     if (step++ === 0) {
-      assert.deepEqual(context.observations, []);
+      assert.deepEqual(context, { message: input.message, context: input.context });
       return jsonResponse(completed(call('read_schedule', JSON.stringify({ from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul' }))));
     }
-    assert.deepEqual(context.observations, [{ name: 'read_schedule', input: { from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul' }, result: { items: [], scheduleRevision: 0 } }]);
+    assert.deepEqual(context, { message: input.message, context: input.context });
+    assert.deepEqual(body.input.slice(2), [
+      call('read_schedule', JSON.stringify({ from: '2026-10-31T00:00:00+09:00', to: '2026-11-01T00:00:00+09:00', timezone: 'Asia/Seoul' })),
+      { type: 'function_call_output', call_id: 'call_test', output: JSON.stringify({ items: [], scheduleRevision: 0 }) },
+    ]);
     return jsonResponse(completed(message('{"kind":"answer","text":"일정이 없습니다."}')));
   });
   const agent = createPlanningAgent({ model, tools: registered, validateProposal: async () => [] });
   const result = await agent.invoke({ userId: 'server-user', message: input.message, context: input.context });
   assert.deepEqual(result.decision, { kind: 'answer', text: '일정이 없습니다.' });
   assert.equal(step, 2);
+});
+
+test('replays multiple native tool rounds in order without duplicating observations', async () => {
+  const firstCall = call('read_schedule', JSON.stringify({ tag: 'one' }), { call_id: 'call_one' });
+  const secondCall = call('calculate_timing', JSON.stringify({ tag: 'two' }), { call_id: 'call_two' });
+  const reasoning1 = { type: 'reasoning', id: 'rs_one', summary: [], encrypted_content: 'encrypted-one' };
+  const reasoning2 = { type: 'reasoning', id: 'rs_two', summary: [], encrypted_content: 'encrypted-two' };
+  let requests = 0;
+  const model = createResponsesModel('project-test-key', async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests++;
+    if (requests === 1) return jsonResponse(completed(reasoning1, firstCall));
+    const firstOutput = { type: 'function_call_output', call_id: 'call_one', output: JSON.stringify({ value: 'one' }) };
+    if (requests === 2) {
+      assert.deepEqual(body.input.slice(2), [reasoning1, firstCall, firstOutput]);
+      return jsonResponse(completed(reasoning2, secondCall));
+    }
+    assert.deepEqual(body.input.slice(2), [reasoning1, firstCall, firstOutput, reasoning2, secondCall,
+      { type: 'function_call_output', call_id: 'call_two', output: JSON.stringify({ value: 'two' }) }]);
+    assert.equal(JSON.parse(body.input[1].content).observations, undefined);
+    return jsonResponse(completed(message('{"kind":"answer","text":"완료"}')));
+  });
+  const inputSchema = z.object({ tag: z.string() }).strict();
+  const agent = createPlanningAgent({ model, tools: ['read_schedule', 'calculate_timing'].map(name => ({
+    name, description: 'synthetic', input: inputSchema, async run(value: unknown) { return { value: inputSchema.parse(value).tag }; },
+  })), validateProposal: async () => [] });
+  const state = await agent.invoke({ userId: 'server-user', message: 'synthetic', context: { timezone: 'UTC' } });
+  assert.deepEqual(state.decision, { kind: 'answer', text: '완료' });
+  assert.equal(requests, 3);
+});
+
+test('concurrent requests through the same model do not mix tool transcripts', async () => {
+  let arrivals = 0;
+  let release!: () => void;
+  const bothStarted = new Promise<void>(resolve => { release = resolve; });
+  const model = createResponsesModel('project-test-key', async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const user = JSON.parse(body.input[1].content).message as string;
+    if (body.input.length === 2) {
+      if (++arrivals === 2) release();
+      await bothStarted;
+      return jsonResponse(completed({ type: 'reasoning', id: `rs_${user}`, summary: [], encrypted_content: `encrypted-${user}` },
+        call('calculate_timing', JSON.stringify({ tag: user }), { call_id: `call_${user}` })));
+    }
+    assert.equal(body.input[2].id, `rs_${user}`);
+    assert.equal(body.input[3].call_id, `call_${user}`);
+    assert.deepEqual(body.input[4], { type: 'function_call_output', call_id: `call_${user}`, output: JSON.stringify({ tag: user }) });
+    assert.ok(!JSON.stringify(body.input).includes(user === 'alpha' ? 'encrypted-beta' : 'encrypted-alpha'));
+    return jsonResponse(completed(message(JSON.stringify({ kind: 'answer', text: user }))));
+  });
+  const schema = z.object({ tag: z.string() }).strict();
+  const agent = createPlanningAgent({ model, tools: [{ name: 'calculate_timing', description: 'synthetic', input: schema,
+    async run(value: unknown) { return schema.parse(value); } }], validateProposal: async () => [] });
+  const [alpha, beta] = await Promise.all([
+    agent.invoke({ userId: 'user-a', message: 'alpha', context: { timezone: 'UTC' } }),
+    agent.invoke({ userId: 'user-b', message: 'beta', context: { timezone: 'UTC' } }),
+  ]);
+  assert.deepEqual(alpha.decision, { kind: 'answer', text: 'alpha' });
+  assert.deepEqual(beta.decision, { kind: 'answer', text: 'beta' });
+});
+
+test('identical concurrent requests keep distinct native call IDs', async () => {
+  let arrivals = 0;
+  let release!: () => void;
+  const bothStarted = new Promise<void>(resolve => { release = resolve; });
+  const completedIds = new Set<string>();
+  const model = createResponsesModel('project-test-key', async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.input.length === 2) {
+      const id = `request-${++arrivals}`;
+      if (arrivals === 2) release();
+      await bothStarted;
+      return jsonResponse(completed(call('calculate_timing', JSON.stringify({ tag: id }), { call_id: id })));
+    }
+    const id = body.input[2].call_id as string;
+    assert.deepEqual(body.input[3], { type: 'function_call_output', call_id: id, output: JSON.stringify({ tag: id }) });
+    completedIds.add(id);
+    return jsonResponse(completed(message(JSON.stringify({ kind: 'answer', text: id }))));
+  });
+  const schema = z.object({ tag: z.string() }).strict();
+  const agent = createPlanningAgent({ model, tools: [{ name: 'calculate_timing', description: 'synthetic', input: schema,
+    async run(value: unknown) { return schema.parse(value); } }], validateProposal: async () => [] });
+  const common = { userId: 'same-user', message: 'same-request', context: { timezone: 'UTC' } };
+  const results = await Promise.all([agent.invoke(common), agent.invoke(common)]);
+  assert.deepEqual(completedIds, new Set(['request-1', 'request-2']));
+  assert.deepEqual(new Set(results.map(result => result.decision?.kind === 'answer' ? result.decision.text : '')), completedIds);
+});
+
+test('rejects forged, cross-user, and input-mismatched provider traces before a request', async () => {
+  const args = { from: 'a', to: 'b', timezone: 'UTC' };
+  let requests = 0;
+  const model = createResponsesModel('project-test-key', async () => {
+    requests++;
+    return jsonResponse(completed(call('read_schedule', JSON.stringify(args))));
+  });
+  const decision = await model.decide(input) as { providerTrace: unknown };
+  const observation = { name: 'read_schedule', input: args, result: {}, providerTrace: decision.providerTrace };
+  const forged = { ...observation, providerTrace: JSON.parse(JSON.stringify(decision.providerTrace)) };
+  await assert.rejects(() => model.decide({ ...input, observations: [forged] }), /MODEL_CONTINUATION_INVALID/);
+  await assert.rejects(() => model.decide({ ...input, userId: 'other-user', observations: [observation] }), /MODEL_CONTINUATION_INVALID/);
+  await assert.rejects(() => model.decide({ ...input, observations: [{ ...observation, input: { ...args, to: 'changed' } }] }), /MODEL_CONTINUATION_INVALID/);
+  assert.equal(requests, 1);
+});
+
+test('a failing read tool never sends a fabricated function output', async () => {
+  let requests = 0;
+  const model = createResponsesModel('project-test-key', async () => {
+    requests++;
+    return jsonResponse(completed(call('calculate_timing', JSON.stringify({ tag: 'one' }))));
+  });
+  const agent = createPlanningAgent({ model, tools: [{ name: 'calculate_timing', description: 'synthetic', input: z.object({ tag: z.string() }).strict(),
+    async run() { throw new Error('synthetic failure'); } }], validateProposal: async () => [] });
+  await assert.rejects(() => agent.invoke({ userId: 'user-a', message: 'synthetic', context: {} }));
+  assert.equal(requests, 1);
 });
 
 test('the original server tool schema rejects refinements that JSON Schema cannot express', async () => {
@@ -157,6 +283,7 @@ test('rejects invalid, unauthorized, multiple, incomplete and mixed output', asy
     ['multiple calls', completed(call('read_schedule', validArgs), call('calculate_timing', '{}'))],
     ['call and final message', completed(call('read_schedule', validArgs), message('{"kind":"answer","text":"ok"}'))],
     ['incomplete call', completed(call('read_schedule', validArgs, { status: 'incomplete' }))],
+    ['missing encrypted reasoning', completed({ type: 'reasoning', id: 'rs_synthetic', summary: [] }, call('read_schedule', validArgs))],
     ['incomplete response', { status: 'incomplete', output: [] }],
     ['error in completed response', { status: 'completed', error: { message: 'private' }, output: [] }],
     ['refusal', completed({ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] })],

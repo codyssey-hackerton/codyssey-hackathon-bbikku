@@ -86,7 +86,8 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
     const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review';
     // Only operations whose entire effect is committed with this record may recover a stale claim.
-    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write'].includes(input.operation);
+    const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
+      'recipient_create', 'contact_request_create', 'contact_decision'].includes(input.operation);
     const claim = await this.store.transaction(input.userId, state => {
       const previous = state.idempotency.get(identity);
       if (previous) {

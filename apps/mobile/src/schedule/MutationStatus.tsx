@@ -1,5 +1,7 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { Text } from '../ui/typography';
+import { colors } from '../ui/theme';
 import type { MutationState } from '../api/useMutation';
 
 export function mutationErrorMessage(error: unknown): string {
@@ -65,11 +67,11 @@ export function MutationStatus<R>({ state, retry, reset, refresh, canRetry, succ
 
 const styles = StyleSheet.create({
   box: { marginTop: 12, gap: 8 },
-  text: { color: '#475569', fontSize: 14, lineHeight: 20 },
+  text: { color: colors.muted, fontSize: 14, lineHeight: 20 },
   error: { color: '#a01818', fontSize: 15, lineHeight: 22 },
   success: { color: '#166534', marginTop: 12 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  button: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 6, backgroundColor: '#e2e8f0' },
-  buttonText: { color: '#172033', fontWeight: '700' },
+  button: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.primarySoft },
+  buttonText: { color: colors.text, fontWeight: '700' },
   disabled: { opacity: 0.5 },
 });

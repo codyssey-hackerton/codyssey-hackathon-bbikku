@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Approval, MemoryFact, Proposal, ReviewSchedule, ScheduleItem } from '@pikku/domain';
+import type { Approval, MemoryFact, Proposal, Recipient, ReviewSchedule, ScheduleItem } from '@pikku/domain';
+import type { ContactRequest, StoredContactApproval, StoredContactDraft } from './contact-service.ts';
 import type { HttpResult } from './idempotency.ts';
 
 export type StoredApproval = { approval: Approval; subject: Proposal };
@@ -14,6 +15,10 @@ export type UserPlanningState = {
   proposals: Map<string, Proposal>;
   proposalFacts: Map<string, string>;
   approvals: StoredApproval[];
+  recipients: Map<string, Recipient>;
+  contactRequests: Map<string, ContactRequest>;
+  contactDraftSnapshots: Map<string, StoredContactDraft>;
+  contactApprovals: StoredContactApproval[];
   conversations: Map<string, Conversation>;
   idempotency: Map<string, DurableIdempotencyRecord>;
   reviewSchedule: ReviewSchedule | null;
@@ -23,6 +28,7 @@ export type UserPlanningState = {
 
 export function emptyState(): UserPlanningState {
   return { scheduleRevision: 0, contextRevision: 0, items: new Map(), facts: new Map(), proposals: new Map(), proposalFacts: new Map(), approvals: [],
+    recipients: new Map(), contactRequests: new Map(), contactDraftSnapshots: new Map(), contactApprovals: [],
     conversations: new Map(), idempotency: new Map(), reviewSchedule: null, reviewScheduleUpdatedAt: null, reviewLedger: new Map() };
 }
 

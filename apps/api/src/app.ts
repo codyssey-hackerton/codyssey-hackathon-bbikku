@@ -7,6 +7,9 @@ import type { SessionResolver } from './auth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
 import { MODEL_ID, REASONING_EFFORT } from './model.ts';
 import { PlanningError, PlanningService } from './planning-service.ts';
+import { ContactService } from './contact-service.ts';
+import { ContactDispatch, gmailAvailable, type GmailContactPort } from './contact-dispatch.ts';
+import { recipientBody, contactBody, contactDecisionBody } from './contact-schemas.ts';
 import { MemoryPlanningStore, type PlanningStore, type UserPlanningState } from './planning-store.ts';
 import { buildReviewEvents, type ReviewSchedulerRuntime, type TriggerEvent } from './scheduler.ts';
 import { checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timezone } from './planning-schemas.ts';
@@ -34,6 +37,8 @@ const chatBody = z.object({
 const reviewTime = z.object({ enabled: z.boolean(), localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict()
   .refine(value => !value.enabled || value.localTime !== null);
 const reviewBody = z.object({ requestId: nonblank, expectedRevision: z.number().int().min(0), timezone, evening: reviewTime, morning: reviewTime }).strict();
+const contactSendBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderAddress: z.email().max(254) }).strict();
+const contactListQuery = z.object({ proposalId: identifier.optional() }).strict();
 
 function requestId(request: FastifyRequest): string {
   const parsed = requestBody.safeParse(request.body);
@@ -46,20 +51,21 @@ function errorResult(error: unknown, id: string): HttpResult {
   return { status: 500, body: { requestId: id, error: { code: 'internal_error', message: '요청을 처리하지 못했습니다.', retryable: false } } };
 }
 function invalidRequest(): ApiError { return new ApiError(400, 'invalid_request', '요청 본문 또는 헤더를 확인해 주세요.'); }
-function notImplemented(): ApiError { return new ApiError(501, 'not_implemented', '이 기능은 아직 구현되지 않았습니다.'); }
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw invalidRequest();
   return parsed.data;
 }
 
-export function buildApp(options: { sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+export function buildApp(options: { sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 32_768, genReqId: () => randomUUID() });
   const authenticated = new WeakMap<FastifyRequest, string>();
   const store = options.store ?? new MemoryPlanningStore();
   const idempotency = options.idempotency ?? (store.durable ? new RepositoryIdempotency(store, options.clock) : new MemoryIdempotency());
   const reviewIdempotency = store.durable ? idempotency : new RepositoryIdempotency(store, options.clock);
   const planning = new PlanningService(store, options.clock);
+  const contacts = new ContactService(store, planning, options.clock);
+  const contactDispatch = new ContactDispatch(store, planning, options.gmailContact, options.clock);
   const runner = options.model ? new PlanningAgentRunner(planning, options.model) : undefined;
   const now = () => options.clock?.() ?? new Date();
   let modelStatus: 'not_configured' | 'available' | 'degraded' = options.model ? 'available' : 'not_configured';
@@ -171,10 +177,14 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     data: {
       storage: { mode: planning.store.mode, durable: planning.store.durable },
       model: { id: MODEL_ID, reasoningEffort: REASONING_EFFORT, status: modelStatus },
-      integrations: { calendar: 'not_configured', email: 'not_configured', phone: 'not_configured', travel: 'not_configured' },
+      integrations: { calendar: 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: 'not_configured', travel: 'not_configured' },
       scheduler: { status: options.schedulerStatus?.() ?? 'not_configured' },
     },
   }));
+  app.get('/v1/email-connection', async request => {
+    const available = gmailAvailable(store, options.gmailContact, authenticated.get(request)!);
+    return { requestId: request.id, data: { status: available ? 'available' : 'not_configured', senderAddress: available ? options.gmailContact!.senderAddress : null } };
+  });
 
   async function runIdempotent(request: FastifyRequest, operation: string, run: (body: z.infer<typeof requestBody>, control: IdempotencyControl) => Promise<HttpResult>): Promise<HttpResult> {
     const body = requestBody.safeParse(request.body);
@@ -301,14 +311,44 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     });
     return reply.code(result.status).send(result.body);
   });
-  for (const path of ['/v1/contact-requests/:id']) {
-    app.get(path, async () => { throw notImplemented(); });
-  }
-  for (const path of ['/v1/recipients', '/v1/contact-requests', '/v1/contact-requests/:id/decision']) {
-    app.post(path, async (request, reply) => {
-      const result = await runIdempotent(request, path, async () => { throw notImplemented(); });
-      return reply.code(result.status).send(result.body);
+  app.post('/v1/recipients', async (request, reply) => {
+    const result = await runIdempotent(request, 'recipient_create', async () => {
+      const body = parse(recipientBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await contacts.createRecipient(authenticated.get(request)!, body) } };
     });
-  }
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/contact-requests', async (request, reply) => {
+    const result = await runIdempotent(request, 'contact_request_create', async () => {
+      const body = parse(contactBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await contacts.create(authenticated.get(request)!, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  // Newest 100 requests; this bounded endpoint intentionally has no cursor.
+  app.get('/v1/contact-requests', async request => {
+    const { proposalId } = parse(contactListQuery, request.query);
+    return { requestId: request.id, data: await contacts.list(authenticated.get(request)!, proposalId) };
+  });
+  app.get('/v1/contact-requests/:id', async request => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    return { requestId: request.id, data: await contacts.get(authenticated.get(request)!, id) };
+  });
+  app.post('/v1/contact-requests/:id/decision', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const result = await runIdempotent(request, 'contact_decision', async () => {
+      const body = parse(contactDecisionBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: await contacts.decide(authenticated.get(request)!, id, body) } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/contact-requests/:id/send', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const body = parse(contactSendBody, request.body);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
+    const result = await contactDispatch.send(authenticated.get(request)!, id, body, key);
+    return reply.code(result.status).send(result.body);
+  });
   return Object.assign(app, { reviewRuntime });
 }

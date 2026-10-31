@@ -1,5 +1,7 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { Text } from '../ui/typography';
+import { colors } from '../ui/theme';
 import { scheduleErrorMessage } from './useSchedule';
 
 export function ScheduleLoading() {
@@ -26,9 +28,9 @@ export function ScheduleError({ error, retry }: { error: unknown; retry: () => v
 
 const styles = StyleSheet.create({
   status: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 20 },
-  text: { color: '#475569', fontSize: 15 },
+  text: { color: colors.muted, fontSize: 15 },
   errorBox: { alignItems: 'flex-start', gap: 8, paddingVertical: 20 },
   error: { color: '#a01818', fontSize: 15, lineHeight: 22 },
-  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 8, backgroundColor: '#e2e8f0' },
-  retryText: { color: '#172033', fontWeight: '700' },
+  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 14, backgroundColor: colors.primarySoft },
+  retryText: { color: colors.text, fontWeight: '700' },
 });

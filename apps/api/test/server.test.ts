@@ -61,6 +61,35 @@ test('server process answers real HTTP requests and exits cleanly', async () => 
   assert.notEqual(child.exitCode === null && child.signalCode === null, true, 'server process must stop');
 });
 
+test('incomplete local Gmail setup disables only email and is ignored without development auth', async () => {
+  for (const development of [true, false]) {
+    const port = await freePort();
+    const fakeClientId = 'example-incomplete-client-id';
+    const { child, stderr } = start({ NODE_ENV: development ? 'development' : 'production', HOST: '127.0.0.1', PORT: String(port),
+      PIKKU_DEV_AUTH: development ? 'true' : 'false', PIKKU_GOOGLE_OAUTH_CLIENT_ID: fakeClientId, PIKKU_GOOGLE_OAUTH_CLIENT_SECRET: '' });
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      let ready = false;
+      for (let i = 0; i < 60; i++) {
+        try { ready = (await fetch(`${base}/health`)).ok; if (ready) break; } catch { /* startup */ }
+        if (child.exitCode !== null) throw new Error(`Server exited early: ${child.exitCode}`);
+        await delay(100);
+      }
+      assert.equal(ready, true);
+      const response = await fetch(`${base}/v1/email-connection`, { headers: { authorization: 'Bearer local-test-token-only' } });
+      if (development) {
+        assert.equal(response.status, 200);
+        assert.deepEqual((await response.json()).data, { status: 'not_configured', senderAddress: null });
+        assert.match(stderr(), /Gmail 연결 설정을 확인해 주세요\./);
+      } else {
+        assert.equal(response.status, 401);
+        assert.doesNotMatch(stderr(), /Gmail 연결 설정/);
+      }
+      assert.doesNotMatch(stderr(), new RegExp(fakeClientId));
+    } finally { await stop(child); }
+  }
+});
+
 test('development authentication refuses public binding and production mode', async () => {
   for (const env of [
     { NODE_ENV: 'development', HOST: '0.0.0.0' },

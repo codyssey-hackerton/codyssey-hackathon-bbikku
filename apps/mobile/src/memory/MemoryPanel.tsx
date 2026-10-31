@@ -1,15 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Text, TextInput } from '../ui/typography';
+import { colors } from '../ui/theme';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import { createMemoryClient } from './client';
@@ -274,31 +266,31 @@ export default function MemoryPanel(props: MemoryPanelProps) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: colors.background },
   content: { padding: 20, gap: 12, paddingBottom: 36 },
   section: { gap: 12 },
   heading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  title: { flexShrink: 1, fontSize: 24, fontWeight: '700', color: '#171717' },
-  subtitle: { fontSize: 18, fontWeight: '700', color: '#171717', marginTop: 8 },
-  label: { fontWeight: '600', color: '#334155', marginBottom: 6 },
-  body: { color: '#171717', lineHeight: 22 },
-  hint: { color: '#555', lineHeight: 20 },
-  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: '#aaa', borderRadius: 8, color: '#171717' },
+  title: { flexShrink: 1, fontSize: 28, fontWeight: '700', color: colors.text },
+  subtitle: { fontSize: 18, fontWeight: '700', color: colors.text, marginTop: 8 },
+  label: { fontWeight: '600', color: colors.text, marginBottom: 6 },
+  body: { color: colors.text, lineHeight: 22 },
+  hint: { color: colors.muted, lineHeight: 20 },
+  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: colors.border, borderRadius: 14, color: colors.text },
   valueInput: { minHeight: 76, textAlignVertical: 'top' },
   choices: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  choice: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderWidth: 1, borderColor: '#aaa', borderRadius: 8 },
-  chosen: { backgroundColor: '#e7eaf0', borderColor: '#334155' },
-  choiceText: { color: '#172033' },
-  button: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: '#334155', borderRadius: 8 },
+  choice: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 14 },
+  chosen: { backgroundColor: colors.primarySoft, borderColor: '#334155' },
+  choiceText: { color: colors.text },
+  button: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 14, backgroundColor: colors.primary, borderRadius: 14 },
   buttonText: { color: '#fff', fontWeight: '700' },
-  secondaryButton: { backgroundColor: '#eef1f5', borderWidth: 1, borderColor: '#64748b' },
-  secondaryButtonText: { color: '#172033' },
+  secondaryButton: { backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: colors.border },
+  secondaryButtonText: { color: colors.text },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
   status: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   statusBlock: { gap: 8 },
   error: { color: '#a01818', lineHeight: 22 },
   success: { color: '#176342', lineHeight: 22 },
-  card: { padding: 12, backgroundColor: '#f1f3f6', borderRadius: 8, gap: 4 },
-  cardTitle: { color: '#172033', fontWeight: '700' },
+  card: { padding: 18, backgroundColor: colors.surface, borderRadius: 20, gap: 8, borderWidth: 1, borderColor: colors.border },
+  cardTitle: { color: colors.text, fontWeight: '700' },
 });

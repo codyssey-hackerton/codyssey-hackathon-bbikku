@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
-import { parseEnv } from 'node:util';
+import { isDeepStrictEqual, parseEnv } from 'node:util';
 import { z } from 'zod';
 import { createPlanningAgent } from '../apps/api/src/agent.ts';
 import { createResponsesModel, MODEL_ID, REASONING_EFFORT } from '../apps/api/src/model.ts';
@@ -66,6 +66,7 @@ export async function verifyModel(apiKey: string, fetcher: typeof fetch): Promis
   let toolCalls = 0;
   let httpStatus: number | undefined;
   let failure: FailureReason | undefined;
+  let previousOutput: unknown[] | undefined;
   const fail = (reason: FailureReason): never => { failure = reason; throw new Error('VERIFICATION_FAILED'); };
 
   const guardedFetch: typeof fetch = async (url, init) => {
@@ -76,10 +77,24 @@ export async function verifyModel(apiKey: string, fetcher: typeof fetch): Promis
       model: z.literal(verificationModel),
       reasoning: z.object({ effort: z.literal(verificationEffort) }),
       store: z.literal(false),
+      include: z.array(z.string()).refine(values => values.includes('reasoning.encrypted_content')),
       parallel_tool_calls: z.literal(false),
       tools: z.array(z.object({ type: z.literal('function'), name: z.literal('calculate_timing') })).length(1),
+      input: z.array(z.unknown()).min(2),
     }).passthrough().safeParse(body);
     if (!request.success) return fail('request_configuration');
+    if (requests === 1) {
+      const call = previousOutput?.find(item => item && typeof item === 'object' && 'type' in item && item.type === 'function_call') as
+        { call_id?: unknown; name?: unknown } | undefined;
+      const input = request.data.input;
+      const output = input.at(-1);
+      if (!call || typeof call.call_id !== 'string' || call.name !== 'calculate_timing' ||
+        !isDeepStrictEqual(input.slice(2, -1), previousOutput) || !output || typeof output !== 'object' ||
+        !('type' in output) || output.type !== 'function_call_output' || !('call_id' in output) || output.call_id !== call.call_id ||
+        !('output' in output) || typeof output.output !== 'string') return fail('request_configuration');
+      try { if (!TimingResult.safeParse(JSON.parse(output.output)).success) return fail('tool_result'); }
+      catch { return fail('tool_result'); }
+    }
 
     requests++;
     let response: Response;
@@ -87,11 +102,14 @@ export async function verifyModel(apiKey: string, fetcher: typeof fetch): Promis
     httpStatus = response.status;
     if (!response.ok) { failure = 'http'; return response; }
     try {
+      const responseBody: unknown = await response.clone().json();
       const metadata = z.object({
         model: z.literal(verificationModel),
         reasoning: z.object({ effort: z.literal(verificationEffort) }),
-      }).passthrough().safeParse(await response.clone().json());
+        output: z.array(z.unknown()),
+      }).passthrough().safeParse(responseBody);
       if (!metadata.success) return fail('response_metadata');
+      if (requests === 1) previousOutput = metadata.data.output;
     } catch { return fail('response_metadata'); }
     return response;
   };

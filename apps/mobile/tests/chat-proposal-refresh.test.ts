@@ -112,10 +112,13 @@ const components = build({
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   plugins: [{ name: 'mock-native', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/ChatScheduleSummary)$/ },
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface)|\.\/ChatScheduleSummary)$/ },
       (args) => ({ path: args.path, namespace: 'test-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'test-native' }, ({ path }) => ({
-      contents: path === 'react' ? 'module.exports = __react' :
+      contents: path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+        path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
+        path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
+        path === 'react' ? 'module.exports = __react' :
         path === 'react-native' ? 'module.exports = __native' :
           path === './ChatScheduleSummary' ? 'exports.ChatScheduleSummary = () => null' :
             'exports.jsx = exports.jsxs = __jsx; exports.Fragment = __fragment',
@@ -295,4 +298,17 @@ test('a late proposal from a remounted session cannot notify either session', as
   await view.settle();
   assert.equal(oldCalls, 0);
   assert.equal(newCalls, 1);
+});
+
+
+test('starter chips only fill the draft; the user must send it explicitly', async () => {
+  let calls = 0;
+  const { view } = await screen(async () => { calls += 1; return chatResponse({ kind: 'reply', message: '검토할게요.' }); }, () => {});
+  press(view, '오늘 일정을 함께 정리해줘.');
+  assert.equal(calls, 0);
+  const input = nodes(view.tree).find((item) => item.type === 'TextInput' && item.props.accessibilityLabel === '채팅 메시지');
+  assert.equal(input.props.value, '오늘 일정을 함께 정리해줘.');
+  press(view, '메시지 보내기');
+  await view.settle();
+  assert.equal(calls, 1);
 });

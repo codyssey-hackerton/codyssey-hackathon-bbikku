@@ -52,7 +52,7 @@ function createHarness() {
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
-  const host: any = { react, native, jsx, fragment, marker: 0 };
+  const host: any = { react, native, jsx, fragment, marker: 0, fontState: [true, null] };
   (globalThis as any).__appIntegrationHarness = host;
 
   function renderer(Component: any, initialProps: any = {}) {
@@ -104,11 +104,15 @@ const components = build({
     import { useMutation } from '../src/api/useMutation'; import { jsx } from 'react/jsx-runtime';
     export function MutationTester({ run }) { const action = useMutation(run); return jsx('MutationTester', action); }`,
     resolveDir: testDir, loader: 'ts' },
-  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+  bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar)$/ }, (args) => ({ path: args.path, namespace: 'app-native' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ }, (args) => ({ path: args.path, namespace: 'app-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-native' }, ({ path }) => ({
-      contents: path === 'react' ? 'module.exports = globalThis.__appIntegrationHarness.react' :
+      contents: path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+        path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
+        path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"; exports.FontReadyContext={Provider:({children})=>children}' :
+        path === 'expo-font' ? 'exports.useFonts=()=>globalThis.__appIntegrationHarness.fontState' :
+        path === 'react' ? 'module.exports = globalThis.__appIntegrationHarness.react' :
         path === 'react-native' ? 'module.exports = globalThis.__appIntegrationHarness.native' :
         path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider = ({children}) => children; exports.SafeAreaView = "View"' :
         path === 'expo-status-bar' ? 'exports.StatusBar = "StatusBar"' :
@@ -146,7 +150,7 @@ function node(view: any, type: string, predicate: (node: any) => boolean = () =>
 function input(view: any, label: string) { return node(view, 'TextInput', (item) => item.props.accessibilityLabel === label); }
 function enter(view: any, label: string, value: string) { input(view, label).props.onChangeText(value); view.flush(); }
 function press(view: any, label: string) {
-  const button = node(view, 'Pressable', (item) => textOf(item.children) === label);
+  const button = node(view, 'Pressable', (item) => (item.props.accessibilityLabel === label || textOf(item.children) === label));
   assert.notEqual(button.props.disabled, true, `${label} disabled`);
   button.props.onPress(); view.flush();
 }
@@ -166,7 +170,7 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { globalThis.fetch = originalFetch; });
+test.afterEach(() => { globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; });
 
 test('preloaded proposals refresh when chat creates a proposal without resetting the workspace', async () => {
   const { App } = await components;
@@ -465,5 +469,33 @@ test('a conflict after an uncertain review save cannot unlock a new request', as
   assert.deepEqual(writes[0], writes[1]);
   assert.deepEqual(writes[1], writes[2]);
   assert.equal(operationGuard.hasUnresolved(), false);
+  view.unmount();
+});
+
+
+test('font loading defers workspace requests and shows a readable loading state', async () => {
+  const { App } = await components;
+  (globalThis as any).__appIntegrationHarness.fontState = [false, null];
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return response([]); };
+  const view = harness.renderer(App);
+  await view.settle();
+  assert.match(textOf(view.tree), /하루를 준비하고 있어요/);
+  assert.equal(nodes(view.tree).some((item) => item.type === 'ChatScreen'), false);
+  assert.equal(calls, 0);
+  view.unmount();
+});
+
+test('font loading failure leaves connection settings and the workspace usable', async () => {
+  const { App } = await components;
+  (globalThis as any).__appIntegrationHarness.fontState = [false, new Error('font unavailable')];
+  globalThis.fetch = async () => response([]);
+  const view = harness.renderer(App);
+  assert.match(textOf(view.tree), /기본 글꼴로 표시/);
+  press(view, '개발 연결 설정');
+  enter(view, '개발 세션 토큰', 'dev-token');
+  press(view, '설정 적용');
+  await view.settle();
+  assert.ok(chat(view));
   view.unmount();
 });
