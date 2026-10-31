@@ -142,6 +142,16 @@ function nodes(root: any): any[] {
   if (typeof root !== 'object') return [];
   return [root, ...nodes(root.children)];
 }
+function visibleNodes(root: any): any[] {
+  if (root == null || typeof root !== 'object') return [];
+  if (Array.isArray(root)) return root.flatMap(visibleNodes);
+  if (root.props?.accessibilityElementsHidden === true || root.props?.importantForAccessibility === 'no-hide-descendants') return [];
+  return [root, ...visibleNodes(root.children)];
+}
+function visiblePress(view: any, label: string) {
+  const found = visibleNodes(view.tree).find(item => item.type === 'Pressable' && (item.props.accessibilityLabel === label || textOf(item.children) === label));
+  assert.ok(found, `missing visible ${label}`); assert.notEqual(found.props.disabled, true); found.props.onPress(); view.flush();
+}
 function textOf(root: any): string {
   if (root === null || root === undefined) return '';
   if (Array.isArray(root)) return root.map(textOf).join('');
@@ -797,6 +807,9 @@ test('동기화는 쓰기 권한 캘린더와 명시 선택한 일정만 연결�
   press(view, 'cal-1 동기화 실행'); await view.settle();
   assert.match(textOf(view.tree), /일부 항목은 처리하지 못했거나 검토가 필요/); assert.match(textOf(view.tree), /외부 쓰기 결과 불명/); assert.match(textOf(view.tree), /삭제 안전성을 확인할 수 없어 검토 필요/);
   assert.equal(node(view, 'Pressable', item => item.props.accessibilityLabel === 'cal-1 동기화 실행').props.disabled, true);
+  visiblePress(view, '캘린더 내 달력'); visiblePress(view, '내보낼 일정 개인 일정');
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '선택한 일정 추가')?.props.disabled, true);
+  assert.match(textOf(view.tree), /이 연결은 검토가 필요하여 일정을 추가할 수 없습니다/);
   assert.equal(calls.filter(item => item.path === '/v1/calendar-sync/sync-1/run').length, 1); view.unmount();
 });
 
@@ -851,4 +864,169 @@ test('동기화 응답 유실 후 저장된 결과만 조회하고 완료 시 �
   assert.equal(operationReads, 2); assert.equal(runs, 1); assert.match(textOf(view.tree), /가져옴 1건/);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'another'); press(view, '설정 적용');
   assert.doesNotMatch(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/); view.unmount();
+});
+
+test('인증 화면에서 건강 화면으로 이동하면 인증 초안을 지우고 기존 세션을 보존한다', async () => {
+  const { App } = await components; let resolveStart!: (response: Response) => void;
+  globalThis.fetch = async raw => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/auth/google/start') return new Promise<Response>(resolve => { resolveStart = resolve; });
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'preview'); visiblePress(view, '설정 적용'); await view.settle();
+  const previousMarker = chat(view).props.marker;
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, '연결'); visiblePress(view, '건강 데이터'); await view.settle();
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '걸음 수 선택'), true);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 시작'), false);
+  resolveStart(Response.json({ requestId: 'r', data: { authorizationUrl: 'invalid', completionSecret: 'q'.repeat(43) } })); await view.settle();
+  visiblePress(view, '나중에'); assert.equal(chat(view).props.marker, previousMarker);
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입');
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'Google 로그인 확인 코드'), false);
+  view.unmount();
+});
+
+test('로그인 완료 처리 중에는 건강 화면 전환을 차단한다', async () => {
+  const { App } = await components; let resolveComplete!: (response: Response) => void;
+  const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code', state: `member_${'s'.repeat(43)}`,
+    nonce: 'n'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback', scope: 'openid email profile' })}`;
+  globalThis.fetch = async raw => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/auth/google/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
+    if (path === '/v1/auth/google/complete') return new Promise<Response>(resolve => { resolveComplete = resolve; });
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
+  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
+  visiblePress(view, '개발 연결 설정'); visiblePress(view, '연결'); visiblePress(view, '건강 데이터');
+  assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '걸음 수 선택'), false);
+  resolveComplete(Response.json({ requestId: 'r', data: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z', member: { id: 'member:1', email: 'a@example.test', displayName: 'A' } } }));
+  await view.settle(); view.unmount();
+});
+
+test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하고 작성 중인 초안은 보존한다', async () => {
+  const { App } = await components;
+  globalThis.fetch = async raw => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/routines') return Response.json({ requestId: 'r', data: { routines: [] } });
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
+  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '뒤로'); visiblePress(view, '캘린더');
+  const calendar = node(view, 'CalendarScreen'); const timezone = calendar.props.timezone;
+  const localDate = (date: Date) => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(part => [part.type, part.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  };
+  const first = new Date('2027-01-11T12:00:00Z'); calendar.props.onSelectDate(first); view.flush();
+  visiblePress(view, '루틴'); await view.settle();
+  assert.equal(input(view, '루틴 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 종료일').props.value, localDate(first));
+  enter(view, '루틴 이름', '작성 중'); enter(view, '루틴 시작일', '2027-02-01'); enter(view, '회차 시작일', '2027-02-02');
+  visiblePress(view, '뒤로'); const second = new Date('2027-01-20T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(second); view.flush();
+  visiblePress(view, '루틴'); await view.settle();
+  assert.equal(input(view, '루틴 이름').props.value, '작성 중'); assert.equal(input(view, '루틴 시작일').props.value, '2027-02-01');
+  assert.equal(input(view, '회차 시작일').props.value, '2027-02-02'); assert.equal(input(view, '회차 종료일').props.value, localDate(second)); view.unmount();
+});
+
+test('루틴 회차 요청이 불명일 때 화면 재진입과 날짜 변경이 원래 요청과 초안을 보존한다', async () => {
+  const { App, operationGuard } = await components; const writes: any[] = [];
+  globalThis.fetch = async (raw, init) => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/routines' && init?.method === 'GET') return Response.json({ requestId: 'r', data: { routines: [] } });
+    if (path === '/v1/routines/materialize') { writes.push({ body: String(init?.body), key: (init?.headers as Record<string, string>)['Idempotency-Key'] }); throw new Error('lost'); }
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
+  visiblePress(view, '루틴'); await view.settle(); enter(view, '루틴 이름', '보존할 초안');
+  const original = input(view, '루틴 시작일').props.value;
+  visiblePress(view, '회차 생성'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
+  visiblePress(view, '뒤로'); visiblePress(view, '캘린더'); node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-03-10T12:00:00Z')); view.flush();
+  visiblePress(view, '루틴'); await view.settle();
+  assert.equal(input(view, '루틴 이름').props.value, '보존할 초안'); assert.equal(input(view, '루틴 시작일').props.value, original);
+  assert.match(textOf(view.tree), /결과를 확인하지 못했습니다/); assert.equal(writes.length, 1);
+  visiblePress(view, '같은 루틴 요청 재시도'); await view.settle(); assert.deepEqual(writes[1], writes[0]);
+  assert.equal(operationGuard.hasUnresolved(), true); view.unmount();
+});
+
+test('기존 동기화 연결에 선택 일정을 추가하고 응답 유실 재시도는 같은 내부 요청만 사용한다', async () => {
+  const { App, operationGuard } = await components; const writes: any[] = []; let listReads = 0;
+  let connection = { id: 'sync-1', calendarId: 'cal-1', revision: 3, allowDeletes: false, status: 'connected', pendingExportCount: 1 };
+  globalThis.fetch = async (raw, init) => {
+    const url = new URL(String(raw)), path = url.pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/calendar-sync') { listReads++; return Response.json({ requestId: 'r', data: { connections: [connection] } }); }
+    if (path === '/v1/calendar-sync/calendars') return Response.json({ requestId: 'r', data: { calendars: [{ id: 'cal-1', summary: '내 달력', accessRole: 'owner' }] } });
+    if (path === '/v1/schedule') {
+      const from = Date.parse(url.searchParams.get('from')!);
+      return Response.json({ requestId: 'r', data: { scheduleRevision: 0, items: [{ id: 'item-1', revision: 1, kind: 'event', title: '새 일정',
+        timeSlot: { startsAt: new Date(from + 3_600_000).toISOString(), endsAt: new Date(from + 7_200_000).toISOString(), timezone: url.searchParams.get('timezone') },
+        durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending', sourceRefs: [] }] } });
+    }
+    if (path === '/v1/calendar-sync/sync-1/exports') {
+      writes.push({ path, body: String(init?.body), key: (init?.headers as Record<string, string>)['Idempotency-Key'] });
+      if (writes.length === 1) throw new Error('lost');
+      connection = { ...connection, revision: 4, pendingExportCount: 2 };
+      return Response.json({ requestId: 'r', data: { connection } });
+    }
+    if (path === '/v1/calendar-sync/connect' || path.endsWith('/run')) throw new Error(`unexpected write ${path}`);
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
+  visiblePress(view, '캘린더'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  assert.match(textOf(view.tree), /내가 주최한 기존 공동 약속은 승인된 연락과 응답/);
+  assert.match(textOf(view.tree), /새 공동 약속 내보내기, 삭제, 다른 사람 주최, Google에서 변경된 공동 약속이나 확인되지 않은 변경은 검토 대상/);
+  visiblePress(view, '캘린더 내 달력');
+  assert.match(textOf(view.tree), /이미 연결된 캘린더/);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '동기화 연결'), false);
+  assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '선택한 일정 추가')?.props.disabled, true);
+  visiblePress(view, '내보낼 일정 새 일정'); visiblePress(view, '선택한 일정 추가'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), true); assert.equal(writes.length, 1);
+  visiblePress(view, '뒤로'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  assert.ok(listReads >= 2); assert.equal(operationGuard.hasUnresolved(), true);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '같은 동기화 요청 재시도'), true);
+  visiblePress(view, '같은 동기화 요청 재시도'); await view.settle();
+  assert.deepEqual(writes[1], writes[0]); assert.deepEqual(JSON.parse(writes[0].body).exportItemIds, ['item-1']);
+  assert.equal(JSON.parse(writes[0].body).expectedRevision, 3); assert.ok(writes[0].key);
+  assert.match(textOf(view.tree), /Google 전송은 동기화 실행 시 진행/); assert.equal(operationGuard.hasUnresolved(), false); view.unmount();
+});
+
+test('동기화 쓰기 권한 연결 후 화면에 다시 들어오면 목록을 자동으로 새로 조회한다', async () => {
+  const { App } = await components; let enabled = false, calendarReads = 0;
+  const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code', state: 's'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256',
+    redirect_uri: 'https://example.test/v1/google/oauth/callback', scope: 'openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly' })}`;
+  globalThis.fetch = async raw => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/proposals') return response([]);
+    if (path === '/v1/calendar-sync') return Response.json({ requestId: 'r', data: { connections: [] } });
+    if (path === '/v1/calendar-sync/calendars') {
+      calendarReads++;
+      return enabled ? Response.json({ requestId: 'r', data: { calendars: [{ id: 'cal', summary: '새로 연결된 달력', accessRole: 'owner' }] } }) :
+        Response.json({ requestId: 'r', error: { code: 'not_configured', message: 'not configured', retryable: false } }, { status: 503 });
+    }
+    if (path === '/v1/schedule') return Response.json({ requestId: 'r', data: { items: [], scheduleRevision: 0 } });
+    if (path === '/v1/calendar-connection' || path === '/v1/calendar-write-connection') return Response.json({ requestId: 'r', data: { status: enabled ? 'available' : 'not_configured', accountLabel: enabled ? 'test@example.test' : null } });
+    if (path === '/v1/email-connection' || path === '/v1/email-reply-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', senderAddress: null } });
+    if (path === '/v1/google/oauth/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
+    if (path === '/v1/google/oauth/complete') { enabled = true; return Response.json({ requestId: 'r', data: { status: 'connected' } }); }
+    throw new Error(`unexpected ${path}`);
+  };
+  const view = harness.renderer(App);
+  visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
+  visiblePress(view, '캘린더'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  assert.match(textOf(view.tree), /캘린더 목록을 확인하지 못했습니다/); assert.equal(calendarReads, 1);
+  visiblePress(view, '뒤로'); visiblePress(view, 'Google 연결'); await view.settle();
+  visiblePress(view, 'Google 캘린더 동기화 연결 시작'); await view.settle();
+  enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 연결 확인'); await view.settle();
+  visiblePress(view, '뒤로'); visiblePress(view, 'Google 캘린더 동기화'); await view.settle();
+  assert.equal(calendarReads, 2); assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '캘린더 새로 연결된 달력')); view.unmount();
 });

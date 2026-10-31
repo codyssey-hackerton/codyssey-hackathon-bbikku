@@ -10,6 +10,7 @@ const params = z.object({ id: identifier }).strict();
 const operationParams = z.object({ requestId }).strict();
 const connect = z.object({ requestId, calendarId: identifier, allowDeletes: z.boolean().optional(), exportItemIds: z.array(identifier).max(100).optional() }).strict();
 const change = z.object({ requestId, expectedRevision: z.number().int().min(1).safe() }).strict();
+const exportsBody = change.extend({ exportItemIds: z.array(identifier).min(1).max(100) }).strict();
 const invalid = () => new PlanningError(400, 'invalid_request', '동기화 요청을 확인해 주세요.');
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -49,6 +50,11 @@ export function registerCalendarSyncRoutes(app: FastifyInstance, options: {
   app.post('/v1/calendar-sync/:id/run', async (request, reply) => {
     const body = parse(change, request.body), { id } = parse(params, request.params), userId = options.resolveUser(request);
     const result = await execute(request, 'calendar_sync_run', body, () => options.service.run(userId, id, body));
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/calendar-sync/:id/exports', async (request, reply) => {
+    const body = parse(exportsBody, request.body), { id } = parse(params, request.params), userId = options.resolveUser(request);
+    const result = await execute(request, 'calendar_sync_exports', body, () => options.service.enqueueExports(userId, id, body));
     return reply.code(result.status).send(result.body);
   });
   app.post('/v1/calendar-sync/:id/disconnect', async (request, reply) => {

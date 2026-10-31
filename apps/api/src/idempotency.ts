@@ -90,6 +90,8 @@ export class RepositoryIdempotency implements IdempotencyPort {
     const conflict = (): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'idempotency_conflict', message: '동일한 중복 키에 다른 요청을 사용할 수 없습니다.', retryable: false } } });
     const busy = (operationId: string): HttpResult => ({ status: 409, body: { requestId: input.requestId, error: { code: 'operation_in_progress', message: '요청을 처리 중입니다.', retryable: true, details: { operationId } } } });
     const readOnlyAttempt = input.operation === 'chat' || input.operation === 'scheduled_review' || input.operation === 'calendar_import' || input.operation === 'contact_reply_check' || input.operation === 'contact_call_check';
+    // Calendar sync owns its durable effect ledger and transactions; an outer transaction would self-lock its final sync-row update.
+    const detachedAttempt = readOnlyAttempt || input.operation === 'calendar_sync_run';
     // Only operations whose entire effect is committed with this record may recover a stale claim.
     const recoverable = readOnlyAttempt || ['schedule_command', 'schedule_checkin', 'memory_write', 'proposal_decision', 'review_schedule_write',
       'recipient_create', 'contact_request_create', 'contact_decision', 'preparation_proposal', 'contact_response_confirm'].includes(input.operation);
@@ -145,7 +147,7 @@ export class RepositoryIdempotency implements IdempotencyPort {
     };
     let result: HttpResult;
     try {
-      result = readOnlyAttempt ? await input.run({ finalize }) : await finalize(() => input.run({ finalize }));
+      result = detachedAttempt ? await input.run({ finalize }) : await finalize(() => input.run({ finalize }));
     } catch {
       // A scheduled review only writes inside finalize, atomically with its result.
       result = input.operation === 'scheduled_review'

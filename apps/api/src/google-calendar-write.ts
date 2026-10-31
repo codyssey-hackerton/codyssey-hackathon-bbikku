@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseOffsetDateTime } from '@pikku/domain';
+import { z } from 'zod';
 import { googleUserInfo, readGmailCredential } from './gmail-connection.ts';
 
 export type GoogleCalendarWriteErrorCode = 'invalid_request' | 'not_found' | 'forbidden' | 'sync_token_expired' | 'conflict' | 'outcome_unknown' | 'provider_unavailable';
@@ -9,7 +10,7 @@ export class GoogleCalendarWriteError extends Error {
 }
 type TimeSlot = { startsAt: string; endsAt: string; timezone: string };
 export type GoogleCalendarEvent = { id: string; etag: string | null; status: 'confirmed' | 'tentative' | 'cancelled';
-  title: string | null; description: string | null; timeSlot: TimeSlot | null;
+  title: string | null; description: string | null; timeSlot: TimeSlot | null; organizerSelf?: boolean; organizerIsAccount?: boolean;
   unsupported: { allDay: boolean; recurring: boolean; shared: boolean; other: boolean }; privateProperties: { pIKKU?: string } };
 export type GoogleCalendarEventWrite = { title: string; timeSlot: TimeSlot; description?: string | null; privateProperties: { pIKKU: string } };
 const eventScope = 'https://www.googleapis.com/auth/calendar.events';
@@ -19,11 +20,12 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 const identifier = (value: unknown, max = 1024): value is string => typeof value === 'string' && value.length > 0 && value.length <= max &&
   value.trim() === value && !/[\x00-\x1f\x7f-\x9f]/u.test(value) && Buffer.from(value, 'utf8').toString('utf8') === value;
 const validEtag = (value: unknown): value is string => identifier(value, 1024) && !/[\s,*]/u.test(value);
+const email = z.email().max(254);
 const timezone = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value || value.length > 100 || /^[+-]/.test(value)) return false;
   try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; }
 };
-function parseEvent(value: unknown): GoogleCalendarEvent {
+function parseEvent(value: unknown, accountEmail: string): GoogleCalendarEvent {
   if (!record(value) || !identifier(value.id) || !['confirmed', 'tentative', 'cancelled'].includes(value.status) ||
       (value.etag !== undefined && !identifier(value.etag, 1024))) return err('provider_unavailable');
   const cancelled = value.status === 'cancelled';
@@ -47,6 +49,8 @@ function parseEvent(value: unknown): GoogleCalendarEvent {
   if (marker !== undefined && !identifier(marker, 1024)) return err('provider_unavailable');
   return { id: value.id, etag: value.etag ?? null, status: value.status, title, description,
     timeSlot: validSlot ? { startsAt: start, endsAt: end, timezone: zone } : null,
+    ...(typeof value.organizer?.self === 'boolean' ? { organizerSelf: value.organizer.self } : {}),
+    ...(email.safeParse(value.organizer?.email).success ? { organizerIsAccount: value.organizer.email.toLowerCase() === accountEmail.toLowerCase() } : {}),
     unsupported: { allDay, recurring, shared, other }, privateProperties: marker === undefined ? {} : { pIKKU: marker } };
 }
 function writeBody(event: GoogleCalendarEventWrite) {
@@ -147,12 +151,12 @@ export async function getCalendarWriteConnection(options: { env: NodeJS.ProcessE
           (data.nextPageToken !== undefined && !identifier(data.nextPageToken, 4096)) ||
           (data.nextSyncToken !== undefined && !identifier(data.nextSyncToken, 4096)) ||
           (!!data.nextPageToken === !!data.nextSyncToken)) return err('provider_unavailable');
-      return { events: data.items.map(parseEvent), ...(data.nextPageToken ? { nextPageToken: data.nextPageToken as string } : {}),
+      return { events: data.items.map((value: unknown) => parseEvent(value, saved!.senderAddress)), ...(data.nextPageToken ? { nextPageToken: data.nextPageToken as string } : {}),
         ...(data.nextSyncToken ? { nextSyncToken: data.nextSyncToken as string } : {}) };
     },
     async getEvent(input: { calendarId: string; eventId: string }) {
       const url = eventUrl(input.calendarId, input.eventId); url.searchParams.set('timeZone', 'UTC');
-      const event = parseEvent(await request(url, 'GET'));
+      const event = parseEvent(await request(url, 'GET'), saved!.senderAddress);
       if (event.id !== input.eventId) return err('provider_unavailable');
       return event;
     },
@@ -161,13 +165,13 @@ export async function getCalendarWriteConnection(options: { env: NodeJS.ProcessE
       const url = eventUrl(input.calendarId); url.searchParams.set('sendUpdates', 'none');
       const body = { id: input.eventId, ...writeBody(input.event) };
       const data = await request(url, 'POST', body);
-      try { const event = parseEvent(data); if (event.id !== input.eventId) throw new Error(); return event; } catch { return err('outcome_unknown'); }
+      try { const event = parseEvent(data, saved!.senderAddress); if (event.id !== input.eventId) throw new Error(); return event; } catch { return err('outcome_unknown'); }
     },
     async updateEvent(input: { calendarId: string; eventId: string; etag: string; event: GoogleCalendarEventWrite }) {
       if (!validEtag(input.etag)) return err('invalid_request');
       const url = eventUrl(input.calendarId, input.eventId); url.searchParams.set('sendUpdates', 'none');
       const data = await request(url, 'PATCH', writeBody(input.event), input.etag);
-      try { const event = parseEvent(data); if (event.id !== input.eventId) throw new Error(); return event; } catch { return err('outcome_unknown'); }
+      try { const event = parseEvent(data, saved!.senderAddress); if (event.id !== input.eventId) throw new Error(); return event; } catch { return err('outcome_unknown'); }
     },
     async deleteEvent(input: { calendarId: string; eventId: string; etag: string }) {
       if (!validEtag(input.etag)) return err('invalid_request');

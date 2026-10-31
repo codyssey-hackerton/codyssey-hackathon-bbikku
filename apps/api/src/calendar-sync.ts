@@ -2,9 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { assessChanges, type Change, type ScheduleFields, type ScheduleItem } from '@pikku/domain';
 import type { GoogleCalendarEvent, GoogleCalendarEventWrite, getCalendarWriteConnection } from './google-calendar-write.ts';
 import { PlanningError } from './planning-service.ts';
+import { compareInstants } from './planning-schemas.ts';
+import { findCalendarContactAuthorization } from './calendar-contact-authorization.ts';
 import type { PlanningStore, UserPlanningState } from './planning-store.ts';
 import { PostgresPlanningStore } from './postgres-store.ts';
-import { PostgresCalendarSyncStore, type CalendarSyncStore, type SyncConnection, type SyncMapping } from './calendar-sync-store.ts';
+import { PostgresCalendarSyncStore, type CalendarSyncStore, type SyncConnection, type SyncMapping, type SyncState } from './calendar-sync-store.ts';
 
 type Google = NonNullable<Awaited<ReturnType<typeof getCalendarWriteConnection>>>;
 type Conflict = { reason: string; itemId?: string; eventId?: string };
@@ -28,6 +30,25 @@ function assess(userId: string, state: UserPlanningState, change: Change): boole
 }
 function write(item: ScheduleItem, bindingId: string): GoogleCalendarEventWrite {
   return { title: item.title, timeSlot: item.timeSlot!, privateProperties: { pIKKU: bindingId } };
+}
+function sharedProof(userId: string, state: UserPlanningState, item: ScheduleItem, c: SyncConnection, google: Google,
+  event: GoogleCalendarEvent, etag: string) {
+  if (item.involvement !== 'shared' || event.status === 'cancelled' || event.etag !== etag || event.organizerSelf !== true ||
+      event.organizerIsAccount !== true || event.unsupported.allDay || event.unsupported.recurring || event.unsupported.other || !event.timeSlot) return null;
+  const refs = item.sourceRefs.filter(ref => ref.provider === 'google_calendar' && (ref.accountRef === c.accountRef || ref.accountRef === `google:${google.subject}`) &&
+    ref.calendarId === c.calendarId && ref.externalEventId === event.id);
+  if (refs.length !== 1 || refs[0].sourceVersion !== etag) return null;
+  const ref = refs[0];
+  const proof = findCalendarContactAuthorization({ state, userId, item, source: { accountRef: ref.accountRef, calendarId: ref.calendarId,
+    externalEventId: ref.externalEventId, sourceVersion: etag } });
+  if (!proof?.beforeItem.timeSlot || proof.beforeItem.title !== event.title ||
+      compareInstants(proof.beforeItem.timeSlot.startsAt, event.timeSlot.startsAt) !== 0 ||
+      compareInstants(proof.beforeItem.timeSlot.endsAt, event.timeSlot.endsAt) !== 0) return null;
+  return proof;
+}
+async function calendarOwned(google: Google, calendarId: string): Promise<boolean> {
+  const matches = (await google.listCalendars()).calendars.filter(calendar => calendar.id === calendarId);
+  return matches.length === 1 && matches[0].accessRole === 'owner';
 }
 
 export class CalendarSyncService {
@@ -73,6 +94,36 @@ export class CalendarSyncService {
       data.connections.splice(index, 1);
       return { disconnected: true as const };
     });
+  }
+  async enqueueExports(userId: string, connectionId: string, input: { expectedRevision: number; exportItemIds: string[] }) {
+    if (!id(connectionId) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 ||
+        !Array.isArray(input.exportItemIds) || input.exportItemIds.length < 1 || input.exportItemIds.length > 100 ||
+        input.exportItemIds.some(value => !id(value))) return bad();
+    const apply = async (data: SyncState) => {
+      const connection = data.connections.find(value => value.id === connectionId);
+      if (!connection) return error(404, 'not_found', '동기화 연결을 찾을 수 없습니다.');
+      if (connection.revision !== input.expectedRevision || connection.activeRun) return conflict();
+      await this.google(userId, connection.accountRef);
+      const state = await this.planning.read(userId);
+      const pending = new Set(connection.exportItemIds);
+      for (const itemId of input.exportItemIds) {
+        if (connection.mappings.some(mapping => mapping.itemId === itemId)) continue;
+        const item = state.items.get(itemId);
+        if (!item || item.kind !== 'event' || item.involvement !== 'personal' || !item.timeSlot || item.sourceRefs.length) return bad();
+        pending.add(itemId);
+      }
+      if (pending.size > 100) return bad();
+      connection.exportItemIds = [...pending];
+      connection.revision++;
+      return { connection: publicConnection(connection) };
+    };
+    if (this.planning instanceof PostgresPlanningStore && this.sync instanceof PostgresCalendarSyncStore) {
+      const sync = this.sync;
+      if (this.planning.pool !== sync.pool) throw new Error('Calendar sync and planning must use the same database pool');
+      return this.planning.atomicWithClient(userId, client => sync.updateWithClient(client, userId, apply));
+    }
+    if (this.planning.durable || this.sync instanceof PostgresCalendarSyncStore) throw new Error('Calendar sync stores must share a transaction');
+    return this.planning.atomic(userId, () => this.sync.update(userId, apply));
   }
   private async apply(userId: string, connectionId: string, runId: string,
     plan: (state: UserPlanningState, connection: SyncConnection) => void): Promise<void> {
@@ -161,17 +212,57 @@ export class CalendarSyncService {
       allEvents = listed.result; token = listed.next;
       if (new Set(allEvents.map(e => e.id)).size !== allEvents.length) throw new Error('Duplicate event IDs');
       const events = new Map(allEvents.map(e => [e.id, e]));
+      const sourceState = await this.planning.read(userId);
+      const sourceOwners = new Map<string, number>();
+      for (const item of sourceState.items.values()) for (const ref of item.sourceRefs) {
+        if (ref.provider === 'google_calendar' && (ref.accountRef === c.accountRef || ref.accountRef === `google:${google.subject}`) && ref.calendarId === c.calendarId) {
+          sourceOwners.set(ref.externalEventId, (sourceOwners.get(ref.externalEventId) ?? 0) + 1);
+        }
+      }
+      let fetchedShared = 0;
+      for (const item of sourceState.items.values()) {
+        if (item.involvement !== 'shared' || c.mappings.some(mapping => mapping.itemId === item.id)) continue;
+        for (const ref of item.sourceRefs) {
+          if (ref.provider !== 'google_calendar' || (ref.accountRef !== c.accountRef && ref.accountRef !== `google:${google.subject}`) ||
+              ref.calendarId !== c.calendarId || !ref.sourceVersion || sourceOwners.get(ref.externalEventId) !== 1 ||
+              c.mappings.some(mapping => mapping.eventId === ref.externalEventId) || events.has(ref.externalEventId)) continue;
+          if (!findCalendarContactAuthorization({ state: sourceState, userId, item, source: { accountRef: ref.accountRef, calendarId: ref.calendarId,
+            externalEventId: ref.externalEventId, sourceVersion: ref.sourceVersion } })) continue;
+          if (fetchedShared >= 100) { addConflict('candidate_limit'); break; }
+          fetchedShared++;
+          let event: GoogleCalendarEvent;
+          try { event = await google.getEvent({ calendarId: c.calendarId, eventId: ref.externalEventId }); }
+          catch (e) { if (code(e) === 'not_found') { addConflict('remote_missing', item.id, ref.externalEventId); continue; } throw e; }
+          if (event.id !== ref.externalEventId || event.status === 'cancelled') { addConflict('remote_missing', item.id, ref.externalEventId); continue; }
+          events.set(event.id, event); allEvents.push(event);
+        }
+        if (fetchedShared >= 100 && conflicts.some(value => value.reason === 'candidate_limit')) break;
+      }
       for (const event of allEvents) {
         if (event.status === 'cancelled' || c.mappings.some(m => m.eventId === event.id)) continue;
-        if (unsupported(event)) { unsupportedCount++; continue; }
         const state = await this.planning.read(userId);
         const matches = [...state.items.values()].filter(item => item.sourceRefs.some(ref => ref.provider === 'google_calendar' &&
           (ref.accountRef === c.accountRef || ref.accountRef === `google:${google.subject}`) && ref.calendarId === c.calendarId && ref.externalEventId === event.id));
         if (matches.length > 1) { addConflict('duplicate_source', undefined, event.id); continue; }
         const existing = matches[0];
-        if (existing && existing.involvement !== 'personal') { addConflict('contact_required', existing.id, event.id); continue; }
         const bindingId = digest(c.accountRef, c.calendarId, existing?.id ?? event.id);
         if (event.privateProperties.pIKKU && event.privateProperties.pIKKU !== bindingId) { addConflict('binding_mismatch', existing?.id, event.id); continue; }
+        if (existing?.involvement === 'shared') {
+          const proof = event.etag ? sharedProof(userId, state, existing, c, google, event, event.etag) : null;
+          if (!proof || !await calendarOwned(google, c.calendarId)) { addConflict('contact_required', existing.id, event.id); continue; }
+          let mapping: SyncMapping | undefined;
+          await this.apply(userId, c.id, runId, (s, current) => {
+            const latest = s.items.get(existing.id);
+            if (!latest || current.mappings.some(m => m.itemId === existing.id || m.eventId === event.id)) return;
+            const currentProof = sharedProof(userId, s, latest, c, google, event, event.etag!);
+            if (!currentProof) return;
+            mapping = { bindingId, itemId: latest.id, eventId: event.id, itemRevision: currentProof.beforeItem.revision, etag: event.etag! };
+            current.mappings.push(mapping);
+          });
+          if (mapping) c.mappings.push(mapping); else addConflict('contact_required', existing.id, event.id);
+          continue;
+        }
+        if (unsupported(event)) { unsupportedCount++; continue; }
         if (existing) {
           const ref = existing.sourceRefs.find(r => r.provider === 'google_calendar' && r.calendarId === c.calendarId && r.externalEventId === event.id &&
             (r.accountRef === c.accountRef || r.accountRef === `google:${google.subject}`))!;
@@ -209,18 +300,24 @@ export class CalendarSyncService {
           catch (e) { if (code(e) === 'not_found') { addConflict('remote_missing', mapping.itemId, mapping.eventId); continue; } throw e; }
         }
         if (event.id !== mapping.eventId) { addConflict('binding_mismatch', mapping.itemId, mapping.eventId); continue; }
-        if (event.status !== 'cancelled' && (unsupported(event) || (event.privateProperties.pIKKU && event.privateProperties.pIKKU !== mapping.bindingId))) {
-          addConflict('unsupported_or_shared', mapping.itemId, mapping.eventId); unsupportedCount++; continue;
+        if (event.privateProperties.pIKKU && event.privateProperties.pIKKU !== mapping.bindingId) {
+          addConflict('binding_mismatch', mapping.itemId, mapping.eventId); continue;
         }
         const localChanged = !snapshot || snapshot.revision !== mapping.itemRevision;
         const remoteChanged = event.status === 'cancelled' || event.etag !== mapping.etag;
+        if (snapshot?.involvement === 'shared' && !localChanged && !remoteChanged) continue;
+        const sharedUpdate = !!(snapshot?.involvement === 'shared' && localChanged && !remoteChanged &&
+          sharedProof(userId, state, snapshot, c, google, event, mapping.etag) && await calendarOwned(google, c.calendarId));
+        if (event.status !== 'cancelled' && unsupported(event) && !sharedUpdate) {
+          addConflict('unsupported_or_shared', mapping.itemId, mapping.eventId); unsupportedCount++; continue;
+        }
         if (localChanged && remoteChanged) { addConflict('both_changed', mapping.itemId, mapping.eventId); continue; }
         if ((!snapshot || event.status === 'cancelled') && !c.allowDeletes) { addConflict('delete_not_enabled', mapping.itemId, mapping.eventId); continue; }
         const tombstone = state.tombstones?.get(mapping.itemId);
         if (!snapshot && (!tombstone || tombstone.itemId !== mapping.itemId || tombstone.deletedRevision !== mapping.itemRevision + 1 || tombstone.priorInvolvement !== 'personal')) {
           addConflict('delete_requires_review', mapping.itemId, mapping.eventId); continue;
         }
-        if (snapshot?.involvement === 'shared' && (localChanged || remoteChanged)) { addConflict('contact_required', mapping.itemId, mapping.eventId); continue; }
+        if (snapshot?.involvement === 'shared' && (localChanged || remoteChanged) && !sharedUpdate) { addConflict('contact_required', mapping.itemId, mapping.eventId); continue; }
         if (event.status === 'cancelled' && snapshot) {
           let applied = false;
           await this.apply(userId, c.id, runId, (s, current) => {
@@ -252,7 +349,7 @@ export class CalendarSyncService {
           continue;
         }
         if (!localChanged) continue;
-        if (snapshot && (snapshot.kind !== 'event' || !snapshot.timeSlot || snapshot.involvement !== 'personal')) { addConflict('unsupported_item', mapping.itemId, mapping.eventId); continue; }
+        if (snapshot && (snapshot.kind !== 'event' || !snapshot.timeSlot || (snapshot.involvement !== 'personal' && !sharedUpdate))) { addConflict('unsupported_item', mapping.itemId, mapping.eventId); continue; }
         let writeCompleted = false;
         try {
           await this.planning.atomic(userId, async () => {
@@ -264,8 +361,11 @@ export class CalendarSyncService {
               if (!deleted || deleted.itemId !== mapping.itemId || deleted.deletedRevision !== mapping.itemRevision + 1 || deleted.priorInvolvement !== 'personal') return conflict();
             }
             const port = await this.google(userId, c.accountRef);
+            if (latest?.involvement === 'shared' && !await calendarOwned(port, c.calendarId)) return conflict();
             const currentEvent = await port.getEvent({ calendarId: c.calendarId, eventId: mapping.eventId });
-            if (currentEvent.id !== mapping.eventId || currentEvent.etag !== mapping.etag || currentEvent.status === 'cancelled' || unsupported(currentEvent) ||
+            const authorizedShared = latest?.involvement === 'shared' && sharedProof(userId, latestState, latest, c, port, currentEvent, mapping.etag);
+            if (currentEvent.id !== mapping.eventId || currentEvent.etag !== mapping.etag || currentEvent.status === 'cancelled' ||
+              (unsupported(currentEvent) && !authorizedShared) || (latest?.involvement === 'shared' && !authorizedShared) ||
               (currentEvent.privateProperties.pIKKU && currentEvent.privateProperties.pIKKU !== mapping.bindingId)) return conflict();
             writesStarted = true;
             if (!latest) { await port.deleteEvent({ calendarId: c.calendarId, eventId: mapping.eventId, etag: mapping.etag }); writeCompleted = true; }

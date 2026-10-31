@@ -24,3 +24,16 @@ test('run 응답 유실 후 running·uncertain·404·잘못된 결과는 잠금 
   assert.equal(methods.filter(item => item.method === 'GET').length, 5);
   assert.ok(methods.slice(1).every(item => item.path === '/v1/calendar-sync/operations/request%2F1'));
 });
+
+test('내보내기 대기열 응답이 다른 연결이나 revision이면 성공으로 처리하지 않는다', async () => {
+  let posted: any;
+  const api = createApiClient({ baseUrl: 'http://localhost:3001', getSessionToken: () => 'synthetic', fetcher: async (raw, init) => {
+    posted = { path: new URL(String(raw)).pathname, body: JSON.parse(String(init?.body)), headers: init?.headers };
+    return Response.json({ requestId: 'r', data: { connection: { id: 'other', calendarId: 'cal', revision: 2, allowDeletes: false, status: 'connected', pendingExportCount: 1 } } });
+  } });
+  const op = { requestId: 'request-1', idempotencyKey: 'key-1', input: { id: 'sync', expectedRevision: 1, exportItemIds: ['item'] } };
+  await assert.rejects(createCalendarSyncClient(api).addExports(op));
+  assert.equal(posted.path, '/v1/calendar-sync/sync/exports');
+  assert.deepEqual(posted.body, { requestId: 'request-1', expectedRevision: 1, exportItemIds: ['item'] });
+  assert.equal(posted.headers['Idempotency-Key'], 'key-1');
+});

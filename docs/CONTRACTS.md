@@ -320,6 +320,12 @@ Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'l
 
 `GET /v1/calendar-sync` → `{connections}`; `GET /v1/calendar-sync/calendars` → `{calendars:[{id,summary,accessRole}]}`. `POST /v1/calendar-sync/connect {requestId,calendarId,allowDeletes?:boolean,exportItemIds?:string[]}` → `{connection}`이며 최대100개의 직접 선택한 개인 이벤트만 신규 export한다. 삭제 동의는 기본 false다. `POST /v1/calendar-sync/:id/run {requestId,expectedRevision}` → `{connection,imported,exported,deleted,conflicts:[{reason,itemId?,eventId?}],unsupportedCount}`. 같은 버전의 선택 연결만 동기화한다. `POST /v1/calendar-sync/:id/disconnect {requestId,expectedRevision}` → `{disconnected:true}`는 원본/내부 일정을 삭제하지 않는다. mutation은 멱등키를 요구하고 성공/오류 봉투는 동일하다.
 
-증분 token/410 전체 조회, ETag/If-Match, 계정/원본 바인딩을 검증한다. 양쪽 변경·공유 약속·미지원 형식은 충돌/지원불가로 남긴다. 삭제 전파는 동의 및 baseline 다음 revision의 개인 일정 tombstone 증거가 있어야 한다. 서버 사용자 state의 optional `tombstones`는 구 문서에서 빈 Map으로 읽으며 일정 삭제와 원자 저장한다.
+증분 token/410 전체 조회, ETag/If-Match, 계정/원본 바인딩을 검증한다. 양쪽 변경·승인 증거 없는 공유 약속·미지원 형식은 충돌/지원불가로 남긴다. 삭제 전파는 동의 및 baseline 다음 revision의 개인 일정 tombstone 증거가 있어야 한다. 서버 사용자 state의 optional `tombstones`는 구 문서에서 빈 Map으로 읽으며 일정 삭제와 원자 저장한다.
+
+디자인 접합 전 보완: `POST /v1/calendar-sync/:id/exports {requestId,expectedRevision,exportItemIds}` → `{connection}`은 기존 연결에 새로 선택한 원본 없는 개인 이벤트를 추가한다. 비어 있는 선택은 거부하고 기존 대기열·매핑을 보존한다. 최대100개, 사용자/현재 revision·계정·activeRun·종류/소유를 검증하며 Idempotency-Key를 요구한다. 추가 선택 자체는 외부 쓰기가 아니다.
+
+공유 약속의 일반 변경/삭제는 계속 차단하되, 적용 완료된 정확한 연락 변경 증거가 있는 기존 공동 약속의 시간 update만 허용한다. `findCalendarContactAuthorization`의 사용자 승인/응답·current item/원본 identity/sourceVersion 증거와, Google Calendar owner·주최 계정·원본 ETag·변경 전 제목/시간을 쓰기 직전 락 안에서 확인한다. 원문 주최자 이메일은 응답에 추가하지 않고 provider는 `organizerSelf?`/`organizerIsAccount?` boolean만 제공한다. 전자는 이벤트 사본 Calendar 기준이지 로그인 사용자의 주최자 증명이 아니다. 빈 delta 뒤 새로 합의된 미매핑 후보는 유효한 증거의 원본만 최대100개 재조회하고 초과 시 candidate_limit 충돌을 표시한다.
+
+`calendar_sync_run`은 영속 멱등 예약 후 자신의 DB 트랜잭션/효과 ledger를 사용하고 바깥 finalize 트랜잭션에서 실행하지 않는다. 요청 결과는 별도로 영속 확정하며, lease 만료 자동 회수·외부 쓰기 재전송은 허용하지 않는다.
 
 `GET /v1/calendar-sync/operations/:requestId` → `{operation:{state:'running'|'completed'|'uncertain',result?:SyncResult}}`는 본인 작업만 조회하고 외부 쓰기를 하지 않는다. 완료 result를 확인한 경우에만 유실 응답을 성공으로 복구한다. 결과 불명/중단 상태는 자동 해제·재전송하지 않는다. Calendar ID는 이메일 형식일 수 있으며 토큰·내부 fingerprint는 반환하지 않는다. 전체 의미/제한과 DB 업그레이드 경계는 [사용 안내](MEMBER_ROUTINE_CALENDAR.md)를 따른다.

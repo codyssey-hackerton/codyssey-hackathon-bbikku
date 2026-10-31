@@ -108,3 +108,33 @@ test('member-scoped user identifiers remain intact', async t => {
   assert.equal(connection.userId, member);
   assert.equal((await connection.getEvent({ calendarId, eventId })).id, eventId);
 });
+
+test('organizer self is preserved independently of attendees and missing values stay unknown', async t => {
+  let organizer: unknown = { self: true };
+  const connection = await setup(t, () => Response.json({ ...event, organizer, attendees: [{ self: false }] }));
+  const own = await connection.getEvent({ calendarId, eventId });
+  assert.equal(own.organizerSelf, true); assert.equal(own.unsupported.shared, true);
+  organizer = { self: false };
+  const other = await connection.getEvent({ calendarId, eventId });
+  assert.equal(other.organizerSelf, false); assert.equal(other.unsupported.shared, true);
+  organizer = {};
+  const unknown = await connection.getEvent({ calendarId, eventId });
+  assert.equal(unknown.organizerSelf, undefined); assert.equal(unknown.unsupported.shared, true);
+  organizer = { self: 'true' };
+  assert.equal((await connection.getEvent({ calendarId, eventId })).organizerSelf, undefined);
+});
+
+test('organizer account comparison is case insensitive and never exposes the raw address', async t => {
+  let organizer: Record<string, unknown> = { self: true, email: 'TEST@EXAMPLE.TEST' };
+  const connection = await setup(t, () => Response.json({ ...event, organizer, attendees: [{ self: false }] }));
+  const own = await connection.getEvent({ calendarId, eventId });
+  assert.equal(own.organizerIsAccount, true); assert.equal(own.organizerSelf, true); assert.equal(own.unsupported.shared, true);
+  assert.ok(!JSON.stringify(own).toLowerCase().includes('test@example.test'));
+  organizer = { self: true, email: 'other@example.test' };
+  const other = await connection.getEvent({ calendarId, eventId });
+  assert.equal(other.organizerIsAccount, false); assert.ok(!JSON.stringify(other).includes('other@example.test'));
+  for (const value of [undefined, '', 'bad', ' test@example.test', 'test@example.test\n', 42]) {
+    organizer = { self: true, email: value };
+    assert.equal((await connection.getEvent({ calendarId, eventId })).organizerIsAccount, undefined);
+  }
+});

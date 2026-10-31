@@ -142,3 +142,5 @@
 - **동기화:** 선택 캘린더·선택 개인 이벤트의 수동 양방향 동기화를 구현한다. 삭제는 opt-in과 삭제 이력/ETag 검증을 모두 요구하고 공유 일정 승인 경계를 유지한다. 자동 webhook과 무기한 반복/전체 Calendar 일반화는 포함하지 않는다.
 - **저장:** PostgreSQL을 유지하고 보조 테이블을 추가한다. `atomicWithClient`로 일정과 회차/매핑을 같은 트랜잭션에 묶는다. 외부 쓰기 결과 불명은 재전송 없이 검토로 남긴다. 삭제 이력 필드 추가 후 구 strict decoder로의 코드 단독 롤백은 금지한다.
 - **근거/계약:** [사용 방법·한계](MEMBER_ROUTINE_CALENDAR.md), [Google OIDC](https://developers.google.com/identity/openid-connect/openid-connect), [Calendar sync](https://developers.google.com/workspace/calendar/api/guides/sync), [조건부 쓰기](https://developers.google.com/workspace/calendar/api/guides/version-resources).
+
+2026-11-01 디자인 접합 전 보완: 기존 sync 연결의 추가 내보내기 선택과, 저장된 연락 합의 적용·정확한 원본/현재 일정·주최 계정/Calendar owner를 검증한 기존 공동 약속의 시간 반영을 연결한다. 새 공동 생성/삭제와 미확인 합의는 허용하지 않는다. 실제 PostgreSQL/HTTP 종단에서 발견한 sync 자기 잠금을 피하기 위해 전체 외부 실행을 멱등 실행기의 바깥 트랜잭션으로 감싸지 않고 자체 영속 효과 ledger를 사용한다. lease 만료 자동 재실행 금지는 유지한다. [디자인 기능 연결표](DESIGN_INTEGRATION.md)

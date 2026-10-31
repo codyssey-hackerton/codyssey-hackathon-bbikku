@@ -7,6 +7,7 @@ export type SyncConflict = { reason: string; itemId?: string; eventId?: string }
 export type SyncResult = { connection: SyncConnection; imported: number; exported: number; deleted: number; unsupportedCount: number; conflicts: SyncConflict[] };
 export type ConnectInput = { calendarId: string; allowDeletes: boolean; exportItemIds: string[] };
 export type ChangeInput = { id: string; expectedRevision: number };
+export type QueueInput = ChangeInput & { exportItemIds: string[] };
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const nonempty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
@@ -39,6 +40,14 @@ export function createCalendarSyncClient(api: ApiClient) {
     async connect(op: Mutation<ConnectInput>): Promise<SyncConnection> {
       const value = await api.post<unknown>('/v1/calendar-sync/connect', { requestId: op.requestId, ...op.input }, { idempotencyKey: op.idempotencyKey });
       if (!record(value)) throw invalid(); return connection(value.connection);
+    },
+    async addExports(op: Mutation<QueueInput>): Promise<SyncConnection> {
+      const { id, expectedRevision, exportItemIds } = op.input;
+      const value = await api.post<unknown>(`/v1/calendar-sync/${encodeURIComponent(id)}/exports`, { requestId: op.requestId, expectedRevision, exportItemIds }, { idempotencyKey: op.idempotencyKey });
+      if (!record(value)) throw invalid();
+      const result = connection(value.connection);
+      if (result.id !== id || result.revision !== expectedRevision + 1 || result.status !== 'connected') throw invalid();
+      return result;
     },
     async run(op: Mutation<ChangeInput>): Promise<SyncResult> {
       const { id, expectedRevision } = op.input;

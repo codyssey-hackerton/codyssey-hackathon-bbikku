@@ -312,7 +312,7 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     app.get('/v1/calendar-sync', unavailable);
     app.get('/v1/calendar-sync/calendars', unavailable);
     app.get('/v1/calendar-sync/operations/:requestId', unavailable);
-    for (const path of ['/v1/calendar-sync/connect', '/v1/calendar-sync/:id/run', '/v1/calendar-sync/:id/disconnect']) app.post(path, unavailable);
+    for (const path of ['/v1/calendar-sync/connect', '/v1/calendar-sync/:id/run', '/v1/calendar-sync/:id/exports', '/v1/calendar-sync/:id/disconnect']) app.post(path, unavailable);
   }
 
   app.after(() => {

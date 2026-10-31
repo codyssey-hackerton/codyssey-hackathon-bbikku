@@ -118,7 +118,7 @@ function ConnectedWorkspace({ api, timezone }: { api: ApiClient; timezone: strin
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => setPanel('main')} />}
       {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
-      {routinesOpened && <Scene visible={panel === 'routines'}><RoutinesPanel api={api} timezone={timezone} selectedDate={(() => { const date = civilDate(selectedDate, timezone); return `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`; })()}
+      {routinesOpened && <Scene visible={panel === 'routines'}><RoutinesPanel api={api} timezone={timezone} visible={panel === 'routines'} selectedDate={(() => { const date = civilDate(selectedDate, timezone); return `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`; })()}
         onBack={() => setPanel('main')} onDay={value => { const [year, month, day] = value.split('-').map(Number); setSelectedDate(startOfDay({ year: year!, month: month!, day: day! }, timezone)); setPanel('main'); setTab('day'); }} onScheduleChanged={refresh} /></Scene>}
       <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={refresh} onBack={() => setPanel('main')} /></Scene>
       {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
@@ -247,7 +247,8 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
           <Pressable accessibilityRole="button" accessibilityLabel="연결" accessibilityState={{ expanded: showConnections }}
             onPress={() => setShowConnections((value) => !value)} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>연결</Text></Pressable>
           {showConnections && <Pressable accessibilityRole="button" accessibilityLabel="건강 데이터" onPress={() => {
-            setHealthMounted(true); setHealthOpen(true); setShowSettings(false);
+            if (authOpen && operationGuard.hasUnresolved()) { setSettingsError('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
+            setAuthOpen(false); setHealthMounted(true); setHealthOpen(true); setShowSettings(false);
           }} style={styles.settingsToggle}><Text style={styles.settingsToggleText}>건강 데이터</Text></Pressable>}
           <Text style={styles.settingLabel}>API 서버 주소</Text>
           <TextInput accessibilityLabel="API 서버 주소" value={urlDraft} onChangeText={(value) => { setUrlDraft(value); setTokenEdited(false); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
