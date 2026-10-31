@@ -156,9 +156,16 @@ async function runScenario(scenario: Scenario, model: ModelPort) {
     turns, tools, checks, ...(failure ? { failure } : {}) };
 }
 
-function overallStatus(reports: { status: string }[]) {
-  if (reports.length !== scenarios.length || reports.some(report => !['passed', 'review_required'].includes(report.status))) return 'failed';
+function overallStatus(reports: { status: string }[], expectedCount = scenarios.length) {
+  if (reports.length !== expectedCount || reports.some(report => !['passed', 'review_required'].includes(report.status))) return 'failed';
   return reports.some(report => report.status === 'review_required') ? 'review_required' : 'passed';
+}
+
+function parseArguments(args: string[]) {
+  const [mode, flag, name] = args;
+  if (!['--self-test', '--live'].includes(mode ?? '') || (args.length !== 1 &&
+      !(args.length === 3 && mode === '--live' && flag === '--scenario' && scenarios.some(scenario => scenario.id === name)))) return null;
+  return { mode, selected: name === undefined ? scenarios : scenarios.filter(scenario => scenario.id === name) };
 }
 
 function selfTestModel(scenario: Scenario, unchangedProposal = false): ModelPort {
@@ -179,13 +186,21 @@ function selfTestModel(scenario: Scenario, unchangedProposal = false): ModelPort
 }
 
 async function main() {
-  const argument = process.argv[2];
-  if (process.argv.length !== 3 || !['--self-test', '--live'].includes(argument ?? '')) {
-    console.log('Usage: node --import tsx scripts/verify-recovery.ts --self-test|--live');
+  const args = process.argv.slice(2);
+  const parsed = parseArguments(args);
+  if (!parsed) {
+    console.log('Usage: node --import tsx scripts/verify-recovery.ts --self-test|--live [--scenario <id>]');
     console.log('Live exit codes: 0 passed, 1 failed, 2 requires human content review.');
+    if (args.length) process.exitCode = 1;
     return;
   }
-  if (argument === '--self-test') {
+  if (parsed.mode === '--self-test') {
+    assert.deepEqual(parseArguments(['--live'])?.selected, scenarios);
+    assert.deepEqual(parseArguments(['--live', '--scenario', 'delay_no_impact'])?.selected, [scenarios[0]]);
+    assert.equal(parseArguments(['--live', '--scenario', 'invalid']), null);
+    assert.equal(parseArguments(['--live', '--scenario']), null);
+    assert.equal(overallStatus([{ status: 'review_required' }], 1), 'review_required');
+    assert.equal(overallStatus([], 1), 'failed');
     const reports = [];
     for (const scenario of scenarios) {
       const report = await runScenario(scenario, selfTestModel(scenario));
@@ -244,7 +259,7 @@ async function main() {
   const key = process.env.PIKKU_OPENAI_API_KEY?.trim();
   if (!key) { console.error('PIKKU_OPENAI_API_KEY is not configured.'); process.exitCode = 1; return; }
   const reports = [];
-  for (const scenario of scenarios) {
+  for (const scenario of parsed.selected) {
     let requests = 0;
     let providerFailure: string | undefined;
     const model = createResponsesModel(key, async (url, init) => {
@@ -261,10 +276,10 @@ async function main() {
     console.log(JSON.stringify(report));
     if (providerFailure) break;
   }
-  const status = overallStatus(reports);
-  const structuralStatus = reports.length === scenarios.length && reports.every(report => report.structuralStatus === 'passed') ? 'passed' : 'failed';
+  const status = overallStatus(reports, parsed.selected.length);
+  const structuralStatus = reports.length === parsed.selected.length && reports.every(report => report.structuralStatus === 'passed') ? 'passed' : 'failed';
   console.log(JSON.stringify({ status, structuralStatus, contentReviewMethod: 'heuristic', model: MODEL_ID, reasoningEffort: REASONING_EFFORT,
-    completedScenarios: reports.length, requestedScenarios: scenarios.length, storage: 'isolated_memory', durable: false }));
+    completedScenarios: reports.length, requestedScenarios: parsed.selected.length, storage: 'isolated_memory', durable: false }));
   if (status === 'failed') process.exitCode = 1;
   if (status === 'review_required') process.exitCode = 2;
 }
