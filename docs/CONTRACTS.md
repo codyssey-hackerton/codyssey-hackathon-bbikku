@@ -91,11 +91,16 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 | `POST /v1/recipients` | `{requestId, displayName, channel: email/phone, address, confirmed: true}` | `{recipient: {id, displayName, channel, address, confirmedByUserAt}}`; 사용자가 입력·확인한 수신자 참조 생성, 발송 없음 |
 | `POST /v1/contact-requests` | `{requestId, recipientRef, channel: email/phone, purpose, messageOrCallBrief, allowedOptions: {optionId, proposalId, proposalRevision}[]}` | `{contactRequest}`; 검증된 초안 저장만, 발송 없음 |
 | `GET /v1/contact-requests/:id` | ID | `{contactRequest}` |
-| `POST /v1/contact-requests/:id/decision` | `{requestId, contactRevision, decision: accept/reject}` | `{contactRequest}`; 승인 내용 재검증 후 ready 또는 rejected, 실행기는 ready만 수신 |
+| `GET /v1/contact-requests` | 선택 query `proposalId` | `{contactRequests}`; 인증 사용자 최신 생성순 최대 100건, 연락 화면 재진입 복구용 |
+| `POST /v1/contact-requests/:id/decision` | `{requestId, contactRevision, decision: accept/reject}` | `{contactRequest}`; accept는 최신 내용 재검증 후 ready, reject는 rejected로 종료, 실행기는 ready만 수신 |
+| `GET /v1/email-connection` | 인증 | `{status: available/not_configured, senderAddress: string/null}`; 현재 사용자에게 묶인 Gmail 연결, 토큰 반환 없음 |
+| `POST /v1/contact-requests/:id/send` | `{requestId, contactRevision, expectedSenderAddress}` + `Idempotency-Key` | `{contactRequest}`; ready·승인 스냅샷·최신 기준 재검증 후 영속 실행 의도 기록, Gmail 단일 시도 |
 
 일정 commands는 직접 폼 저장 경로이며 AI 추가 변경을 끼워 넣지 않는다. 충돌은 409로 거절하고 해결 선택을 받는다. **이미 존재하는 공동 약속의 시간 변경·취소는 `contact_required`로 분기**하며 직접 저장으로 상대 수락을 우회하지 않는다. 공동 약속 최초 등록은 이미 정해진 약속의 기록이며 연락 승인을 뜻하지 않는다. 메모·제목·본인 체크인 같은 비조정 변경은 해당 권한만 검증한다. 공동 약속의 involvement를 personal로 바꿔 이 경계를 우회할 수 없다. 외부 쓰기 권한은 별도다.
 
 제안 decision의 accept는 **personal이면** 재검증 후 적용한다. **coordination이면** awaiting_contact로 전환하고 기존 일정은 유지한다. 연락 초안과 승인에는 별도 경로를 사용한다. UI는 연락 카드에서 §7의 전체 범위를 한 번 확인받을 수 있으며 일반 proposal accept를 먼저 강제하지 않는다. 연락 승인 자체가 나열된 대안의 조건부 적용 동의를 포함한다.
+
+연락 거절은 발송이나 일정 변경을 허가하지 않는다. 사용자·요청 버전·대기 상태·불변 초안 일치를 확인한 뒤, 대안이 만료되거나 현재 일정·맥락·수신자가 변경되어도 원본 스냅샷을 거절 기록으로 보존하고 종료할 수 있다. accept에는 최신성·만료·수신자·대안 전체 검증을 적용한다.
 
 오류 코드/HTTP: `invalid_request` 400, `unauthenticated` 401, `permission_denied` 403, `not_found` 404, `conflict/stale_proposal/expired_proposal/idempotency_conflict/contact_required` 409, `missing_information` 422, `not_implemented` 501, `not_configured/provider_unavailable` 503. `outcome_unknown`은 외부 실행 결과의 상태이며 무조건 재실행 가능한 오류로 반환하지 않는다. 같은 요청이 실행 중이면 409 `operation_in_progress`와 조회 대상 참조를 반환한다. 제안의 business failure는 AgentResult.failure로, 인증/전송/제공자 전체 실패는 HTTP 오류로 구별한다.
 
@@ -145,4 +150,6 @@ allowedOptions는 같은 공동 약속의 독립적인 검증된 대안들이며
 
 외부 부작용은 로컬 DB와 원자적이지 않다. 실행 의도를 먼저 기록하고 중복 작업/콜백을 식별한다. 타임아웃의 성공 여부를 모르면 outcome_unknown으로 보존하고 제공자 조회/사용자 확인으로 해결한다. 제공자별 보장이 없는 재시도를 정확히 한 번 발송이라고 부르지 않는다. 캘린더 초대 알림과 별도 이메일의 이중 통지는 실행 계획에서 방지한다.
 
-Google Calendar/Gmail, Twilio+음성, Kakao/TMAP은 검증 후보다. OAuth 접근 동의는 개별 연락 승인이 아니다. Calendar 읽기/쓰기, Gmail 발송/회신 읽기 권한은 구분한다. 제공자별 콜백 URL·DB 스키마·음성 모델·푸시 제공자는 미정이며 이 경계를 유지해 병렬 검증한다. 실제 테스트 발신·발송에는 승인된 테스트 상대와 내용이 필요하다.
+Gmail v1 발송은 PostgreSQL 등 영속 저장이 있어야 한다. send 요청은 화면에서 확인한 `expectedSenderAddress`를 포함하고 멱등 지문에도 묶는다. 현재 연결의 발신 주소가 다르면 무발송 충돌로 거절하고 계정을 다시 확인받는다. API는 `submitting`과 요청 식별을 먼저 확정하고 DB 잠금 밖에서 전송한다. 중복 요청이나 중단된 발송을 자동 재전송하지 않는다. 성공 응답의 메시지 ID는 Gmail 접수 증거이며 상대 수락·실제 수신 확인을 의미하지 않는다. `failed/outcome_unknown`을 새 승인 없이 ready로 되돌리는 경로는 제공하지 않는다. 현재 Gmail 권한은 발송·발신 계정 확인만이며 회신 읽기와 자동 일정 반영은 후속이다.
+
+Gmail 우선 연결을 선택했고 Google Calendar, Twilio+음성, Kakao/TMAP은 검증 후보다. OAuth 접근 동의는 개별 연락 승인이 아니다. Calendar 읽기/쓰기, Gmail 발송/회신 읽기 권한은 구분한다. 개발용 Gmail OAuth 콜백은 PROVIDER_SETUP에 명시하며 그 밖의 제공자 콜백·운영 DB 스키마·음성 모델·푸시 제공자는 미정으로 이 경계를 유지해 병렬 검증한다. 실제 테스트 발신·발송에는 승인된 테스트 상대와 내용이 필요하다.

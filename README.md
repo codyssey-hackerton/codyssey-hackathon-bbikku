@@ -8,7 +8,7 @@
 
 시연 목표는 개인화 추천→코드 검증→사용자 승인→반영, 실제 전화/이메일 연락대행, 전날/아침 서버 검토와 단일 지연·복구 사례다. 공동 약속은 연락 승인·상대 수락·최신 검증 후 변경한다. [PRD §2](docs/PRD.md)에 구현 순서·완료 기준·제외 범위를 정리했다.
 
-현재 코드는 세 화면, 직접 일정 입력·체크인, 명시 Memory, AI Tool 경계와 제안 검증·저장·승인, PostgreSQL 저장과 저녁/아침 서버 예약을 연결한다. 앱의 자동 검토 설정에서 시각·시간대를 지정한다. **실제 Terra 호출·외부 연락·실기기는 아직 미검증/미연결**이다. DB URL 없이 실행하는 메모리 모드는 서버 재시작 시 초기화되며 전체 MVP 완료나 운영 배포 상태가 아니다. [구현 계획](docs/IMPLEMENTATION_PLAN.md)에서 검증 근거와 남은 범위를 확인한다.
+현재 코드는 세 화면, 직접 일정 입력·체크인, 명시 Memory, AI Tool 경계와 제안 검증·저장·승인, PostgreSQL 저장과 저녁/아침 서버 예약을 연결한다. 앱의 자동 검토 설정에서 시각·시간대를 지정한다. **실제 Terra 추천→승인과 PostgreSQL·pg-boss 예약 경로는 합성 사례로 검증했다.** Gmail 연락 초안·승인·발송 UI와 서버 실행기, 로컬 OAuth 연결 도구를 구현했다. 실제 Google 계정 동의·발송 확인, 회신·상대 수락 반영, 실물 휴대폰 검증은 남아 있다. DB URL 없이 실행하는 메모리 모드는 서버 재시작 시 초기화되며 전체 MVP 완료나 운영 배포 상태가 아니다. [구현 계획](docs/IMPLEMENTATION_PLAN.md)에서 검증 근거와 남은 범위를 확인한다.
 
 코디세이 AI 해커톤 2026의 AI 기반 추천 서비스 주제를 대상으로 한다. 제공된 프로젝트 요약에는 최종 제출 시각이 **2026년 11월 1일 13:00 KST**로 기재돼 있으나, 공식 가이드 원문은 아직 확인하지 못했다. 제출물·기한은 공식 안내와 대조해야 한다.
 
@@ -70,11 +70,18 @@ npm run export:mobile
 npm run dev:local -- --smoke
 npm run test:postgres
 npm run verify:model -- --live
+npm run verify:planning -- --live
 ```
 
-`test:postgres`는 실행 중인 로컬 DB를 사용해 실제 영속 저장 테스트까지 실행한다. `verify:model -- --live`는 프로젝트 키가 있을 때만 합성 입력으로 최대 두 번 실제 모델을 호출한다. [모델 검증 안내](docs/MODEL_VERIFICATION.md)와 [외부 API 준비](docs/PROVIDER_SETUP.md)에 필요한 설정과 미검증 항목을 기록한다.
+`test:postgres`는 실행 중인 로컬 DB를 사용해 실제 영속 저장 테스트까지 실행한다. `verify:planning -- --live`는 격리된 합성 데이터로 실제 모델·예약·승인·재연결 복구를 확인한다(최대 24회 호출). `verify:model -- --live`는 프로젝트 키가 있을 때만 합성 입력으로 최대 두 번 실제 모델을 호출한다. [모델 검증 안내](docs/MODEL_VERIFICATION.md)와 [외부 API 준비](docs/PROVIDER_SETUP.md)에 필요한 설정과 미검증 항목을 기록한다.
 
 `export:mobile`은 iOS·Android JavaScript 번들을 만들며 설치용 바이너리를 만들지는 않는다. `--smoke`는 로컬 서버·개발 인증·종료를 확인하고 실제 모델을 호출하지 않는다. 모바일 세부 동작은 [모바일 안내](apps/mobile/README.md)를 참고한다.
+
+## Gmail 연락대행
+
+Google Cloud의 웹 OAuth 클라이언트 ID/비밀을 `.env.local`에 설정한 뒤 `npm run connect:gmail`로 개발용 Gmail 계정을 연결한다. PostgreSQL 모드에서 공동 일정 조정 제안의 **연락 준비 → 초안 저장 → 연락 내용 승인 → Gmail 발송**을 사용한다. 계정 미설정이나 메모리 저장 모드에서는 발송하지 않는다. 발송 성공은 상대의 일정 변경 수락이 아니다.
+
+등록 리디렉션과 상세 설정·실제 검증 여부는 [Gmail 연결 안내](docs/PROVIDER_SETUP.md)를 참고한다. 이 연결 도구는 현재 개발 사용자 한 명을 위한 것이며 운영 로그인 방식은 아니다.
 
 ## 다음 진행 순서
 
