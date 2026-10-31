@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import Fastify, { type FastifyRequest } from 'fastify';
+import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { AgentExecutionFailure, type ModelPort } from './agent.ts';
 import { PlanningAgentRunner } from './agent-runner.ts';
@@ -7,12 +10,22 @@ import type { SessionResolver } from './auth.ts';
 import { MemoryIdempotency, RepositoryIdempotency, type HttpResult, type IdempotencyControl, type IdempotencyPort } from './idempotency.ts';
 import { MODEL_ID, REASONING_EFFORT } from './model.ts';
 import { PlanningError, PlanningService } from './planning-service.ts';
+import { createPreparationProposal } from './preparation-service.ts';
+import { getCalendarConnection } from './google-calendar.ts';
+import { CalendarImportService } from './calendar-import.ts';
+import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
+import { PhoneDispatch } from './phone-dispatch.ts';
+import { VoiceTokens } from './voice-token.ts';
+import { VoiceWebhook } from './voice-webhook.ts';
+import type { VoiceClassifier } from './voice-model.ts';
 import { ContactService } from './contact-service.ts';
+import { ContactResponseService } from './contact-response.ts';
+import type { getGmailReplyConnection } from './gmail-reply-connection.ts';
 import { ContactDispatch, gmailAvailable, type GmailContactPort } from './contact-dispatch.ts';
 import { recipientBody, contactBody, contactDecisionBody } from './contact-schemas.ts';
 import { MemoryPlanningStore, type PlanningStore, type UserPlanningState } from './planning-store.ts';
 import { buildReviewEvents, type ReviewSchedulerRuntime, type TriggerEvent } from './scheduler.ts';
-import { checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timezone } from './planning-schemas.ts';
+import { checkinBody, commandBody, decisionBody, identifier, memoryBody, memoryQuery, proposalQuery, scheduleQuery, timestamp, timezone } from './planning-schemas.ts';
 
 class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable = false, readonly details?: unknown) { super(message); }
@@ -39,6 +52,15 @@ const reviewTime = z.object({ enabled: z.boolean(), localTime: z.string().regex(
 const reviewBody = z.object({ requestId: nonblank, expectedRevision: z.number().int().min(0), timezone, evening: reviewTime, morning: reviewTime }).strict();
 const contactSendBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderAddress: z.email().max(254) }).strict();
 const contactListQuery = z.object({ proposalId: identifier.optional() }).strict();
+const checkRepliesBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1) }).strict();
+const confirmResponseBody = checkRepliesBody.extend({ selectedOptionId: identifier }).strict();
+const preparationMinutes = z.number().finite().nonnegative().refine(value => Number.isSafeInteger(value * 60_000));
+const preparationBody = z.object({ requestId: identifier, targetId: identifier, expectedTargetRevision: z.number().int().min(1), expectedScheduleRevision: z.number().int().min(0), timezone, preparationMinutes, travelMinutes: preparationMinutes, bufferMinutes: preparationMinutes }).strict();
+const calendarQuery = z.object({ calendarId: identifier, from: timestamp, to: timestamp }).strict();
+const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
+const phoneNumber = z.string().refine(validPhoneNumber);
+const phoneConnectBody = z.object({ requestId: identifier, accountSid: identifier, authToken: identifier, fromNumber: phoneNumber }).strict();
+const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
 function requestId(request: FastifyRequest): string {
   const parsed = requestBody.safeParse(request.body);
@@ -57,15 +79,30 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function buildApp(options: { sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
-  const app = Fastify({ logger: false, bodyLimit: 32_768, genReqId: () => randomUUID() });
+export function buildApp(options: { previewRateLimit?: boolean; webOrigins?: string[]; trustLoopbackProxy?: boolean; sessions?: SessionResolver; model?: ModelPort; store?: PlanningStore; clock?: () => Date; idempotency?: IdempotencyPort; gmailContact?: GmailContactPort; gmailReplyConnection?: Awaited<ReturnType<typeof getGmailReplyConnection>>; calendarConnection?: Awaited<ReturnType<typeof getCalendarConnection>>; phoneConnections?: PhoneConnections; voice?: { publicBaseUrl: string; sessionKey: string; model: VoiceClassifier }; allowLocalPhoneConnect?: boolean; schedulerStatus?: () => 'not_configured' | 'available' | 'degraded'; onReviewScheduleChanged?: () => Promise<void> } = {}) {
+  const app = Fastify({ logger: false, bodyLimit: 32_768, routerOptions: { maxParamLength: 2048 }, genReqId: () => randomUUID(), trustProxy: options.trustLoopbackProxy ? ['127.0.0.1', '::1'] : false });
+  if (options.previewRateLimit) void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
+  if (options.webOrigins?.length) void app.register(cors, {
+    origin: options.webOrigins, methods: ['GET', 'POST'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'], maxAge: 600,
+  });
   const authenticated = new WeakMap<FastifyRequest, string>();
   const store = options.store ?? new MemoryPlanningStore();
   const idempotency = options.idempotency ?? (store.durable ? new RepositoryIdempotency(store, options.clock) : new MemoryIdempotency());
   const reviewIdempotency = store.durable ? idempotency : new RepositoryIdempotency(store, options.clock);
   const planning = new PlanningService(store, options.clock);
   const contacts = new ContactService(store, planning, options.clock);
+  const contactResponses = new ContactResponseService(store, planning, options.clock);
   const contactDispatch = new ContactDispatch(store, planning, options.gmailContact, options.clock);
+  let voiceTokens: VoiceTokens | undefined; let voiceWebhook: VoiceWebhook | undefined;
+  if (store.durable && options.phoneConnections && options.voice && typeof options.voice.model?.classify === 'function') {
+    try {
+      voiceTokens = new VoiceTokens(options.voice.publicBaseUrl, options.voice.sessionKey);
+      voiceWebhook = new VoiceWebhook({ store, planning, connections: options.phoneConnections, responseService: contactResponses,
+        model: options.voice.model, publicBaseUrl: options.voice.publicBaseUrl, sessionKey: options.voice.sessionKey, clock: options.clock });
+    } catch { voiceTokens = undefined; voiceWebhook = undefined; }
+  }
+  const phoneDispatch = options.phoneConnections ? new PhoneDispatch(store, planning, options.phoneConnections, options.clock, voiceTokens) : undefined;
   const runner = options.model ? new PlanningAgentRunner(planning, options.model) : undefined;
   const now = () => options.clock?.() ?? new Date();
   let modelStatus: 'not_configured' | 'available' | 'degraded' = options.model ? 'available' : 'not_configured';
@@ -153,7 +190,8 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
 
   app.setErrorHandler((error, request, reply) => {
     const status = error && typeof error === 'object' && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
-    const result = error instanceof ApiError || error instanceof PlanningError ? errorResult(error, requestId(request))
+    const result = status === 429 ? errorResult(new ApiError(429, 'rate_limited', '요청이 많습니다. 잠시 후 다시 시도해 주세요.', true), requestId(request))
+      : error instanceof ApiError || error instanceof PlanningError ? errorResult(error, requestId(request))
       : status >= 400 && status < 500 ? errorResult(invalidRequest(), requestId(request))
         : errorResult(error, requestId(request));
     void reply.code(result.status).send(result.body);
@@ -164,6 +202,8 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
   });
   app.addHook('preHandler', async request => {
     if (request.routeOptions.url === '/health') return;
+    // This single provider route authenticates with Twilio's signature and bound call SID.
+    if (request.method === 'POST' && request.routeOptions.url === '/v1/voice/twilio/:token') return;
     const authorization = request.headers.authorization;
     const match = typeof authorization === 'string' ? /^Bearer ([^\s]+)$/i.exec(authorization) : null;
     const session = match && options.sessions ? await options.sessions.resolve(match[1]) : null;
@@ -171,19 +211,71 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     authenticated.set(request, session.userId);
   });
 
+  app.after(() => {
+  void app.register(async provider => {
+    provider.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, async (_request: FastifyRequest, body: string | Buffer) => {
+      const text = typeof body === 'string' ? body : body.toString('utf8');
+      if (/%(?![0-9a-f]{2})/i.test(text)) throw invalidRequest();
+      const params: Record<string, string | string[]> = Object.create(null);
+      for (const [key, value] of new URLSearchParams(text)) {
+        const previous = params[key];
+        params[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
+      }
+      return params;
+    });
+    provider.post('/v1/voice/twilio/:token', async (request, reply) => {
+      if (!voiceWebhook) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
+      const { token } = parse(z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }).strict(), request.params);
+      const signature = request.headers['x-twilio-signature'];
+      const contentType = request.headers['content-type'];
+      const rawUrl = request.raw.url ?? ''; const queryIndex = rawUrl.indexOf('?');
+      const result = await voiceWebhook.handle({ token, rawQuery: queryIndex < 0 ? '' : rawUrl.slice(queryIndex),
+        contentType: typeof contentType === 'string' ? contentType : '', signature: typeof signature === 'string' ? signature : '',
+        params: request.body as Record<string, string | string[]> });
+      return reply.code(result.status).type('text/xml').send(result.twiml);
+    });
+  });
   app.get('/health', async request => ({ requestId: request.id, data: { status: 'ok' } }));
   app.get('/v1/capabilities', async request => ({
     requestId: request.id,
     data: {
       storage: { mode: planning.store.mode, durable: planning.store.durable },
       model: { id: MODEL_ID, reasoningEffort: REASONING_EFFORT, status: modelStatus },
-      integrations: { calendar: 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: 'not_configured', travel: 'not_configured' },
+      integrations: { calendar: options.calendarConnection?.userId === authenticated.get(request) ? 'available' : 'not_configured', email: gmailAvailable(store, options.gmailContact, authenticated.get(request)!) ? 'available' : 'not_configured', phone: voiceWebhook && voiceTokens && (await options.phoneConnections?.status(authenticated.get(request)!))?.status === 'available' ? 'available' : 'not_configured', travel: 'not_configured' },
       scheduler: { status: options.schedulerStatus?.() ?? 'not_configured' },
     },
   }));
   app.get('/v1/email-connection', async request => {
     const available = gmailAvailable(store, options.gmailContact, authenticated.get(request)!);
     return { requestId: request.id, data: { status: available ? 'available' : 'not_configured', senderAddress: available ? options.gmailContact!.senderAddress : null } };
+  });
+  const gmailRepliesFor = (userId: string) => {
+    const connection = options.gmailReplyConnection;
+    return store.durable && connection?.userId === userId && typeof connection.checkReplies === 'function' &&
+      z.email().max(254).safeParse(connection.senderAddress).success ? connection : undefined;
+  };
+  app.get('/v1/email-reply-connection', async request => {
+    const connection = gmailRepliesFor(authenticated.get(request)!);
+    return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', senderAddress: connection?.senderAddress ?? null } };
+  });
+  const calendarFor = (userId: string) => {
+    if (!options.calendarConnection || options.calendarConnection.userId !== userId) throw new ApiError(503, 'not_configured', '캘린더 연결이 설정되지 않았습니다.');
+    return options.calendarConnection;
+  };
+  app.get('/v1/calendar-connection', async request => {
+    const connection = options.calendarConnection?.userId === authenticated.get(request) ? options.calendarConnection : undefined;
+    return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', accountLabel: connection?.accountLabel ?? null } };
+  });
+  app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listCalendars() }));
+  app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await calendarFor(authenticated.get(request)!).listEvents(parse(calendarQuery, request.query)) }));
+  app.get('/v1/phone-connection', async request => ({ requestId: request.id, data: await options.phoneConnections?.status(authenticated.get(request)!) ?? { status: 'not_configured', senderNumber: null, lastRequestId: null } }));
+  app.post('/v1/phone-connection', async request => {
+    if (request.protocol !== 'https' && !options.allowLocalPhoneConnect) throw new ApiError(403, 'permission_denied', '안전한 연결이 필요합니다.');
+    if (!options.phoneConnections) throw new ApiError(503, 'not_configured', '전화 연결이 설정되지 않았습니다.');
+    if (!store.durable) throw new ApiError(503, 'not_configured', '전화 연결에는 지속 저장소가 필요합니다.');
+    const body = parse(phoneConnectBody, request.body);
+    const userId = authenticated.get(request)!;
+    return { requestId: body.requestId, data: await store.atomic(userId, () => options.phoneConnections!.connect(userId, body, body.requestId)) };
   });
 
   async function runIdempotent(request: FastifyRequest, operation: string, run: (body: z.infer<typeof requestBody>, control: IdempotencyControl) => Promise<HttpResult>): Promise<HttpResult> {
@@ -203,7 +295,25 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     });
   }
 
-  app.post('/v1/chat', async (request, reply) => {
+  app.post('/v1/calendar/import', async (request, reply) => {
+    const result = await runIdempotent(request, 'calendar_import', async (_requestBody, control) => {
+      const body = parse(calendarImportBody, request.body); const userId = authenticated.get(request)!;
+      const service = new CalendarImportService(store, calendarFor(userId));
+      const prepared = await service.prepareSelected({ ...body, userId });
+      return control.finalize(async () => ({ status: 200, body: { requestId: body.requestId, data: await service.commitPrepared(prepared) } }));
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/contact-requests/:id/call', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params); const body = parse(phoneCallBody, request.body);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
+    if (!phoneDispatch || !voiceWebhook || !voiceTokens) throw new ApiError(503, 'not_configured', '양방향 전화 연결이 설정되지 않았습니다.');
+    const result = await phoneDispatch.call(authenticated.get(request)!, id, body, key);
+    return reply.code(result.status).send(result.body);
+  });
+
+  app.post('/v1/chat', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     const result = await runIdempotent(request, 'chat', async (_requestBody, control) => {
       const body = parse(chatBody, request.body);
       if (!runner) throw new ApiError(503, 'not_configured', 'AI 연결이 설정되지 않았습니다.');
@@ -271,6 +381,13 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     const { id } = parse(z.object({ id: identifier }).strict(), request.params);
     return { requestId: request.id, data: await planning.getProposal(authenticated.get(request)!, id) };
   });
+  app.post('/v1/preparation-proposals', async (request, reply) => {
+    const result = await runIdempotent(request, 'preparation_proposal', async () => {
+      const body = parse(preparationBody, request.body);
+      return { status: 200, body: { requestId: body.requestId, data: { result: await createPreparationProposal(planning, authenticated.get(request)!, body) } } };
+    });
+    return reply.code(result.status).send(result.body);
+  });
   app.post('/v1/schedule/commands', async (request, reply) => {
     const result = await runIdempotent(request, 'schedule_command', async () => {
       const body = parse(commandBody, request.body);
@@ -334,6 +451,50 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     const { id } = parse(z.object({ id: identifier }).strict(), request.params);
     return { requestId: request.id, data: await contacts.get(authenticated.get(request)!, id) };
   });
+  app.get('/v1/contact-requests/:id/responses', async request => {
+    if (!store.durable) throw new ApiError(503, 'not_configured', '지속 저장소가 필요합니다.');
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    return { requestId: request.id, data: await contactResponses.list(authenticated.get(request)!, id) };
+  });
+  app.post('/v1/contact-requests/:id/check-replies', async (request, reply) => {
+    const { id } = parse(z.object({ id: identifier }).strict(), request.params);
+    const body = parse(checkRepliesBody, request.body); const userId = authenticated.get(request)!;
+    const connection = gmailRepliesFor(userId);
+    if (!connection) throw new ApiError(503, 'not_configured', '이메일 회신 연결이 필요합니다.');
+    const result = await runIdempotent(request, 'contact_reply_check', async (_requestBody, control) => {
+      const snapshot = (await store.read(userId)).contactRequests.get(id);
+      if (!snapshot) throw new ApiError(404, 'not_found', '연락 요청을 찾을 수 없습니다.');
+      if (snapshot.revision !== body.contactRevision || snapshot.channel !== 'email' ||
+          snapshot.deliveryStatus !== 'sent_or_connected' || !snapshot.providerOperationId) {
+        throw new ApiError(409, 'conflict', '발송한 이메일과 연락 요청 버전을 확인해 주세요.');
+      }
+      let lookup: Awaited<ReturnType<typeof connection.checkReplies>>;
+      try {
+        lookup = await connection.checkReplies({ providerOperationId: snapshot.providerOperationId,
+          recipientAddress: snapshot.recipientSnapshot.address, expectedSenderAddress: connection.senderAddress });
+        if (!Array.isArray(lookup.events) || lookup.events.length > 100 || !Number.isSafeInteger(lookup.unmatchedCount) || lookup.unmatchedCount < 0) throw new Error('Invalid reply lookup');
+      } catch {
+        return { ...errorResult(new ApiError(503, 'provider_unavailable', '이메일 회신을 확인할 수 없습니다.', true), body.requestId), retryableWithoutEffects: true };
+      }
+      return control.finalize(async () => {
+        const current = (await store.read(userId)).contactRequests.get(id);
+        if (!isDeepStrictEqual(current, snapshot)) throw new ApiError(409, 'conflict', '회신 조회 중 연락 요청이 변경되었습니다.');
+        for (const event of lookup.events) await contactResponses.recordVerified(userId, id, event);
+        return { status: 200, body: { requestId: body.requestId, data: { ...await contactResponses.list(userId, id),
+          checkedCount: lookup.events.length, unmatchedCount: lookup.unmatchedCount } } };
+      });
+    });
+    return reply.code(result.status).send(result.body);
+  });
+  app.post('/v1/contact-requests/:id/responses/:responseId/confirm', async (request, reply) => {
+    if (!store.durable) throw new ApiError(503, 'not_configured', '지속 저장소가 필요합니다.');
+    const { id, responseId } = parse(z.object({ id: identifier, responseId: identifier }).strict(), request.params);
+    const body = parse(confirmResponseBody, request.body);
+    const result = await runIdempotent(request, 'contact_response_confirm', async () => ({ status: 200,
+      body: { requestId: body.requestId, data: await contactResponses.confirm(authenticated.get(request)!, id,
+        { responseId, contactRevision: body.contactRevision, selectedOptionId: body.selectedOptionId }) } }));
+    return reply.code(result.status).send(result.body);
+  });
   app.post('/v1/contact-requests/:id/decision', async (request, reply) => {
     const { id } = parse(z.object({ id: identifier }).strict(), request.params);
     const result = await runIdempotent(request, 'contact_decision', async () => {
@@ -349,6 +510,7 @@ export function buildApp(options: { sessions?: SessionResolver; model?: ModelPor
     if (typeof key !== 'string' || !nonblank.safeParse(key).success) throw invalidRequest();
     const result = await contactDispatch.send(authenticated.get(request)!, id, body, key);
     return reply.code(result.status).send(result.body);
+  });
   });
   return Object.assign(app, { reviewRuntime });
 }

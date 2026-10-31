@@ -25,7 +25,7 @@ export function createPlanningTools(service: PlanningService, baseline: Awaited<
       scoped(userId); const input = memoryInput.parse(value); const keys = new Set(input.keys);
       const facts = baseline.snapshot.facts.filter(fact => (!keys.size || keys.has(fact.key))
         && compareInstants(fact.recordedAt, input.at) <= 0 && (!fact.validUntil || compareInstants(input.at, fact.validUntil) < 0));
-      return { facts, contextRevision: baseline.snapshot.contextRevision, missingFields: [...keys].filter(key => !facts.some(fact => fact.key === key)) };
+      return { facts, contextRevision: baseline.snapshot.contextRevision, missingFields: [...keys].filter(key => !facts.some(fact => fact.key === key && fact.value !== null)) };
     } },
     { name: 'calculate_timing', description: '준비와 이동 시간을 계산합니다.', input: timingInput, async run(value, userId) {
       scoped(userId); const input = timingInput.parse(value);

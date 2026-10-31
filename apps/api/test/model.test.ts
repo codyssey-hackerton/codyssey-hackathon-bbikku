@@ -36,7 +36,8 @@ test('sends native tools, exact model settings and only user-facing context', as
     assert.equal(body.previous_response_id, undefined);
     assert.deepEqual(JSON.parse(body.input[1].content), { message: input.message, context: input.context });
     assert.ok(!JSON.stringify(body.input).includes('server-user'));
-    for (const phrase of ['ScheduleFields', 'expectedRevision', 'evidenceRefs', 'coordination target', 'approval']) {
+    for (const phrase of ['ScheduleFields', 'expectedRevision', 'evidenceRefs', 'coordination target', 'approval',
+      'delay has no schedule impact', 'deadline has passed', 'original date range']) {
       assert.ok(body.input[0].content.includes(phrase));
     }
     return jsonResponse(completed(message('{"kind":"answer","text":"네"}')));

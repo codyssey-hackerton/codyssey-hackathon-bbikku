@@ -17,6 +17,12 @@ interface MemoryPanelProps {
 }
 
 const initialDraft: MemoryDraft = { kind: 'preference', key: '', value: '', valueMode: 'text', validUntil: '' };
+const setupFields = [
+  { key: 'preparationMinutes', label: '준비시간' },
+  { key: 'travelMinutes', label: '이동시간' },
+  { key: 'bufferMinutes', label: '도착 여유시간' },
+] as const;
+type SetupKey = typeof setupFields[number]['key'];
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
@@ -98,6 +104,8 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
   const { load, refresh } = useMemory(client);
   const [draft, setDraft] = useState<MemoryDraft>(initialDraft);
   const submittedDraft = useRef<MemoryDraft | null>(null);
+  const [setup, setSetup] = useState<Record<SetupKey, string>>({ preparationMinutes: '', travelMinutes: '', bufferMinutes: '' });
+  const submittedSetup = useRef<{ key: SetupKey; value: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [parentRefreshError, setParentRefreshError] = useState(false);
   const mutation = useMutation<MemoryWriteInput, MemoryWriteResult>(
@@ -111,6 +119,11 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
           current.validUntil === submitted.validUntil ? initialDraft : current;
       });
       submittedDraft.current = null;
+      const setupSubmission = submittedSetup.current;
+      if (setupSubmission) {
+        setSetup((current) => current[setupSubmission.key] === setupSubmission.value ? { ...current, [setupSubmission.key]: '' } : current);
+        submittedSetup.current = null;
+      }
       setFormError(null);
       refresh();
       try {
@@ -141,8 +154,24 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
       return;
     }
     submittedDraft.current = { ...draft };
+    submittedSetup.current = null;
     if (mutation.state.status === 'success' || mutation.state.status === 'error') mutation.reset();
     mutation.submit(parsed.input);
+  }
+
+  function saveSetup(key: SetupKey, label: string) {
+    if (disabled || load.status !== 'success') return;
+    const raw = setup[key].trim();
+    const value = Number(raw);
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) || !Number.isFinite(value)) {
+      setFormError(`${label}은 0 이상의 숫자로 입력해 주세요.`);
+      return;
+    }
+    setFormError(null);
+    submittedDraft.current = null;
+    submittedSetup.current = { key, value: setup[key] };
+    if (mutation.state.status === 'success' || mutation.state.status === 'error') mutation.reset();
+    mutation.submit({ expectedContextRevision: load.data.contextRevision, kind: 'preference', key, value, validUntil: null });
   }
 
   function refreshAfterConflict() {
@@ -192,6 +221,43 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
               </View>
             )}
 
+            <Text accessibilityRole="header" style={styles.subtitle}>시간 최소 설정</Text>
+            <Text style={styles.hint}>알고 있는 시간만 분 단위로 각각 저장하세요. 비워 둔 항목은 변경되지 않으며 나중에 설정할 수 있습니다. 이동시간은 직접 입력한 값입니다.</Text>
+            {setupFields.map(({ key, label }) => {
+              const saved = entries.set.find((fact) => fact.kind === 'preference' && fact.key === key);
+              return (
+                <View key={key} style={styles.statusBlock}>
+                  <Text style={styles.label}>{label} (분)</Text>
+                  {saved && <Text style={styles.hint}>현재 저장값: {typeof saved.value === 'number' ? `${saved.value}분` : JSON.stringify(saved.value)}</Text>}
+                  <TextInput accessibilityLabel={`${label} 분`} accessibilityHint="0 이상의 숫자를 입력하세요. 비워 두면 변경되지 않습니다."
+                    value={setup[key]} onChangeText={(value) => { setSetup((current) => ({ ...current, [key]: value })); setFormError(null); }}
+                    editable={!disabled} keyboardType="decimal-pad" style={[styles.input, disabled && styles.disabled]} placeholder="분 입력" />
+                  <Button label={`${label} 저장`} onPress={() => saveSetup(key, label)} disabled={disabled} secondary />
+                </View>
+              );
+            })}
+            <Button label="나중에 설정" onPress={onBack} secondary />
+            {formError && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{formError}</Text>}
+            {saving && <View style={styles.status} accessibilityLiveRegion="polite"><ActivityIndicator /><Text>저장 요청을 처리 중입니다.</Text></View>}
+            {mutation.state.status === 'success' && <Text accessibilityLiveRegion="polite" style={styles.success}>서버에 저장했습니다.</Text>}
+            {mutation.state.status === 'error' && (
+              <View style={styles.statusBlock}>
+                <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{conflict && uncertain
+                  ? '재시도에서 충돌이 반환됐지만 이전 저장의 처리 여부는 아직 확인되지 않았습니다.'
+                  : errorMessage(mutation.state.error, '저장')}</Text>
+                <Text style={styles.hint}>같은 요청 재시도는 처음 저장할 때의 입력을 사용합니다.</Text>
+                {uncertain && <Text style={styles.error}>저장 여부를 아직 알 수 없습니다. 같은 요청으로 다시 확인할 수 있습니다. 연결을 바꾸면 이 재시도를 이어갈 수 없습니다.</Text>}
+                <Button label="같은 요청 다시 시도" onPress={mutation.retry} secondary />
+                {conflict && !uncertain && <Button label="최신 목록 확인 후 새 요청" onPress={refreshAfterConflict} secondary />}
+              </View>
+            )}
+            {parentRefreshError && (
+              <View style={styles.statusBlock}>
+                <Text accessibilityRole="alert" style={styles.error}>상위 화면 갱신 요청에 실패했습니다.</Text>
+                <Button label="상위 화면 다시 갱신" onPress={retryParentRefresh} secondary />
+              </View>
+            )}
+
             <Text accessibilityRole="header" style={styles.subtitle}>선호 또는 상황 입력</Text>
             <Choice label="종류" value={draft.kind} disabled={disabled} onChange={(kind) => updateDraft({ kind })} options={[
               { value: 'preference', label: '명시 선호' }, { value: 'situation', label: '일시 상황' },
@@ -220,26 +286,6 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
                 placeholder="2026-11-01T18:00:00+09:00" />
               <Text style={styles.hint}>오프셋을 포함해 입력하세요. 선호는 비워 두면 만료 시각이 없습니다.</Text>
             </View>
-            {formError && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{formError}</Text>}
-            {saving && <View style={styles.status} accessibilityLiveRegion="polite"><ActivityIndicator /><Text>저장 요청을 처리 중입니다.</Text></View>}
-            {mutation.state.status === 'success' && <Text accessibilityLiveRegion="polite" style={styles.success}>서버에 저장했습니다.</Text>}
-            {mutation.state.status === 'error' && (
-              <View style={styles.statusBlock}>
-                <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{conflict && uncertain
-                  ? '재시도에서 충돌이 반환됐지만 이전 저장의 처리 여부는 아직 확인되지 않았습니다.'
-                  : errorMessage(mutation.state.error, '저장')}</Text>
-                <Text style={styles.hint}>같은 요청 재시도는 처음 저장할 때의 입력을 사용합니다.</Text>
-                {uncertain && <Text style={styles.error}>저장 여부를 아직 알 수 없습니다. 같은 요청으로 다시 확인할 수 있습니다. 연결을 바꾸면 이 재시도를 이어갈 수 없습니다.</Text>}
-                <Button label="같은 요청 다시 시도" onPress={mutation.retry} secondary />
-                {conflict && !uncertain && <Button label="최신 목록 확인 후 새 요청" onPress={refreshAfterConflict} secondary />}
-              </View>
-            )}
-            {parentRefreshError && (
-              <View style={styles.statusBlock}>
-                <Text accessibilityRole="alert" style={styles.error}>상위 화면 갱신 요청에 실패했습니다.</Text>
-                <Button label="상위 화면 다시 갱신" onPress={retryParentRefresh} secondary />
-              </View>
-            )}
             <Button label="저장" onPress={save} disabled={disabled} />
             <Text accessibilityRole="header" style={styles.subtitle}>입력된 선호와 상황</Text>
           </View>

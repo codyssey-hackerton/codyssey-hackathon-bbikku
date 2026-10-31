@@ -78,7 +78,8 @@ async function dispatchOnce(provider: GmailContactPort, input: ApprovedGmailCont
 
 export class ContactDispatch {
   constructor(private readonly store: PlanningStore, private readonly planning: PlanningService,
-    private readonly provider: GmailContactPort | undefined, private readonly clock: () => Date = () => new Date()) {}
+    private readonly provider: GmailContactPort | undefined, private readonly clock: () => Date = () => new Date(),
+    private readonly expectedChannel: 'email' | 'phone' = 'email') {}
 
   async send(userId: string, id: string, input: { requestId: string; contactRevision: number; expectedSenderAddress: string }, key: string): Promise<HttpResult> {
     if (!this.store.durable) {
@@ -86,8 +87,13 @@ export class ContactDispatch {
     }
     const identity = JSON.stringify(['contact_send', key]);
     const fingerprint = createHash('sha256').update(JSON.stringify([id, input.contactRevision, input.expectedSenderAddress])).digest('hex');
-    const existing = replay(await this.store.read(userId), identity, fingerprint, input.requestId);
+    const initial = await this.store.read(userId);
+    const existing = replay(initial, identity, fingerprint, input.requestId);
     if (existing) return existing;
+    const requested = initial.contactRequests.get(id);
+    if (requested && requested.channel !== this.expectedChannel) {
+      return error(409, input.requestId, 'conflict', '연락 수단이 요청과 일치하지 않습니다.');
+    }
     if (!gmailAvailable(this.store, this.provider, userId)) {
       return error(503, input.requestId, 'not_configured', '지속 저장소와 이메일 연결이 필요합니다.');
     }
@@ -99,6 +105,10 @@ export class ContactDispatch {
       const state = await this.store.read(userId);
       const previous = replay(state, identity, fingerprint, input.requestId);
       if (previous) return { result: previous };
+      const candidate = state.contactRequests.get(id);
+      if (candidate && candidate.channel !== this.expectedChannel) {
+        return { result: error(409, input.requestId, 'conflict', '연락 수단이 요청과 일치하지 않습니다.') };
+      }
       if (!gmailAvailable(this.store, this.provider, userId)) {
         return { result: error(503, input.requestId, 'not_configured', '지속 저장소와 이메일 연결이 필요합니다.') };
       }
@@ -109,7 +119,6 @@ export class ContactDispatch {
       let contact: ContactRequest;
       let checkedAt: string;
       try {
-        const candidate = state.contactRequests.get(id);
         if (!candidate) throw new PlanningError(404, 'not_found', '연락 요청을 찾을 수 없습니다.');
         if (candidate.revision !== input.contactRevision || candidate.deliveryStatus !== 'ready' || !candidate.approvalId) {
           throw new PlanningError(409, 'conflict', '승인된 발송 대기 요청을 확인해 주세요.');

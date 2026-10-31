@@ -181,6 +181,16 @@ function sameInterval(a: Interval | null, b: Interval | null): boolean {
   return a === null || b === null ? a === b : compareInstant(a.start, b.start) === 0 && compareInstant(a.end, b.end) === 0;
 }
 
+function sameFields(before: ScheduleFields, beforeInterval: Interval | null, after: ParsedFields): boolean {
+  const a = before.deadline === null ? null : parseInstant(before.deadline);
+  const b = after.fields.deadline === null ? null : parseInstant(after.fields.deadline);
+  const sameDeadline = a === null || b === null ? a === b : compareInstant(a, b) === 0;
+  return before.kind === after.fields.kind && before.title === after.fields.title &&
+    sameInterval(beforeInterval, after.interval) && before.timeSlot?.timezone === after.fields.timeSlot?.timezone &&
+    before.durationMinutes === after.fields.durationMinutes && sameDeadline && before.flexibility === after.fields.flexibility &&
+    before.involvement === after.fields.involvement && before.completion === after.fields.completion;
+}
+
 function coordinationChange(before: ScheduleItem, beforeInterval: Interval | null, change: Change, after: ParsedFields | null): boolean {
   if (before.kind !== "event" || before.involvement !== "shared") return false;
   if (change.operation === "delete") return true;
@@ -259,6 +269,7 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
   const changeIds = new Set<string>();
   const afterIntervals: FinalInterval[] = [];
   const coordinationTargets = new Map<string, CoordinationTarget>();
+  let effectiveChange = false;
 
   for (const [index, value] of input.changeSet.changes.entries()) {
     const path = `changes[${index}]`;
@@ -276,6 +287,7 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
       continue;
     }
     const change = value as unknown as Change;
+    if (change.operation === "create" || change.operation === "delete") effectiveChange = true;
     const targetIds = change.operation === "create" ? [] : isId(change.targetId) ? [change.targetId] : [];
     const after = change.operation === "delete" ? null : parseFields(change.after, `${path}.after`, targetIds, validation);
     let placementChanged = change.operation === "create";
@@ -301,6 +313,7 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
       if (change.operation === "update" && after) {
         placementChanged = !sameInterval(target.interval, after.interval) ||
           target.item.timeSlot?.timezone !== after.fields.timeSlot?.timezone;
+        if (!sameFields(target.item, target.interval, after)) effectiveChange = true;
       }
       if (target.item.kind === "task" && target.item.involvement === "shared" &&
         (change.operation === "delete" || (change.operation === "update" && after &&
@@ -332,6 +345,10 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
     validation.conflicts.push({ targetIds: [selected.id], reason: "coordination_target_unchanged" });
   }
   if (validation.conflicts.length || validation.missingFields.length || validation.protectedTargets.length) return invalidAssessment();
+  if (input.purpose === "ai_proposal" && !effectiveChange) {
+    validation.conflicts.push({ targetIds: [...changedTargets], reason: "no_effective_change" });
+    return invalidAssessment();
+  }
 
   const remaining: FinalInterval[] = [...current.values()]
     .filter(({ item, interval }) => !changedTargets.has(item.id) && interval !== null)

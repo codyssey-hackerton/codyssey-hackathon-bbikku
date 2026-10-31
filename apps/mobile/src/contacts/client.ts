@@ -34,16 +34,34 @@ export interface ContactRequest {
 export type ContactDraftInput = Pick<ContactRequest, 'recipientRef' | 'channel' | 'purpose' | 'messageOrCallBrief' | 'allowedOptions'>;
 export interface ContactDecisionInput { id: string; contactRevision: number; decision: 'accept' | 'reject' }
 export interface ContactSendInput { id: string; contactRevision: number; expectedSenderAddress: string }
+export interface ContactCallInput { id: string; contactRevision: number; expectedSenderNumber: string }
+export interface PhoneConnectionInput { accountSid: string; authToken: string; fromNumber: string }
+export type PhoneConnection = ({ status: 'available'; senderNumber: string } | { status: 'not_configured'; senderNumber: string | null }) & { lastRequestId?: string | null };
 export type EmailConnection = { status: 'available'; senderAddress: string } | { status: 'not_configured'; senderAddress: string | null };
+export interface ContactResponse {
+  id: string; contactRequestId: string; providerEventId: string; receivedAt: string;
+  outcome: 'accepted' | 'declined' | 'alternative_proposed' | 'unclear';
+  selectedOptionId: string | null; evidenceRef: string; displayText?: string | null; reviewReason?: string | null;
+}
+export interface ContactResults { contactRequest: ContactRequest; responses: ContactResponse[] }
+export interface ContactReplyCheck extends ContactResults { checkedCount: number; unmatchedCount: number }
+export interface ContactConfirmResult { contactRequest: ContactRequest; response: ContactResponse; scheduleRevision: number; changed: boolean }
 
 export interface ContactClient {
   list(proposalId: string): Promise<ContactRequest[]>;
   get(id: string): Promise<ContactRequest>;
   emailConnection(): Promise<EmailConnection>;
+  emailReplyConnection(): Promise<EmailConnection>;
+  responses(id: string): Promise<ContactResults>;
+  checkReplies(op: Mutation<{ id: string; contactRevision: number }>): Promise<ContactReplyCheck>;
+  confirmResponse(op: Mutation<{ id: string; responseId: string; contactRevision: number; selectedOptionId: string }>): Promise<ContactConfirmResult>;
+  phoneConnection(): Promise<PhoneConnection>;
+  connectPhone(op: Mutation<PhoneConnectionInput>): Promise<PhoneConnection>;
   createRecipient(op: Mutation<RecipientInput>): Promise<Recipient>;
   createDraft(op: Mutation<ContactDraftInput>): Promise<ContactRequest>;
   decide(op: Mutation<ContactDecisionInput>): Promise<ContactRequest>;
   send(op: Mutation<ContactSendInput>): Promise<ContactRequest>;
+  call(op: Mutation<ContactCallInput>): Promise<ContactRequest>;
 }
 
 function invalidResponse(): ApiError {
@@ -107,6 +125,42 @@ function contactFrom(data: unknown): ContactRequest {
   return data.contactRequest;
 }
 
+function isResponse(item: unknown, id: string): item is ContactResponse {
+  return isRecord(item) && isId(item.id) && item.contactRequestId === id && isId(item.providerEventId) &&
+    isOffsetTimestamp(item.receivedAt) && ['accepted', 'declined', 'alternative_proposed', 'unclear'].includes(item.outcome as string) &&
+    (item.selectedOptionId === null || isId(item.selectedOptionId)) && isId(item.evidenceRef) &&
+    (item.displayText === undefined || item.displayText === null || (typeof item.displayText === 'string' && item.displayText.length <= 2000)) &&
+    (item.reviewReason === undefined || item.reviewReason === null || isText(item.reviewReason, 200));
+}
+
+function resultsFrom(data: unknown, id: string): ContactResults {
+  const contactRequest = contactFrom(data);
+  if (contactRequest.id !== id || !isRecord(data) || !Array.isArray(data.responses) ||
+      !data.responses.every((item: unknown) => isResponse(item, id)) ||
+      new Set(data.responses.map((item: ContactResponse) => item.id)).size !== data.responses.length) throw invalidResponse();
+  return { contactRequest, responses: data.responses as ContactResponse[] };
+}
+
+function phoneConnectionFrom(data: unknown): PhoneConnection {
+  if (!isRecord(data) || (data.status !== 'available' && data.status !== 'not_configured') ||
+      !(data.senderNumber === null || typeof data.senderNumber === 'string') ||
+      !(data.lastRequestId === undefined || data.lastRequestId === null || isId(data.lastRequestId)) ||
+      (data.status === 'available' && (typeof data.senderNumber !== 'string' || !/^\+[1-9]\d{1,14}$/.test(data.senderNumber)))) throw invalidResponse();
+  const receipt = data.lastRequestId === undefined ? {} : { lastRequestId: data.lastRequestId as string | null };
+  if (data.status === 'available') return { status: data.status, senderNumber: data.senderNumber as string, ...receipt };
+  return { status: data.status, senderNumber: data.senderNumber as string | null, ...receipt };
+}
+
+function dispatched(contact: ContactRequest, id: string, contactRevision: number, channel: ContactRequest['channel']): ContactRequest {
+  const submitted = contact.deliveryStatus === 'sent_or_connected' &&
+    contact.negotiationStatus === 'awaiting_response' && contact.providerOperationId !== null;
+  const pendingOrFailedOrUnknown = (contact.deliveryStatus === 'submitting' || contact.deliveryStatus === 'failed' ||
+    contact.deliveryStatus === 'outcome_unknown') && contact.negotiationStatus === 'not_started' && contact.providerOperationId === null;
+  if (contact.id !== id || contact.revision !== contactRevision || contact.channel !== channel || !contact.approvalId ||
+      (!submitted && !pendingOrFailedOrUnknown)) throw invalidResponse();
+  return contact;
+}
+
 export function createContactClient(api: ApiClient): ContactClient {
   return {
     async list(proposalId) {
@@ -128,6 +182,42 @@ export function createContactClient(api: ApiClient): ContactClient {
           (data.status === 'available' && (typeof data.senderAddress !== 'string' || !data.senderAddress.trim()))) throw invalidResponse();
       if (data.status === 'available') return { status: data.status, senderAddress: data.senderAddress as string };
       return { status: data.status, senderAddress: data.senderAddress };
+    },
+    async emailReplyConnection() {
+      const data = await api.get<unknown>('/v1/email-reply-connection');
+      if (!isRecord(data) || (data.status !== 'available' && data.status !== 'not_configured') ||
+          !(data.senderAddress === null || typeof data.senderAddress === 'string') ||
+          (data.status === 'available' && (typeof data.senderAddress !== 'string' || !data.senderAddress.trim()))) throw invalidResponse();
+      return data.status === 'available' ? { status: data.status, senderAddress: data.senderAddress as string }
+        : { status: data.status, senderAddress: data.senderAddress as string | null };
+    },
+    async responses(id) {
+      return resultsFrom(await api.get<unknown>(`/v1/contact-requests/${encodeURIComponent(id)}/responses`), id);
+    },
+    async checkReplies({ input, requestId, idempotencyKey }) {
+      const data = await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(input.id)}/check-replies`,
+        { requestId, contactRevision: input.contactRevision }, { idempotencyKey, timeoutMs: 60_000 });
+      const result = resultsFrom(data, input.id);
+      if (!isRecord(data) || !isRevision(data.checkedCount, 0) || !isRevision(data.unmatchedCount, 0)) throw invalidResponse();
+      return { ...result, checkedCount: data.checkedCount as number, unmatchedCount: data.unmatchedCount as number };
+    },
+    async confirmResponse({ input, requestId, idempotencyKey }) {
+      const { id, responseId, contactRevision, selectedOptionId } = input;
+      const data = await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(id)}/responses/${encodeURIComponent(responseId)}/confirm`,
+        { requestId, contactRevision, selectedOptionId }, { idempotencyKey });
+      const contactRequest = contactFrom(data);
+      if (!isRecord(data) || contactRequest.id !== id || !isResponse(data.response, id) || data.response.id !== responseId ||
+          !isRevision(data.scheduleRevision, 0) || typeof data.changed !== 'boolean') throw invalidResponse();
+      return { contactRequest, response: data.response, scheduleRevision: data.scheduleRevision as number, changed: data.changed };
+    },
+    async phoneConnection() {
+      return phoneConnectionFrom(await api.get<unknown>('/v1/phone-connection'));
+    },
+    async connectPhone({ input, requestId, idempotencyKey }) {
+      const result = phoneConnectionFrom(await api.post<unknown>('/v1/phone-connection',
+        { requestId, accountSid: input.accountSid, authToken: input.authToken, fromNumber: input.fromNumber }, { idempotencyKey }));
+      if (result.lastRequestId !== undefined && result.lastRequestId !== requestId) throw invalidResponse();
+      return result;
     },
     async createRecipient({ input, requestId, idempotencyKey }) {
       const { displayName, channel, address, confirmed } = input;
@@ -163,14 +253,13 @@ export function createContactClient(api: ApiClient): ContactClient {
       const contact = contactFrom(await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(id)}/send`,
         // The server can wait 30 seconds for the provider before returning an uncertain outcome.
         { requestId, contactRevision, expectedSenderAddress }, { idempotencyKey, timeoutMs: 60_000 }));
-      const submitted = contact.deliveryStatus === 'sent_or_connected' &&
-        contact.negotiationStatus === 'awaiting_response' && contact.providerOperationId !== null;
-      const pendingOrFailedOrUnknown = (contact.deliveryStatus === 'submitting' || contact.deliveryStatus === 'failed' ||
-        contact.deliveryStatus === 'outcome_unknown') &&
-        contact.negotiationStatus === 'not_started' && contact.providerOperationId === null;
-      if (contact.id !== id || contact.revision !== contactRevision || !contact.approvalId ||
-          (!submitted && !pendingOrFailedOrUnknown)) throw invalidResponse();
-      return contact;
+      return dispatched(contact, id, contactRevision, 'email');
+    },
+    async call({ input, requestId, idempotencyKey }) {
+      const { id, contactRevision, expectedSenderNumber } = input;
+      const contact = contactFrom(await api.post<unknown>(`/v1/contact-requests/${encodeURIComponent(id)}/call`,
+        { requestId, contactRevision, expectedSenderNumber }, { idempotencyKey, timeoutMs: 60_000 }));
+      return dispatched(contact, id, contactRevision, 'phone');
     },
   };
 }

@@ -42,6 +42,20 @@ function stub(data: unknown): ApiClient {
 
 const isInvalidResponse = (error: unknown) => error instanceof ApiError && error.code === 'invalid_response';
 
+test('reply results validate contact identity, counts and stored response identity', async () => {
+  const response = { id: 'response-1', contactRequestId: contactId, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z',
+    outcome: 'unclear', selectedOptionId: null, evidenceRef: 'evidence-1', displayText: '네', reviewReason: 'sender_unverified' };
+  const good = { contactRequest: sent, responses: [response], checkedCount: 1, unmatchedCount: 0 };
+  assert.deepEqual(await createContactClient(stub(good)).checkReplies(op({ id: contactId, contactRevision: 1 })), good);
+  for (const data of [{ ...good, unmatchedCount: -1 }, { ...good, checkedCount: 0.5 },
+    { ...good, responses: [{ ...response, contactRequestId: 'other' }] }, { ...good, responses: [response, response] },
+    { ...good, responses: [{ ...response, displayText: 'x'.repeat(2001) }] }]) {
+    await assert.rejects(createContactClient(stub(data)).checkReplies(op({ id: contactId, contactRevision: 1 })), isInvalidResponse);
+  }
+  await assert.rejects(createContactClient(stub({ contactRequest: sent, response: { ...response, id: 'other' }, scheduleRevision: 1, changed: true }))
+    .confirmResponse(op({ id: contactId, responseId: response.id, contactRevision: 1, selectedOptionId: 'option-1' })), isInvalidResponse);
+});
+
 test('read methods use encoded targets, unwrap contact data, and report email capability', async () => {
   const requests: string[] = [];
   const responses: unknown[] = [
@@ -193,4 +207,29 @@ test('a ready send response stays uncertain and retry preserves the exact intent
   assert.equal(JSON.parse(requests[0].body).contactRevision, 1);
   assert.equal(JSON.parse(requests[0].body).expectedSenderAddress, expectedSenderAddress);
   assert.ok(requests[0].key);
+});
+
+test('phone connection and call use the requested contract and validate responses', async () => {
+  const phone = { ...sent, channel: 'phone' as const, recipientSnapshot: { ...sent.recipientSnapshot, channel: 'phone' as const, address: '+821012345678' } };
+  const requests: any[] = [];
+  const responses = [{ status: 'not_configured', senderNumber: null, lastRequestId: null }, { status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' }, { contactRequest: phone }];
+  const api: ApiClient = {
+    get: async <T>(path: string) => { requests.push({ path }); return responses.shift() as T; },
+    post: async <T>(path: string, body: object, options: object) => { requests.push({ path, body, options }); return responses.shift() as T; },
+  };
+  const client = createContactClient(api);
+  assert.equal((await client.phoneConnection()).status, 'not_configured');
+  assert.equal((await client.connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' }))).status, 'available');
+  assert.deepEqual(await client.call(op({ id: contactId, contactRevision: 1, expectedSenderNumber: '+15550000001' })), phone);
+  assert.deepEqual(requests[0], { path: '/v1/phone-connection' });
+  assert.deepEqual(requests[1], { path: '/v1/phone-connection', body: { requestId: 'request-1', accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' }, options: { idempotencyKey: 'operation-1' } });
+  assert.deepEqual(requests[2], { path: '/v1/contact-requests/contact%20%2F%3F1/call', body: { requestId: 'request-1', contactRevision: 1, expectedSenderNumber: '+15550000001' }, options: { idempotencyKey: 'operation-1', timeoutMs: 60_000 } });
+  await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: '01012345678' })).phoneConnection(), isInvalidResponse);
+  assert.deepEqual(await createContactClient(stub({ status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' })).phoneConnection(),
+    { status: 'available', senderNumber: '+15550000001', lastRequestId: 'request-1' });
+  for (const lastRequestId of ['', 4, {}, 'wrong-request']) {
+    await assert.rejects(createContactClient(stub({ status: 'available', senderNumber: '+15550000001', lastRequestId }))
+      .connectPhone(op({ accountSid: 'sid', authToken: 'token', fromNumber: '+15550000001' })), isInvalidResponse);
+  }
+  await assert.rejects(createContactClient(stub({ contactRequest: sent })).call(op({ id: contactId, contactRevision: 1, expectedSenderNumber: '+15550000001' })), isInvalidResponse);
 });

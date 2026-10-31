@@ -47,12 +47,14 @@ function createHarness() {
     },
   };
   react.useLayoutEffect = react.useEffect;
+  const backListeners = new Set<() => boolean>();
   const native = {
     Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView', Switch: 'Switch',
+    BackHandler: { addEventListener: (_event: string, listener: () => boolean) => { backListeners.add(listener); return { remove: () => backListeners.delete(listener) }; } },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
-  const host: any = { react, native, jsx, fragment, marker: 0, fontState: [true, null] };
+  const host: any = { react, native, jsx, fragment, backListeners, marker: 0, fontState: [true, null] };
   (globalThis as any).__appIntegrationHarness = host;
 
   function renderer(Component: any, initialProps: any = {}) {
@@ -498,4 +500,71 @@ test('font loading failure leaves connection settings and the workspace usable',
   await view.settle();
   assert.ok(chat(view));
   view.unmount();
+});
+
+test('proposal detail opens an editable revision draft with all changes and without a write', async () => {
+  const { App } = await components;
+  const original = proposal('원본 제안');
+  original.changeSet.changes.push({ ...original.changeSet.changes[0], changeId: 'c2', after: { ...original.changeSet.changes[0].after, title: '두 번째 일정' } });
+  const writes: string[] = [];
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'POST') writes.push(String(url));
+    return new URL(String(url)).pathname === '/v1/proposals/p1' ? apiResponse({ proposal: original }) : response([original]);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용');
+  await view.settle();
+  chat(view).props.onOpenProposals(); view.flush();
+  press(view, '제안 원본 제안, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '수정 요청');
+  const request = chat(view).props.revisionRequest;
+  assert.equal(request.proposalId, 'p1');
+  assert.match(request.text, /제안 ID: p1 · 버전: 1/);
+  assert.match(request.text, /"changeId": "c1"/);
+  assert.match(request.text, /"changeId": "c2"/);
+  assert.match(request.text, /별도 검토와 승인/);
+  assert.deepEqual(writes, []);
+  view.unmount();
+});
+
+test('calendar import mounts only while open and removes its hardware back handler', async () => {
+  const { App, operationGuard } = await components;
+  globalThis.fetch = async () => response([]);
+  const host = (globalThis as any).__appIntegrationHarness;
+  const view = harness.renderer(App);
+  assert.equal(host.backListeners.size, 0);
+  press(view, '캘린더');
+  press(view, '캘린더 일정 가져오기');
+  assert.equal(host.backListeners.size, 1);
+  assert.match(textOf(view.tree), /선택한 기간의 일정을 직접 조회/);
+  const owner = {};
+  operationGuard.update(owner, { status: 'pending' });
+  [...host.backListeners][0](); view.flush();
+  assert.equal(host.backListeners.size, 1);
+  operationGuard.clear(owner);
+  [...host.backListeners][0](); view.flush();
+  assert.equal(host.backListeners.size, 0);
+  view.unmount();
+});
+
+test('web team preview shows the participation code connection without changing native settings', async () => {
+  const { App } = await components;
+  const host = (globalThis as any).__appIntegrationHarness;
+  const oldTeam = process.env.EXPO_PUBLIC_TEAM_PREVIEW;
+  const oldPreview = process.env.EXPO_PUBLIC_PREVIEW_ONLY;
+  const oldPlatform = host.native.Platform.OS;
+  try {
+    process.env.EXPO_PUBLIC_TEAM_PREVIEW = 'true';
+    process.env.EXPO_PUBLIC_PREVIEW_ONLY = 'false';
+    host.native.Platform.OS = 'web';
+    const view = harness.renderer(App);
+    assert.match(textOf(view.tree), /팀 공유 · 기능 테스트/);
+    assert.ok(input(view, '팀 참여 코드'));
+    assert.equal(input(view, 'API 서버 주소').props.editable, undefined);
+    view.unmount();
+  } finally {
+    host.native.Platform.OS = oldPlatform;
+    if (oldTeam === undefined) delete process.env.EXPO_PUBLIC_TEAM_PREVIEW; else process.env.EXPO_PUBLIC_TEAM_PREVIEW = oldTeam;
+    if (oldPreview === undefined) delete process.env.EXPO_PUBLIC_PREVIEW_ONLY; else process.env.EXPO_PUBLIC_PREVIEW_ONLY = oldPreview;
+  }
 });

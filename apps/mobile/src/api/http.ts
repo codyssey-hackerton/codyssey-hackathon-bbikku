@@ -47,6 +47,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     if (baseUrl === null || !path.startsWith('/')) {
       throw new ApiError('invalid_configuration', 'API 서버 주소를 확인해 주세요.');
     }
+    if (method === 'POST' && path === '/v1/phone-connection' &&
+        !baseUrl.startsWith('https://') && !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/.test(baseUrl)) {
+      throw new ApiError('invalid_configuration', '전화 연결 설정에는 HTTPS 또는 로컬 연결이 필요합니다.');
+    }
 
     const timeoutMs = timeoutOverrideMs ?? defaultTimeoutMs;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new ApiError('invalid_configuration', '요청 제한 시간을 확인해 주세요.');

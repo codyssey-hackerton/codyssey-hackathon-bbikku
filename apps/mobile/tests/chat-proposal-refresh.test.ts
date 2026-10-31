@@ -31,6 +31,12 @@ function createHarness() {
       const state = instance.hooks[index];
       return [state.value, state.set];
     },
+    useMemo(factory: () => any, deps: unknown[]) {
+      const { instance, index } = slot();
+      const previous = instance.hooks[index];
+      if (!previous || !sameDeps(previous.deps, deps)) instance.hooks[index] = { deps, value: factory() };
+      return instance.hooks[index].value;
+    },
     useRef(initial: any) {
       const { instance, index } = slot();
       return instance.hooks[index] ??= { current: initial };
@@ -48,6 +54,7 @@ function createHarness() {
       }
     },
   };
+  (react as any).useLayoutEffect = react.useEffect;
   const native = {
     ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
     Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', TextInput: 'TextInput', View: 'View',
@@ -107,15 +114,16 @@ const harness = createHarness();
 const components = build({
   stdin: {
     contents: `export { default as ChatScreen } from './ChatScreen';
+      export { default as ProposalPanel } from '../proposals/ProposalPanel';
       export { createChatClient } from './client'; export { createApiClient } from '../api/http';`,
     resolveDir: resolve(__dirname, '../src/chat'), loader: 'ts',
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   plugins: [{ name: 'mock-native', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface)|\.\/ChatScheduleSummary)$/ },
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface)|\.\/ChatScheduleSummary|\.\.\/contacts\/ContactPanel)$/ },
       (args) => ({ path: args.path, namespace: 'test-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'test-native' }, ({ path }) => ({
-      contents: path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+      contents: path.endsWith('/ContactPanel') ? 'module.exports=()=>null' : path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
         path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
         path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
         path === 'react' ? 'module.exports = __react' :
@@ -132,6 +140,7 @@ const components = build({
   );
   return compiled.exports as {
     ChatScreen: any;
+    ProposalPanel: any;
     createApiClient: (options: any) => any;
     createChatClient: (api: any) => any;
   };
@@ -311,4 +320,100 @@ test('starter chips only fill the draft; the user must send it explicitly', asyn
   press(view, '메시지 보내기');
   await view.settle();
   assert.equal(calls, 1);
+});
+
+function chatInput(view: any) {
+  return nodes(view.tree).find((node) => node.type === 'TextInput' && node.props.accessibilityLabel === '채팅 메시지');
+}
+
+test('revision drafts preserve normal and recovery drafts and use only the original proposal target', async () => {
+  const requests: any[] = [];
+  const { props, view } = await screen(async (_url, init) => {
+    requests.push(JSON.parse(String(init!.body)));
+    return chatResponse({ kind: 'reply', message: '확인' });
+  }, () => {});
+  const generalTarget = { id: 'other', expectedRevision: 2, title: '다른 일정' };
+  view.update({ ...props, coordinationTarget: generalTarget });
+  chatInput(view).props.onChangeText('기존 일반 초안'); view.flush();
+  const recovery = { key: 'recovery-key', title: '복구 작업', dateLabel: '2026-10-31', text: '복구 초안' };
+  view.update({ ...props, coordinationTarget: generalTarget, recoveryRequest: recovery });
+  chatInput(view).props.onChangeText('편집한 복구 초안'); view.flush();
+  const revision = { key: 'proposal-1:3', proposalId: 'proposal-1', text: '제안 전체 변경 내용', coordinationTarget: { id: 'original', expectedRevision: 4, title: '원래 일정' } };
+  view.update({ ...props, coordinationTarget: generalTarget, recoveryRequest: recovery, revisionRequest: revision });
+  assert.equal(chatInput(view).props.value, revision.text);
+  assert.equal(requests.length, 0);
+  assert.match(textOf(view.tree), /별도 승인이 필요/);
+  chatInput(view).props.onChangeText('편집한 수정 요청'); view.flush();
+  press(view, '복구 작업 2026-10-31 복구 상담 초안');
+  assert.equal(chatInput(view).props.value, '편집한 복구 초안');
+  press(view, '기존 대화 초안으로');
+  assert.equal(chatInput(view).props.value, '기존 일반 초안');
+  press(view, '제안 proposal-1 수정 요청 초안');
+  assert.equal(chatInput(view).props.value, '편집한 수정 요청');
+  press(view, '메시지 보내기'); await view.settle();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].message, '편집한 수정 요청');
+  assert.deepEqual(requests[0].coordinationTarget, { id: 'original', expectedRevision: 4 });
+  press(view, '기존 대화 초안으로');
+  assert.equal(chatInput(view).props.value, '기존 일반 초안');
+  assert.match(textOf(view.tree), /다른 일정/);
+});
+
+test('pending and uncertain requests defer revision selection and preserve the retry body', async () => {
+  const pending = deferred<Response>();
+  const retry = deferred<Response>();
+  const requests: RequestInit[] = [];
+  const { props, view } = await screen(async (_url, init) => {
+    requests.push(init!);
+    return requests.length === 1 ? pending.promise : retry.promise;
+  }, () => {});
+  send(view, '진행 중인 요청');
+  const revision = { key: 'p:1', proposalId: 'p', text: '새 수정 초안' };
+  view.update({ ...props, revisionRequest: revision });
+  assert.equal(chatInput(view).props.editable, false);
+  assert.equal(chatInput(view).props.value, '');
+  pending.resolve(new Response('invalid', { status: 200 }));
+  await view.settle();
+  assert.equal(chatInput(view).props.editable, false);
+  assert.match(textOf(view.tree), /결과를 확인할 때까지/);
+  press(view, '같은 요청 다시 시도');
+  assert.equal(requests[1].body, requests[0].body);
+  assert.equal((requests[1].headers as Record<string, string>)['Idempotency-Key'], (requests[0].headers as Record<string, string>)['Idempotency-Key']);
+  retry.resolve(chatResponse({ kind: 'reply', message: '완료' }));
+  await view.settle();
+  assert.equal(chatInput(view).props.value, '새 수정 초안');
+  assert.equal(requests.length, 2);
+});
+
+test('proposal detail revision is read-only and unavailable during an unresolved decision', async () => {
+  const { ProposalPanel } = await components;
+  const item = { id: 'event-1', revision: 3, kind: 'event', title: '원래 회의', timeSlot: { startsAt: '2026-10-31T10:00:00Z', endsAt: '2026-10-31T11:00:00Z', timezone: 'UTC' }, durationMinutes: null, deadline: null, flexibility: 'flexible', involvement: 'personal', completion: 'pending', sourceRefs: [] };
+  const { id, revision, sourceRefs, ...fields } = item;
+  const proposal = { id: 'p-1', revision: 2, mode: 'personal', baseScheduleRevision: 1, baseContextRevision: 1,
+    changeSet: { changes: [{ changeId: 'a', operation: 'update', targetId: id, expectedRevision: revision, after: { ...fields, title: '바뀐 회의' } }, { changeId: 'b', operation: 'create', after: { ...fields, title: '추가 회의' } }] },
+    beforeItems: [item], reason: '이유', evidenceRefs: [], validation: { valid: true, conflicts: [], missingFields: [], protectedTargets: [], checkedScheduleRevision: 1, checkedContextRevision: 1, checkedAt: '2026-10-31T00:00:00Z' }, createdAt: '2026-10-31T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z', status: 'pending', coordinationTarget: null };
+  let selected: any;
+  let rejectDecision!: (error: Error) => void;
+  const firstDecision = new Promise((_resolve, reject) => { rejectDecision = reject; });
+  const decision = deferred<any>();
+  const calls: string[] = [];
+  const decisions: any[] = [];
+  const api = { get: async (path: string) => { calls.push(path); return path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal }; }, post: async (path: string, body: any, options: any) => { calls.push('POST'); decisions.push({ path, body, options }); return decisions.length === 1 ? firstDecision : decision.promise; } };
+  const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: (value: any) => { selected = value; } });
+  await view.settle();
+  press(view, '제안 이유, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '수정 요청');
+  assert.deepEqual(selected, proposal);
+  assert.equal(calls.includes('POST'), false);
+  selected = undefined;
+  press(view, '제안 승인');
+  assert.equal(nodes(view.tree).some((node) => node.type === 'Pressable' && node.props.accessibilityLabel === '수정 요청'), false);
+  rejectDecision(new Error('network')); await view.settle();
+  assert.match(textOf(view.tree), /처리 여부를 확인하지 못했습니다/);
+  assert.equal(nodes(view.tree).some((node) => node.type === 'Pressable' && node.props.accessibilityLabel === '수정 요청'), false);
+  press(view, '동일 요청 다시 시도');
+  assert.deepEqual(decisions[0], decisions[1]);
+  decision.resolve({ outcome: 'applied', proposal: { ...proposal, status: 'applied' }, scheduleRevision: 2 });
+  await view.settle();
+  assert.equal(selected, undefined);
 });

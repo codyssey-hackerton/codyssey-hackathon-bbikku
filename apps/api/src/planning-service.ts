@@ -56,7 +56,7 @@ function proposalExpiry(current: ContextSnapshot, changes: ChangeSet): string | 
   }
   return compareInstants(expiresAt, current.now) <= 0 ? null : expiresAt;
 }
-function applyChanges(state: UserPlanningState, changes: ChangeSet): { items: ScheduleItem[]; deletedIds: string[]; scheduleRevision: number } {
+export function applyChanges(state: UserPlanningState, changes: ChangeSet): { items: ScheduleItem[]; deletedIds: string[]; scheduleRevision: number } {
   const items: ScheduleItem[] = []; const deletedIds: string[] = [];
   for (const change of changes.changes) {
     if (change.operation === 'create') {
