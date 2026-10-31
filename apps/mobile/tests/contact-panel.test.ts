@@ -915,3 +915,177 @@ test('재승인 후 최신성 재검증이 실패하면 일정 반영으로 표�
   assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
   assert.equal(posts(mock.calls, '/confirm').length, 1);
 });
+
+test('회신 반영 후 현재 제안 상태를 표시하고 나갔다 다시 들어와도 연락 이력을 읽는다', async t => {
+  const { ProposalPanel } = await components;
+  const awaiting = { ...proposal, status: 'awaiting_contact' };
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const applied = { ...sent, negotiationStatus: 'applied' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '제안하신 시간이 괜찮습니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([sent]); mock.proposals.set(proposal.id, awaiting);
+  const updatedPreview = deferred<any>(); let holdPreview = false;
+  mock.api.getHook = (path: string) => holdPreview && path === `/v1/proposals/${proposal.id}` ? updatedPreview.promise : undefined;
+  mock.api.postHook = (path: string) => {
+    if (path.endsWith('/check-replies')) { mock.contacts.set(sent.id, reviewed); return { contactRequest: reviewed, responses: [response], checkedCount: 1, unmatchedCount: 0 }; }
+    if (path.endsWith('/confirm')) {
+      mock.contacts.set(sent.id, applied);
+      mock.proposals.set(proposal.id, { ...awaiting, revision: proposal.revision + 1, status: 'applied' });
+      holdPreview = true;
+      return { contactRequest: applied, response, scheduleRevision: 8, changed: true };
+    }
+  };
+  const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
+  t.after(() => view.unmount());
+  await view.settle(); press(view, '제안 시간 조정, 연락 대기, 상세 보기'); await view.settle();
+  press(view, '연락 준비'); await openContact(view);
+  assert.match(textOf(view.tree), /상태: 연락 대기/);
+  press(view, '회신 확인'); await view.settle();
+  press(view, '선택: option-1 · 제안 proposal-1');
+  press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
+  assert.match(textOf(view.tree), /일정 반영됨/);
+  assert.match(textOf(view.tree), /제안을 불러오는 중/);
+  assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다/);
+  holdPreview = false; updatedPreview.resolve({ proposal: mock.proposals.get(proposal.id) }); await view.settle();
+  assert.match(textOf(view.tree), /상태: 적용됨/);
+  assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다|같은 버전을 확인할 수 없어/);
+  press(view, '연락 목록'); await view.settle();
+  assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
+  press(view, '제안으로'); await view.settle();
+  assert.match(textOf(view.tree), /상태: 적용됨/);
+  press(view, '연락 내역'); await openContact(view);
+  assert.match(textOf(view.tree), /상태: 적용됨/);
+  assert.match(textOf(view.tree), /승인된 연락 내용/);
+  assert.doesNotMatch(textOf(view.tree), /상태: 연락 대기|원 일정은 유지됩니다|같은 버전을 확인할 수 없어/);
+  assert.equal(button(view, 'Gmail 발송'), undefined);
+  assert.equal(posts(mock.calls, '/send').length, 0);
+});
+
+test('완료된 여러 대안은 한 건 적용, 나머지 미반영으로 표시한다', async t => {
+  const { ProposalPanel } = await components;
+  const contact = { ...sent, negotiationStatus: 'applied', allowedOptions: [...sent.allowedOptions,
+    { optionId: 'option-2', proposalId: alternative.id, proposalRevision: alternative.revision }] };
+  const selected = { ...proposal, revision: proposal.revision + 1, status: 'applied' };
+  const other = { ...alternative, revision: alternative.revision + 1, status: 'stale' };
+  const mock = memoryApi([contact]); mock.proposals.set(selected.id, selected); mock.proposals.set(other.id, other);
+  const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
+  t.after(() => view.unmount());
+  await view.settle(); press(view, '제안 시간 조정, 적용됨, 상세 보기'); await view.settle();
+  press(view, '연락 내역'); await openContact(view);
+  assert.match(textOf(view.tree), /상태: 적용됨/); assert.match(textOf(view.tree), /상태: 기준 변경됨/);
+  assert.match(textOf(view.tree), /나머지 대안은 반영되지 않았습니다/);
+  assert.doesNotMatch(textOf(view.tree), /처리된 제안 내역을 확인할 수 없습니다/);
+});
+
+for (const contact of [draft, ready]) {
+  test(`${contact.deliveryStatus} 연락은 제안 버전이 변조되면 승인과 발송을 막는다`, async t => {
+    const { ContactPanel } = await components;
+    const mock = memoryApi([contact]); mock.proposals.set(proposal.id, { ...proposal, revision: proposal.revision + 1 });
+    const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+    await openContact(view);
+    assert.match(textOf(view.tree), /같은 버전을 확인할 수 없어 승인할 수 없습니다/);
+    assert.equal(button(view, contact.deliveryStatus === 'ready' ? 'Gmail 발송' : '연락 내용 승인').props.disabled, true);
+    assert.equal(posts(mock.calls, '/decision').length, 0); assert.equal(posts(mock.calls, '/send').length, 0);
+  });
+}
+
+test('완료 이력에서 예상과 다른 제안 버전은 승인 내역으로 표시하지 않는다', async t => {
+  const { ContactPanel } = await components;
+  const contact = { ...sent, negotiationStatus: 'applied' };
+  const mock = memoryApi([contact]); mock.proposals.set(proposal.id, { ...proposal, revision: proposal.revision + 2, status: 'applied' });
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view);
+  assert.match(textOf(view.tree), /처리된 제안 내역을 확인할 수 없습니다/);
+  assert.doesNotMatch(textOf(view.tree), /옮긴 회의/);
+});
+
+test('다른 대안이 적용되어 stale이 된 원래 제안에서도 연락 내역을 조회할 수 있다', async t => {
+  const { ProposalPanel } = await components;
+  const contact = { ...sent, negotiationStatus: 'applied', allowedOptions: [...sent.allowedOptions,
+    { optionId: 'option-2', proposalId: alternative.id, proposalRevision: alternative.revision }] };
+  const original = { ...proposal, revision: proposal.revision + 1, status: 'stale' };
+  const selected = { ...alternative, revision: alternative.revision + 1, status: 'applied' };
+  const mock = memoryApi([contact]); mock.proposals.set(original.id, original); mock.proposals.set(selected.id, selected);
+  const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
+  t.after(() => view.unmount());
+  await view.settle(); press(view, '제안 시간 조정, 기준 변경됨, 상세 보기'); await view.settle();
+  press(view, '연락 내역'); await view.settle();
+  assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
+  await openContact(view);
+  assert.match(textOf(view.tree), /조회 전용/); assert.match(textOf(view.tree), /일정 반영됨/);
+  assert.match(textOf(view.tree), /상태: 적용됨/); assert.match(textOf(view.tree), /상태: 기준 변경됨/);
+  assert.ok(button(view, '저장된 응답 조회'));
+  assert.equal(button(view, 'Gmail 발송'), undefined); assert.equal(button(view, '회신 확인'), undefined);
+  assert.equal(posts(mock.calls, '/send').length, 0); assert.equal(posts(mock.calls, '/confirm').length, 0);
+});
+
+for (const item of [draft, ready, { ...sent, negotiationStatus: 'needs_user_review' }]) {
+  test(`stale 제안의 ${item.deliveryStatus} 연락 이력에서는 변경 동작을 제공하지 않는다`, async t => {
+    const { ContactPanel } = await components;
+    const stale = { ...proposal, revision: proposal.revision + 1, status: 'stale' };
+    const mock = memoryApi([item]); mock.proposals.set(stale.id, stale);
+    const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+      evidenceRef: 'evidence-1', displayText: '확인했습니다.', reviewReason: 'sender_unverified' };
+    mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: item, responses: [response] } : undefined;
+    const view = harness.renderer(ContactPanel, directProps(mock.api, stale)); t.after(() => view.unmount());
+    await view.settle(); assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
+    await openContact(view); assert.match(textOf(view.tree), /조회 전용/);
+    assert.equal(button(view, '연락 내용 승인'), undefined); assert.equal(button(view, '연락 거절'), undefined);
+    assert.equal(button(view, 'Gmail 발송'), undefined); assert.equal(button(view, '회신 확인'), undefined);
+    if (item.deliveryStatus === 'sent_or_connected') {
+      press(view, '저장된 응답 조회'); await view.settle();
+      assert.match(textOf(view.tree), /확인했습니다/);
+      assert.equal(button(view, '선택: option-1 · 제안 proposal-1'), undefined);
+    }
+    assert.equal(mock.calls.filter(call => call.method === 'POST').length, 0);
+  });
+}
+
+test('재승인 timeout 뒤 상태 조회에서 적용이 확인되면 재시도를 없애고 잠금을 해제한다', async t => {
+  const { ContactPanel, ApiError, operationGuard } = await components;
+  const reviewed = { ...sent, negotiationStatus: 'needs_user_review' };
+  const applied = { ...sent, negotiationStatus: 'applied' };
+  const response = { id: 'response-1', contactRequestId: sent.id, providerEventId: 'event-1', receivedAt: '2026-11-01T00:00:00Z', outcome: 'unclear', selectedOptionId: null,
+    evidenceRef: 'evidence-1', displayText: '확인했습니다.', reviewReason: 'sender_unverified' };
+  const mock = memoryApi([sent]);
+  mock.api.postHook = (path: string) => {
+    if (path.endsWith('/check-replies')) return { contactRequest: reviewed, responses: [response], checkedCount: 1, unmatchedCount: 0 };
+    if (path.endsWith('/confirm')) throw new ApiError('timeout', 'timeout', true);
+  };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view); press(view, '회신 확인'); await view.settle();
+  press(view, '선택: option-1 · 제안 proposal-1'); press(view, '회신 확인 후 선택한 대안 재승인'); await view.settle();
+  assert.ok(button(view, '동일 재승인 요청 재시도'));
+  mock.contacts.set(sent.id, applied); mock.proposals.set(proposal.id, { ...proposal, revision: proposal.revision + 1, status: 'applied' });
+  mock.api.getHook = (path: string) => path.endsWith('/responses') ? { contactRequest: applied, responses: [] } : undefined;
+  press(view, '연락 상태 조회'); await view.settle();
+  assert.match(textOf(view.tree), /일정 반영됨/); assert.match(textOf(view.tree), /조회 전용/);
+  assert.equal(button(view, '동일 재승인 요청 재시도'), undefined);
+  assert.notEqual(button(view, '연락 목록').props.disabled, true);
+  assert.equal(operationGuard.hasUnresolved(), false);
+  press(view, '저장된 응답 조회'); await view.settle();
+  assert.match(textOf(view.tree), /저장된 응답이 없습니다/);
+  assert.equal(posts(mock.calls, '/confirm').length, 1);
+});
+
+for (const action of ['decision', 'send'] as const) {
+  test(`${action} timeout 뒤 적용된 연락 이력에서는 변경 재시도를 제공하지 않는다`, async t => {
+    const { ContactPanel, ApiError, operationGuard } = await components;
+    const start = action === 'decision' ? draft : ready;
+    const applied = { ...sent, negotiationStatus: 'applied' };
+    const mock = memoryApi([start]);
+    mock.api.postHook = (path: string) => {
+      if (path.endsWith(`/${action}`)) throw new ApiError('timeout', 'timeout', true);
+    };
+    const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+    await openContact(view); press(view, action === 'decision' ? '연락 내용 승인' : 'Gmail 발송'); await view.settle();
+    mock.contacts.set(sent.id, applied); mock.proposals.set(proposal.id, { ...proposal, revision: proposal.revision + 1, status: 'applied' });
+    press(view, '연락 상태 조회'); await view.settle();
+    assert.match(textOf(view.tree), /일정 반영됨/); assert.match(textOf(view.tree), /조회 전용/);
+    assert.equal(button(view, '연락 결정 동일 요청 재시도'), undefined);
+    assert.equal(button(view, '동일 발송 요청 재시도'), undefined);
+    assert.notEqual(button(view, '연락 목록').props.disabled, true);
+    assert.equal(operationGuard.hasUnresolved(), false);
+    assert.equal(posts(mock.calls, `/${action}`).length, 1);
+  });
+}

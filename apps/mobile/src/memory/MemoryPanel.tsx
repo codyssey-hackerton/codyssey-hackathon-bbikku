@@ -75,6 +75,7 @@ function Choice<T extends string>({ label, options, value, onChange, disabled }:
           <Pressable
             key={option.value}
             accessibilityRole="radio"
+            aria-checked={option.value === value}
             accessibilityState={{ checked: option.value === value, disabled }}
             disabled={disabled}
             onPress={() => onChange(option.value)}

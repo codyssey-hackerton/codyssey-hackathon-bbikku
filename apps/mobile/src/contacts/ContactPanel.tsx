@@ -151,13 +151,17 @@ function ContactDraft({ client, proposal, onSaved, onCancel }: {
   </>;
 }
 
-function ContactDetail({ client, proposalClient, contact, renderProposal, onChange, onReconcile, onScheduleChanged, onBack }: {
+function ContactDetail({ client, proposalClient, contact, historyOnly, renderProposal, onChange, onReconcile, onScheduleChanged, onBack }: {
   client: ContactClient; proposalClient: ProposalClient; contact: ContactRequest;
+  historyOnly: boolean;
   renderProposal: (proposal: Proposal) => ReactNode; onChange: (contact: ContactRequest) => void;
   onReconcile: (contact: ContactRequest) => void; onScheduleChanged?: () => void; onBack: () => void;
 }) {
-  const [preview, setPreview] = useState<Load<Proposal[]>>({ status: 'loading' });
   const [previewAttempt, setPreviewAttempt] = useState(0);
+  const readOnly = historyOnly || contact.negotiationStatus === 'applied';
+  const previewKey = JSON.stringify([contact.id, contact.revision, contact.deliveryStatus, contact.negotiationStatus, contact.allowedOptions, previewAttempt]);
+  const [previewLoad, setPreviewLoad] = useState<{ key: string; result: Load<Proposal[]> }>({ key: '', result: { status: 'loading' } });
+  const preview = previewLoad.key === previewKey ? previewLoad.result : { status: 'loading' as const };
   const [connection, setConnection] = useState<Load<EmailConnection | PhoneConnection>>({ status: 'loading' });
   const [accountSid, setAccountSid] = useState('');
   const [authToken, setAuthToken] = useState('');
@@ -202,26 +206,32 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
     setup === 'pending' || setup === 'uncertain';
 
   useEffect(() => {
-    if (contact.channel !== 'email' || contact.deliveryStatus !== 'sent_or_connected') return;
+    if (readOnly || contact.channel !== 'email' || contact.deliveryStatus !== 'sent_or_connected') return;
     let active = true; setReplyConnection({ status: 'loading' });
     client.emailReplyConnection().then((data) => { if (active) setReplyConnection({ status: 'success', data }); },
       () => { if (active) setReplyConnection({ status: 'error' }); });
     return () => { active = false; };
-  }, [client, contact.channel, contact.deliveryStatus, replyConnectionAttempt]);
+  }, [client, contact.channel, contact.deliveryStatus, replyConnectionAttempt, readOnly]);
 
   useEffect(() => {
     let active = true;
-    setPreview({ status: 'loading' });
+    const applied = contact.negotiationStatus === 'applied';
+    setPreviewLoad({ key: previewKey, result: { status: 'loading' } });
     Promise.all(contact.allowedOptions.map(async (option) => {
       const item = await proposalClient.get(option.proposalId);
-      if (item.revision !== option.proposalRevision || item.mode !== 'coordination') throw new Error('Proposal revision changed');
+      if (item.id !== option.proposalId || item.mode !== 'coordination' ||
+          item.revision !== option.proposalRevision + (applied ? 1 : 0) ||
+          (applied && item.status !== 'applied' && item.status !== 'stale')) throw new Error('Proposal revision changed');
       return item;
-    })).then((items) => { if (active) setPreview({ status: 'success', data: items }); },
-      () => { if (active) setPreview({ status: 'error' }); });
+    })).then((items) => {
+      if (applied && items.filter(item => item.status === 'applied').length !== 1) throw new Error('Applied proposal missing');
+      if (active) setPreviewLoad({ key: previewKey, result: { status: 'success', data: items } });
+    }).catch(() => { if (active) setPreviewLoad({ key: previewKey, result: { status: 'error' } }); });
     return () => { active = false; };
-  }, [contact.id, contact.revision, proposalClient, previewAttempt]);
+  }, [previewKey, proposalClient]);
 
   useEffect(() => {
+    if (readOnly) return;
     let active = true;
     setConnection({ status: 'loading' });
     (contact.channel === 'phone' ? client.phoneConnection() : client.emailConnection()).then((data) => { if (active) {
@@ -233,7 +243,7 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
     } },
       () => { if (active) setConnection({ status: 'error' }); });
     return () => { active = false; };
-  }, [client, contact.channel, connectionAttempt]);
+  }, [client, contact.channel, connectionAttempt, readOnly]);
 
   async function connectPhone() {
     if (setupLock.current || !accountSid.trim() || !authToken.trim() || !/^\+[1-9]\d{1,14}$/.test(fromNumber.trim())) return;
@@ -269,7 +279,12 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
       const latest = requireSameSubject(contact, await client.get(contact.id));
       if (version !== resultVersion.current) return;
       if (latest.negotiationStatus !== contact.negotiationStatus) onScheduleChanged?.();
-      if ((send.state.status === 'pending' || (send.state.status === 'error' && send.state.uncertain)) && latest.deliveryStatus === 'ready') {
+      const mutations = [decision.state, send.state, checkReplies.state, confirmResponse.state];
+      if (latest.negotiationStatus === 'applied' && mutations.some(state => state.status === 'error') &&
+          mutations.every(state => state.status !== 'pending') && setup !== 'pending' && setup !== 'uncertain') {
+        resultVersion.current += 1;
+        onReconcile(latest);
+      } else if ((send.state.status === 'pending' || (send.state.status === 'error' && send.state.uncertain)) && latest.deliveryStatus === 'ready') {
         setReadyAfterLookup(send.state.status === 'error');
       } else if ((decision.state.status === 'pending' || (decision.state.status === 'error' && decision.state.uncertain)) && latest.deliveryStatus === 'pending_approval') {
         // A still-pending draft does not resolve the in-flight approval request.
@@ -300,16 +315,17 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
     finally { resultsLock.current = false; if (mounted.current) setResultsBusy(false); }
   }
 
-  const canSend = contact.deliveryStatus === 'ready' && connection.status === 'success' && connection.data.status === 'available' && !senderNeedsReview;
+  const canSend = contact.deliveryStatus === 'ready' && preview.status === 'success' && connection.status === 'success' && connection.data.status === 'available' && !senderNeedsReview;
   const shownDelivery = send.state.status === 'pending' ? '발송 요청 처리 중' :
     send.state.status === 'error' && send.state.uncertain ? '발송 결과 확인 필요' :
     deliveryLabel(contact);
   return <>
     <View style={styles.row}><Text accessibilityRole="header" style={styles.title}>연락 승인과 발송</Text>
       <Button label="연락 목록" onPress={onBack} disabled={locked} secondary /></View>
+    {readOnly && <Text style={styles.notice}>연락 내역 조회 전용입니다. 이 화면에서는 연락 승인이나 발송을 진행할 수 없습니다.</Text>}
     <Text accessibilityLiveRegion="polite" style={styles.notice}>발송 상태: {shownDelivery} · 상대 응답: {negotiationText[contact.negotiationStatus]}</Text>
     <Text style={styles.text}>{contact.channel === 'phone' ? '전화 요청 접수는 통화 연결이나 상대 수락의 증거가 아닙니다.' : 'Gmail 발송은 상대의 수락이 아닙니다.'}</Text>
-    <Text accessibilityRole="header" style={styles.section}>승인할 내용 미리보기</Text>
+    <Text accessibilityRole="header" style={styles.section}>{contact.negotiationStatus === 'applied' ? '승인된 연락 내용' : readOnly ? '저장된 연락 내용' : '승인할 내용 미리보기'}</Text>
     <View style={styles.card}>
       <Text style={styles.text}>수신자: {contact.recipientSnapshot.displayName}</Text>
       <Text style={styles.text}>{contact.channel === 'email' ? '이메일' : '전화번호'}: {contact.recipientSnapshot.address}</Text>
@@ -317,22 +333,24 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
       <Text style={styles.text}>{contact.channel === 'email' ? '본문:' : '읽을 내용:'}</Text><Text style={styles.text}>{contact.messageOrCallBrief}</Text>
       <Text style={styles.muted}>연락 요청 {contact.id} · 버전 {contact.revision}</Text>
     </View>
-    <Text accessibilityRole="header" style={styles.section}>승인 범위: 선택한 제안의 전체 변경</Text>
-    <Text style={styles.text}>상대가 아래 승인된 시간 대안 중 하나를 명확히 수락하고 현재 일정을 다시 검증한 경우에만 해당 대안을 반영할 수 있습니다.</Text>
-    {preview.status === 'loading' && <Loading>승인할 제안을 불러오는 중입니다.</Loading>}
-    {preview.status === 'error' && <><Text style={styles.error} accessibilityRole="alert">선택한 제안의 같은 버전을 확인할 수 없어 승인할 수 없습니다.</Text>
+    <Text accessibilityRole="header" style={styles.section}>{contact.negotiationStatus === 'applied' ? '승인한 대안의 처리 결과' : readOnly ? '저장된 제안 내역' : '승인 범위: 선택한 제안의 전체 변경'}</Text>
+    {contact.negotiationStatus === 'applied'
+      ? <Text style={styles.text}>서버가 승인된 대안의 일정 반영을 확인했습니다. 나머지 대안은 반영되지 않았습니다.</Text>
+      : !readOnly && <Text style={styles.text}>상대가 아래 승인된 시간 대안 중 하나를 명확히 수락하고 현재 일정을 다시 검증한 경우에만 해당 대안을 반영할 수 있습니다.</Text>}
+    {preview.status === 'loading' && <Loading>제안을 불러오는 중입니다.</Loading>}
+    {preview.status === 'error' && <><Text style={styles.error} accessibilityRole="alert">{contact.negotiationStatus === 'applied' ? '처리된 제안 내역을 확인할 수 없습니다.' : readOnly ? '제안 내역을 확인할 수 없습니다.' : '선택한 제안의 같은 버전을 확인할 수 없어 승인할 수 없습니다.'}</Text>
       <Button label="승인 범위 다시 조회" onPress={() => setPreviewAttempt((value) => value + 1)} secondary /></>}
     {preview.status === 'success' && preview.data.map((item) => <View key={item.id}>{renderProposal(item)}</View>)}
-    {contact.deliveryStatus === 'pending_approval' && decision.state.status === 'idle' && <View style={styles.actions}>
+    {!readOnly && contact.deliveryStatus === 'pending_approval' && decision.state.status === 'idle' && <View style={styles.actions}>
       <Button label="연락 내용 승인" disabled={preview.status !== 'success' || locked} onPress={() => decision.submit({ id: contact.id, contactRevision: contact.revision, decision: 'accept' })} />
       <Button label="연락 거절" disabled={locked} onPress={() => decision.submit({ id: contact.id, contactRevision: contact.revision, decision: 'reject' })} secondary />
     </View>}
     {decision.state.status === 'pending' && <Loading>연락 승인 결과를 확인하는 중입니다.</Loading>}
-    {decision.state.status === 'error' && <><ErrorNotice error={decision.state.error} />
+    {!readOnly && decision.state.status === 'error' && <><ErrorNotice error={decision.state.error} />
       {decision.state.uncertain && <Text style={styles.notice}>승인 처리 여부를 확인하지 못했습니다. 같은 요청만 다시 시도할 수 있습니다.</Text>}
       <Button label="연락 결정 동일 요청 재시도" onPress={decision.retry} />
       {!decision.state.uncertain && <Button label="결정 오류 닫기" onPress={decision.reset} secondary />}</>}
-    {contact.deliveryStatus === 'ready' && <>
+    {!readOnly && contact.deliveryStatus === 'ready' && <>
       <Text accessibilityRole="header" style={styles.section}>{contact.channel === 'phone' ? '전화 요청' : 'Gmail 발송'}</Text>
       {connection.status === 'loading' && <Loading>발신 계정 설정을 확인하는 중입니다.</Loading>}
       {connection.status === 'error' && <ErrorNotice />}
@@ -360,7 +378,7 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
       }} /> }
     </>}
     {send.state.status === 'pending' && <Loading>발송 처리 상태를 확인하는 중입니다.</Loading>}
-    {send.state.status === 'error' && <><ErrorNotice error={send.state.error} />
+    {!readOnly && send.state.status === 'error' && <><ErrorNotice error={send.state.error} />
       {send.state.uncertain && <Text style={styles.notice}>발송 결과를 확인하지 못했습니다. 먼저 상태를 조회해 주세요.</Text>}
       {send.state.uncertain && readyAfterLookup &&
         <Button label="동일 발송 요청 재시도" disabled={!canSend || lookupBusy} onPress={() => { setReadyAfterLookup(false); send.retry(); }} />}
@@ -370,7 +388,7 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
       }} secondary />}</>}
     {contact.deliveryStatus === 'sent_or_connected' && <>
       <Text accessibilityRole="header" style={styles.section}>상대 응답 확인</Text>
-      {contact.channel === 'email' && <>
+      {!readOnly && contact.channel === 'email' && <>
         {replyConnection.status === 'loading' && <Loading>Gmail 회신 조회 설정을 확인하는 중입니다.</Loading>}
         {replyConnection.status === 'error' && <Text style={styles.error} accessibilityRole="alert">Gmail 회신 조회 설정을 확인하지 못했습니다.</Text>}
         {replyConnection.status === 'success' && replyConnection.data.status === 'not_configured' &&
@@ -397,7 +415,7 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
         <Text style={styles.text}>상태: {response.outcome === 'unclear' ? '사용자 확인 필요' : response.outcome === 'accepted' ? '수락' : response.outcome === 'declined' ? '거절' : '대안 제시'}</Text>
         {response.displayText?.trim() ? <><Text style={styles.notice}>회신 원문의 일부입니다. 메일 헤더만으로 상대의 신원은 확인되지 않습니다.</Text><Text style={styles.text}>{response.displayText}</Text></>
           : <Text style={styles.muted}>확인할 수 있는 회신 본문이 없습니다.</Text>}
-        {!requiresNewProposal && contact.channel === 'email' && contact.negotiationStatus === 'needs_user_review' && response.outcome === 'unclear' && response.displayText?.trim() && response.reviewReason === 'sender_unverified' && <>
+        {!readOnly && !requiresNewProposal && contact.channel === 'email' && contact.negotiationStatus === 'needs_user_review' && response.outcome === 'unclear' && response.displayText?.trim() && response.reviewReason === 'sender_unverified' && <>
           <Text style={styles.text}>회신을 직접 확인한 뒤 상대가 수락한 허용 대안을 선택해 주세요.</Text>
           {contact.allowedOptions.map((option) => <Button key={option.optionId} label={`${resultChoice?.responseId === response.id && resultChoice.optionId === option.optionId ? '선택됨: ' : '선택: '}${option.optionId} · 제안 ${option.proposalId}`} disabled={locked} onPress={() => setResultChoice({ responseId: response.id, optionId: option.optionId })} secondary />)}
           {resultChoice?.responseId === response.id && <Button label="회신 확인 후 선택한 대안 재승인" disabled={locked || confirmResponse.state.status !== 'idle'} onPress={() => confirmResponse.submit({ id: contact.id, responseId: response.id, contactRevision: contact.revision, selectedOptionId: resultChoice.optionId })} />}
@@ -408,7 +426,7 @@ function ContactDetail({ client, proposalClient, contact, renderProposal, onChan
         <Text style={styles.notice}>일정이나 승인 내용이 변경되었거나 대안이 만료되어 반영하지 않았습니다. 현재 일정으로 새 제안을 요청해 주세요.</Text>
         <Button label="저장된 회신 다시 조회" onPress={() => { confirmResponse.reset(); void lookupResponses(); }} secondary />
       </>}
-      {confirmResponse.state.status === 'error' && <><ErrorNotice error={confirmResponse.state.error} />
+      {!readOnly && confirmResponse.state.status === 'error' && <><ErrorNotice error={confirmResponse.state.error} />
         {confirmResponse.state.uncertain && <Text style={styles.notice}>일정 반영 결과를 확인하지 못했습니다. 같은 요청으로 확인해 주세요.</Text>}
         <Button label="동일 재승인 요청 재시도" onPress={confirmResponse.retry} />
         {!confirmResponse.state.uncertain && <Button label="재승인 오류 닫기" onPress={confirmResponse.reset} secondary />}</>}
@@ -453,11 +471,14 @@ export default function ContactPanel({ api, proposal, proposalClient, renderProp
   const unresolvedDelivery = list.status === 'success' && list.data.some((item) =>
     item.deliveryStatus === 'submitting' || item.deliveryStatus === 'outcome_unknown');
   const incompleteHistory = list.status === 'success' && list.data.length >= 100;
+  const appliedHistory = list.status === 'success' && list.data.some((item) => item.negotiationStatus === 'applied');
+  const historyOnly = proposal.status === 'applied' || proposal.status === 'stale';
   return <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
     {view === 'list' && <>
       <View style={styles.row}><Text accessibilityRole="header" style={styles.title}>연락 준비</Text><Button label="제안으로" onPress={onBack} secondary /></View>
       <Text style={styles.text}>이 제안에 연결된 연락을 확인하거나 새 초안을 작성합니다.</Text>
-      <Button label="새 연락 초안 작성" onPress={() => setView('draft')} disabled={list.status !== 'success' || unresolvedDelivery || incompleteHistory} />
+      <Button label="새 연락 초안 작성" onPress={() => setView('draft')} disabled={list.status !== 'success' || unresolvedDelivery || incompleteHistory || appliedHistory || !['pending', 'awaiting_contact'].includes(proposal.status)} />
+      {appliedHistory && <Text style={styles.notice}>일정이 반영된 연락입니다. 기존 연락 내역을 확인할 수 있습니다.</Text>}
       {unresolvedDelivery && <Text style={styles.notice}>처리 중이거나 결과가 불명인 발송이 있습니다. 기존 연락의 상태만 조회해 주세요.</Text>}
       {incompleteHistory && <Text style={styles.notice}>최근 100건만 조회되어 이전 발송 상태를 확인할 수 없습니다. 새 초안은 만들 수 없습니다.</Text>}
       {list.status === 'loading' && <Loading>연락 목록을 불러오는 중입니다.</Loading>}
@@ -478,7 +499,7 @@ export default function ContactPanel({ api, proposal, proposalClient, renderProp
     {view === 'detail-error' && <><ErrorNotice /><Button label="연락 다시 조회" onPress={() => open(selectedId)} />
       <Button label="연락 목록" onPress={backToList} secondary /></>}
     {view === 'detail' && selected && <ContactDetail key={`${selected.id}:${detailGeneration}`}
-      client={client} proposalClient={proposalClient} contact={selected} renderProposal={renderProposal} onChange={setSelected}
+      client={client} proposalClient={proposalClient} contact={selected} historyOnly={historyOnly} renderProposal={renderProposal} onChange={setSelected}
       onReconcile={(item) => { setSelected(item); setDetailGeneration((value) => value + 1); }} onScheduleChanged={onScheduleChanged} onBack={backToList} />}
   </ScrollView>;
 }

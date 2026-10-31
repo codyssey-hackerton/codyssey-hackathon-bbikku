@@ -130,7 +130,7 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     <Button label="연결 및 캘린더 조회" onPress={() => { void readCalendars(); }} disabled={locked} />
     {connection && <Text style={styles.body}>{connection.status === 'available' ? `연결됨${connection.accountLabel ? `: ${connection.accountLabel}` : ''}` : '캘린더 연결이 설정되지 않았습니다.'}</Text>}
     {connection?.status === 'available' && calendars.length === 0 && !loading && !error && <Text style={styles.body}>조회된 캘린더가 없습니다.</Text>}
-    {calendars.map(calendar => <Pressable key={calendar.id} accessibilityRole="radio" accessibilityState={{ checked: calendarId === calendar.id, disabled: locked }} disabled={locked}
+    {calendars.map(calendar => <Pressable key={calendar.id} accessibilityRole="radio" aria-checked={calendarId === calendar.id} accessibilityState={{ checked: calendarId === calendar.id, disabled: locked }} disabled={locked}
       onPress={() => { setCalendarId(calendar.id); clearEvents(); }} style={[styles.choice, calendarId === calendar.id && styles.chosen, locked && styles.disabled]}>
       <Text>{calendar.summary || '(제목 없는 캘린더)'}{calendar.timeZone ? ` · ${calendar.timeZone}` : ''}</Text>
     </Pressable>)}
@@ -147,7 +147,7 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     {events && <>
       {events.unsupportedCount > 0 && <Text accessibilityRole="alert" style={styles.error}>지원하지 않는 일정 {events.unsupportedCount}개는 목록에 포함되지 않았습니다.</Text>}
       {events.events.length === 0 && <Text style={styles.body}>이 기간에 가져올 수 있는 일정이 없습니다.</Text>}
-      {events.events.map(event => <Pressable key={event.id} accessibilityRole="checkbox" accessibilityState={{ checked: selected.has(event.id), disabled: locked }} disabled={locked}
+      {events.events.map(event => <Pressable key={event.id} accessibilityRole="checkbox" aria-checked={selected.has(event.id)} accessibilityState={{ checked: selected.has(event.id), disabled: locked }} disabled={locked}
         onPress={() => setSelected(previous => { const next = new Set(previous); if (next.has(event.id)) next.delete(event.id); else next.add(event.id); return next; })}
         style={[styles.choice, selected.has(event.id) && styles.chosen, locked && styles.disabled]}>
         <Text style={styles.label}>{selected.has(event.id) ? '☑' : '☐'} {event.title || '(제목 없는 일정)'}</Text>
