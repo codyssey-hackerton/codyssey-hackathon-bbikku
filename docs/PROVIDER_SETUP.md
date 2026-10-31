@@ -75,6 +75,20 @@ API를 해당 코드·설정으로 실행한 후 연락 화면의 **회신 확�
 
 Twilio 추가 작업은 사용자의 요청으로 보류한다. 아래 계정 확인 이력과 구현 설명은 보존한다.
 
+## ClawOps 전화 전환 — 2026-11-01
+
+사용자 요청에 따라 신규 전화 연결 화면의 기본 제공자를 ClawOps로 바꾼다. 기존 Twilio 경로와 저장 자격은 보존한다. 현재 제공된 계정·키로 공식 번호 목록 API HTTP200과 보유 발신번호 1개를 확인했으며 실제 발신은 하지 않았다. 이는 API 인증·번호 조회 성공이며 웹훅이나 실통화 성공은 아니다.
+
+앱의 **전화 외부 연결**에서 ClawOps 계정 ID, API 키, 별도 Webhook Signing Secret, 계정 소유 발신번호(E.164)를 입력한다. API 키와 서명키는 서로 다르며, 서명키는 ClawOps 대시보드의 개발자 → 웹훅에서 확인한다. 사용자별 서버 private 자격 디렉터리에 0600으로 저장하고 브라우저 영속 저장·Git·공개 로그에 남기지 않는다. 번호 조회로 API 키·소유권을 확인할 수 있지만 입력한 서명키의 실제 일치는 서명된 제공자 콜백으로 별도 검증해야 한다.
+
+전화는 기존과 같이 제안 기반 연락 초안 → 내용·수신자·허용 대안 승인 → 발신번호 확인 → **전화 발신** 단계에서만 시도한다. 서버는 `https://api.claw-ops.com/v1/accounts/{accountId}/calls`에 Bearer 인증과 `To/From/Url/Timeout` JSON을 보낸다. 국내 번호는 제공자 전송 시에만 한국 국내 형식으로 바꾸고 앱·DB는 E.164를 유지한다. `201/callId`는 접수 증거이며 연결·청취·수락 증거가 아니다. 불명·timeout 뒤 자동 재발신하지 않는다.
+
+콜백은 기존 `PIKKU_VOICE_PUBLIC_BASE_URL`과 `PIKKU_VOICE_SESSION_KEY` 설정을 재사용하는 `/v1/voice/clawops/:token`이다. 원본 form의 HMAC-SHA256 서명, 토큰, 통화·계정·연락·번호와 최신 승인 대안을 확인한다. VoiceML은 설명·대안 낭독과 키패드 선택·명시적 재확인을 지원한다. **자유로운 양방향 음성 대화는 이 증분에 포함하지 않는다.** 무응답은 자동 수락하지 않으며 기존 상대 회신/최신 일정 검증 경계를 유지한다. 안내는 Gather 밖에서 재생하나 선입력 버퍼·빈 Gather의 실제 서비스 동작과 서명키 일치는 실통화 미검증이다. 무응답 action이 없어 현재 연락 상태가 awaiting_response로 남을 수 있다.
+
+Managed Agent는 별도 agent ID·음성 모델·이벤트 권한 및 통화별 CallContext가 필요하고 VoiceML과 발신 모드가 다르다. 계정 설정이나 동작을 실제 확인하기 전 사용 가능하다고 단정하지 않는다. 현재 전화의 사람 확인 후 적용 경로는 Gmail 전용 confirm API와 같지 않으며 음성 결과를 이메일 응답으로 위장해 통과시키지 않는다.
+
+공식 근거: [발신](https://docs.claw-ops.com/api-reference/claw-ops-api/calls/create-call), [번호 조회](https://docs.claw-ops.com/api-reference/claw-ops-api/numbers/list-numbers), [VoiceML 지원 범위](https://platform.claw-ops.com/docs/build/voiceml), [서명 검증](https://platform.claw-ops.com/docs/webhooks/signature-verification).
+
 ## 2. Twilio 계정 연결·전화
 
 ### 실제 자격 확인 — 2026-10-31

@@ -144,14 +144,51 @@ function mockApi(initial: any = { status: 'not_configured', senderNumber: null }
   return { api, calls };
 }
 function fill(view: any, number = '+15550000001') {
+  press(view, 'Twilio 선택');
   enter(view, '전화 계정 SID', 'test-sid'); enter(view, '전화 인증 토큰', 'test-token'); enter(view, '발신 전화번호', number);
 }
+
+test('기본 ClawOps 설정은 모든 자격과 E.164 번호가 필요하고 전송 즉시 입력을 비운다', async t => {
+  const { PhoneConnectionPanel, operationGuard } = await components;
+  const mock = mockApi(); const pending = deferred<any>(); mock.api.postHook = () => pending.promise;
+  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
+  await view.settle();
+  assert.equal(button(view, 'ClawOps 선택').props.accessibilityState.checked, true);
+  assert.match(textOf(view.tree), /키패드 선택과 재확인/);
+  for (const label of ['ClawOps 계정 ID', 'ClawOps API 키', 'ClawOps 서명 비밀']) assert.equal(input(view, label).props.secureTextEntry, true);
+  enter(view, 'ClawOps 계정 ID', 'test-account'); enter(view, 'ClawOps API 키', 'test-key'); enter(view, '발신 전화번호', '+15550000001');
+  assert.equal(button(view, '전화 연결 설정').props.disabled, true);
+  enter(view, 'ClawOps 서명 비밀', 'test-signing'); press(view, '전화 연결 설정');
+  for (const label of ['ClawOps 계정 ID', 'ClawOps API 키', 'ClawOps 서명 비밀', '발신 전화번호']) assert.equal(input(view, label).props.value, '');
+  const call = mock.calls.find((item: any) => item.method === 'POST');
+  assert.deepEqual({ ...call.body, requestId: 'request' }, { requestId: 'request', provider: 'clawops', accountId: 'test-account', apiKey: 'test-key', signingSecret: 'test-signing', fromNumber: '+15550000001' });
+  assert.equal(operationGuard.hasUnresolved(), true);
+  pending.resolve({ status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: call.body.requestId }); await view.settle();
+  assert.match(textOf(view.tree), /제공자: ClawOps/); assert.equal(operationGuard.hasUnresolved(), false);
+});
+
+test('ClawOps 요청의 다른 제공자 응답과 불명 복구는 성공으로 처리하지 않는다', async t => {
+  const { PhoneConnectionPanel, operationGuard } = await components;
+  const mock = mockApi(); mock.api.postHook = (_path: string, body: any) => ({ status: 'available', provider: 'twilio', senderNumber: body.fromNumber, lastRequestId: body.requestId });
+  const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack() {} }); t.after(() => view.unmount());
+  await view.settle(); enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key');
+  enter(view, 'ClawOps 서명 비밀', 'signing'); enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
+  const requestId = mock.calls.find((item: any) => item.method === 'POST').body.requestId;
+  assert.equal(operationGuard.hasUnresolved(), true); assert.doesNotMatch(textOf(view.tree), /전화 연결을 확인했습니다/);
+  for (const provider of [undefined, 'twilio']) {
+    mock.api.status = { status: 'available', senderNumber: '+15550000001', lastRequestId: requestId, ...(provider ? { provider } : {}) };
+    press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
+  }
+  mock.api.status = { status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: requestId };
+  press(view, '전화 연결 상태 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
+});
 
 test('연결 상태 조회와 E.164 검증 후 명시적 설정만 전송하고 즉시 입력을 비운다', async t => {
   const { PhoneConnectionPanel, operationGuard } = await components;
   const mock = mockApi(); const pending = deferred<any>(); mock.api.postHook = () => pending.promise; let backs = 0;
   const view = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => backs++ }); t.after(() => view.unmount());
   await view.settle(); assert.match(textOf(view.tree), /설정되지 않았습니다/);
+  press(view, 'Twilio 선택');
   assert.equal(input(view, '전화 계정 SID').props.secureTextEntry, true); assert.equal(input(view, '전화 인증 토큰').props.secureTextEntry, true);
   fill(view, '01012345678'); assert.equal(button(view, '전화 연결 설정').props.disabled, true);
   enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정');
@@ -241,5 +278,5 @@ test('인증 실패는 안전한 문구만 보여주고 뒤로 이동 후 재진
   assert.match(textOf(view.tree), /연결된 세션을 확인/); assert.doesNotMatch(textOf(view.tree), /sensitive server error|test-token/);
   press(view, '뒤로'); assert.equal(backs, 1); view.unmount();
   const reopened = harness.renderer(PhoneConnectionPanel, { api: mock.api, onBack: () => {} }); t.after(() => reopened.unmount());
-  await reopened.settle(); assert.equal(input(reopened, '전화 인증 토큰').props.value, ''); assert.equal(input(reopened, '전화 계정 SID').props.value, '');
+  await reopened.settle(); press(reopened, 'Twilio 선택'); assert.equal(input(reopened, '전화 인증 토큰').props.value, ''); assert.equal(input(reopened, '전화 계정 SID').props.value, '');
 });

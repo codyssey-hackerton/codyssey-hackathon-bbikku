@@ -3,10 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { validateFreshContact, type ContactRequest } from './contact-service.ts';
 import { ContactResponseService } from './contact-response.ts';
-import { PhoneConnections } from './phone-connection.ts';
+import { PhoneConnections, normalizePhoneNumber } from './phone-connection.ts';
 import type { PlanningService } from './planning-service.ts';
 import type { PlanningStore, UserPlanningState } from './planning-store.ts';
 import { verifyTwilioSignature, type TwilioFormParams } from './voice-signature.ts';
+import { verifyClawOpsSignature } from './clawops-signature.ts';
 import { VoiceTokens } from './voice-token.ts';
 import type { VoiceClassifier, VoiceOption } from './voice-model.ts';
 import { confirmVoiceTwiml, earlyRetryTwiml, finishVoiceTwiml, optionsVoiceTwiml } from './voice-twiml.ts';
@@ -17,9 +18,10 @@ const Session = z.strictObject({ version: z.literal(1), contactId: z.string(), c
   selectedOptionId: z.string().nullable(), events: z.record(z.string(), Event),
   pending: z.strictObject({ turn: z.number().int(), hash: z.string(), claim: z.string() }).nullable() });
 type Session = z.infer<typeof Session>;
-type HandlerInput = { token: string; rawQuery: string; contentType: string; signature: string; params: TwilioFormParams };
+type Provider = 'twilio' | 'clawops';
+type HandlerInput = { token: string; rawQuery: string; contentType: string; signature: string; params: TwilioFormParams; provider?: Provider };
 type Output = { status: number; twiml: string };
-const end = () => finishVoiceTwiml('확인이 필요하여 담당자에게 전달하겠습니다. 감사합니다.');
+const end = (provider: Provider = 'twilio') => finishVoiceTwiml('확인이 필요하여 담당자에게 전달하겠습니다. 감사합니다.', provider);
 const denied = (): Output => ({ status: 403, twiml: '<Response><Hangup/></Response>' });
 const success = (twiml: string): Output => ({ status: 200, twiml });
 
@@ -29,9 +31,13 @@ function single(params: TwilioFormParams, key: string): string | undefined {
 function digest(params: TwilioFormParams): string {
   return createHash('sha256').update(JSON.stringify(Object.keys(params).sort().map(key => [key, params[key]]))).digest('hex');
 }
-function bound(contact: ContactRequest | undefined, sid: string, from: string, to: string): boolean {
+function validCallId(provider: Provider, sid: string): boolean {
+  return provider === 'twilio' ? /^CA[0-9a-f]{32}$/i.test(sid) : sid.length > 0 && sid.length <= 200 && sid.trim() === sid &&
+    !/[\x00-\x1f\x7f-\x9f]/u.test(sid) && Buffer.from(sid, 'utf8').toString('utf8') === sid;
+}
+function bound(contact: ContactRequest | undefined, sid: string, from: string, to: string, provider: Provider): boolean {
   return !!contact && contact.channel === 'phone' && contact.recipientSnapshot.address === to &&
-    /^CA[0-9a-f]{32}$/i.test(sid) && !!from && contact.providerOperationId === sid && contact.deliveryStatus === 'sent_or_connected';
+    validCallId(provider, sid) && !!from && contact.providerOperationId === sid && contact.deliveryStatus === 'sent_or_connected';
 }
 export async function approvedVoiceOptions(store: PlanningStore, planning: PlanningService, userId: string, state: UserPlanningState,
   contact: ContactRequest, clock: () => Date, phase: 'before_call' | 'webhook' = 'webhook'): Promise<VoiceOption[]> {
@@ -79,42 +85,59 @@ export class VoiceWebhook {
   private readonly responses: ContactResponseService;
   private readonly clock: () => Date;
   constructor(private readonly options: { store: PlanningStore; planning: PlanningService; connections: PhoneConnections;
-    responseService: ContactResponseService; model: VoiceClassifier; publicBaseUrl: string; sessionKey: string; clock?: () => Date }) {
+    responseService: ContactResponseService; model?: VoiceClassifier; publicBaseUrl: string; sessionKey: string; clock?: () => Date }) {
     this.tokens = new VoiceTokens(options.publicBaseUrl, options.sessionKey);
     this.responses = options.responseService;
     this.clock = options.clock ?? (() => new Date());
   }
 
   async handle(input: HandlerInput): Promise<Output> {
+    const provider = input.provider ?? 'twilio';
     const query = /^\?turn=([0-8])&retry=([0-3])$/.exec(input.rawQuery);
-    if (!this.options.store.durable || !query || !/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(input.contentType) ||
+    if (!['twilio', 'clawops'].includes(provider) || (provider === 'twilio' && !this.options.model) || !this.options.store.durable || !query || !/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(input.contentType) ||
         !input.params || typeof input.params !== 'object' || Array.isArray(input.params)) return denied();
-    if (['AccountSid', 'CallSid', 'From', 'To', 'Digits', 'SpeechResult'].some(key =>
+    const identityFields = provider === 'clawops' ? ['AccountId', 'CallId', 'CallStatus', 'Direction'] : ['AccountSid', 'CallSid'];
+    if ([...identityFields, 'From', 'To', 'Digits', 'SpeechResult'].some(key =>
       input.params[key] !== undefined && typeof input.params[key] !== 'string')) return denied();
     const identity = this.tokens.read(input.token, this.clock());
     if (!identity) return denied();
     const credential = await this.options.connections.read(identity.userId).catch(() => undefined);
-    if (!credential || !verifyTwilioSignature(credential.authToken, input.signature,
-      this.tokens.publicBaseUrl + `/v1/voice/twilio/${input.token}` + input.rawQuery, input.params)) return denied();
-    const sid = single(input.params, 'CallSid'); const account = single(input.params, 'AccountSid');
-    const from = single(input.params, 'From'); const to = single(input.params, 'To');
-    if (!sid || account !== credential.accountSid || from !== credential.fromNumber || !to || !/^CA[0-9a-f]{32}$/i.test(sid)) return denied();
     const turn = Number(query[1]); const retry = Number(query[2]);
+    const externalUrl = this.tokens.publicBaseUrl + `/v1/voice/${provider}/${input.token}` + input.rawQuery;
+    if (!credential || (provider === 'clawops'
+      ? credential.provider !== 'clawops' || !verifyClawOpsSignature(credential.signingSecret, input.signature, externalUrl, input.params)
+      : credential.provider === 'clawops' || !verifyTwilioSignature(credential.authToken, input.signature, externalUrl, input.params))) return denied();
+    // Normalize only after verifying the exact original provider parameters.
+    const sid = single(input.params, provider === 'clawops' ? 'CallId' : 'CallSid');
+    const account = single(input.params, provider === 'clawops' ? 'AccountId' : 'AccountSid');
+    const sourceFrom = single(input.params, 'From'), sourceTo = single(input.params, 'To');
+    const from = provider === 'clawops' && sourceFrom ? normalizePhoneNumber(sourceFrom) : sourceFrom;
+    const to = provider === 'clawops' && sourceTo ? normalizePhoneNumber(sourceTo) : sourceTo;
+    if (!sid || !validCallId(provider, sid) || !from || from !== credential.fromNumber || !to) return denied();
+    if (provider === 'clawops') {
+      const initialCallback = turn === 0 && retry === 0;
+      if (credential.provider !== 'clawops' || (initialCallback ? account !== credential.accountId : account !== undefined && account !== credential.accountId) ||
+          single(input.params, 'Direction') !== 'outbound' || (initialCallback ? single(input.params, 'CallStatus') !== 'in-progress'
+            : single(input.params, 'CallStatus') !== undefined && single(input.params, 'CallStatus') !== 'in-progress') ||
+          input.params.SpeechResult !== undefined) return denied();
+    } else if (credential.provider === 'clawops' || account !== credential.accountSid) return denied();
     const hash = digest(input.params);
     const existing = await this.options.store.read(identity.userId);
     const initial = existing.contactRequests.get(identity.contactId);
-    if (!bound(initial, sid, from, to)) {
+    if (!bound(initial, sid, from, to, provider)) {
       if (initial?.channel === 'phone' && initial.recipientSnapshot.address === to && initial.deliveryStatus === 'submitting' &&
           initial.providerOperationId === null && turn === 0 && retry < 3) {
-        return success(earlyRetryTwiml(this.tokens.url(input.token, 0, retry + 1)));
+        return success(earlyRetryTwiml(this.tokens.url(input.token, 0, retry + 1, provider), provider));
       }
       return denied();
     }
     try {
       const stage = await this.options.store.atomic(identity.userId, async () => {
+        const latestCredential = await this.options.connections.read(identity.userId).catch(() => undefined);
+        if (!isDeepStrictEqual(latestCredential, credential)) return { result: denied() };
         const state = await this.options.store.read(identity.userId);
         const contact = state.contactRequests.get(identity.contactId);
-        if (!contact || !bound(contact, sid, from, to)) return { result: denied() };
+        if (!contact || !bound(contact, sid, from, to, provider)) return { result: denied() };
         const raw = state.voiceSessions.get(identity.sessionId);
         const parsed = raw === undefined ? null : Session.safeParse(raw);
         if (parsed && !parsed.success) return { result: denied() };
@@ -126,7 +149,7 @@ export class VoiceWebhook {
         if (session?.pending) {
           if (session.pending.turn !== turn || session.pending.hash !== hash) return { result: denied() };
           await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'interrupted');
-          const twiml = end();
+          const twiml = end(provider);
           await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', pending: null,
             events: { ...session.events, [turn]: { hash, twiml } } });
           return { result: success(twiml) };
@@ -136,14 +159,14 @@ export class VoiceWebhook {
         try { options = await approvedVoiceOptions(this.options.store, this.options.planning, identity.userId, state, contact, this.clock); }
         catch {
           await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'stale_or_invalid_options');
-          const twiml = end();
+          const twiml = end(provider);
           await this.save(identity.userId, identity.sessionId, { version: 1, contactId: contact.id, callSid: sid, phase: 'done',
             turn: Math.max(1, turn), selectedOptionId: null, pending: null, events: { ...(session?.events ?? {}), [turn]: { hash, twiml } } });
           return { result: success(twiml) };
         }
-        const nextUrl = this.tokens.url(input.token, Math.min(turn + 1, 8));
+        const nextUrl = this.tokens.url(input.token, Math.min(turn + 1, 8), 0, provider);
         if (!session) {
-          const twiml = optionsVoiceTwiml({ actionUrl: nextUrl, introduction: contact.messageOrCallBrief, options });
+          const twiml = optionsVoiceTwiml({ actionUrl: nextUrl, introduction: contact.messageOrCallBrief, options, provider });
           await this.save(identity.userId, identity.sessionId, { version: 1, contactId: contact.id, callSid: sid, phase: 'select', turn: 1,
             selectedOptionId: null, pending: null, events: { '0': { hash, twiml } } });
           return { result: success(twiml) };
@@ -153,18 +176,18 @@ export class VoiceWebhook {
           if (digits === '1' && !speech && session.selectedOptionId && options.some(option => option.optionId === session.selectedOptionId)) {
             const result = await this.record(identity.userId, contact, sid, turn, 'accepted', session.selectedOptionId, 'confirmed_dtmf');
             const twiml = finishVoiceTwiml(result.contactRequest.negotiationStatus === 'applied'
-              ? '선택한 시간을 확인했습니다. 감사합니다.' : '변경안은 담당자가 다시 확인하겠습니다. 감사합니다.');
+              ? '선택한 시간을 확인했습니다. 감사합니다.' : '변경안은 담당자가 다시 확인하겠습니다. 감사합니다.', provider);
             await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', pending: null, events: { ...session.events, [turn]: { hash, twiml } } });
             return { result: success(twiml) };
           }
           await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'confirmation_missing');
-          const twiml = end();
+          const twiml = end(provider);
           await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', pending: null, events: { ...session.events, [turn]: { hash, twiml } } });
           return { result: success(twiml) };
         }
         if (turn >= 6 || digits === '0' || (digits && speech) || (digits && !/^[1-9]$/.test(digits))) {
           await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'voice_review');
-          const twiml = end();
+          const twiml = end(provider);
           await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', pending: null, events: { ...session.events, [turn]: { hash, twiml } } });
           return { result: success(twiml) };
         }
@@ -172,18 +195,18 @@ export class VoiceWebhook {
           const option = options[Number(digits) - 1];
           if (!option) {
             await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'outside_approved_options');
-            const twiml = end();
+            const twiml = end(provider);
             await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', events: { ...session.events, [turn]: { hash, twiml } } });
             return { result: success(twiml) };
           }
-          const twiml = confirmVoiceTwiml({ actionUrl: nextUrl, label: option.label });
+          const twiml = confirmVoiceTwiml({ actionUrl: nextUrl, label: option.label, provider });
           await this.save(identity.userId, identity.sessionId, { ...session, phase: 'confirm', turn: turn + 1,
             selectedOptionId: option.optionId, events: { ...session.events, [turn]: { hash, twiml } } });
           return { result: success(twiml) };
         }
         if (!speech?.trim() || speech.length > 2000) {
           await this.record(identity.userId, contact, sid, turn, 'unclear', null, 'voice_unclear');
-          const twiml = end();
+          const twiml = end(provider);
           await this.save(identity.userId, identity.sessionId, { ...session, phase: 'done', events: { ...session.events, [turn]: { hash, twiml } } });
           return { result: success(twiml) };
         }
@@ -197,13 +220,15 @@ export class VoiceWebhook {
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const classification = await Promise.race([
-        this.options.model.classify({ transcript: speech, options }, controller.signal).catch(() => ({ kind: 'unclear' as const })),
+        this.options.model!.classify({ transcript: speech, options }, controller.signal).catch(() => ({ kind: 'unclear' as const })),
         new Promise<{ kind: 'unclear' }>(resolve => { timer = setTimeout(() => { controller.abort(); resolve({ kind: 'unclear' }); }, 2800); }),
       ]);
       if (timer) clearTimeout(timer);
       return await this.options.store.atomic(identity.userId, async () => {
+        const latestCredential = await this.options.connections.read(identity.userId).catch(() => undefined);
+        if (!isDeepStrictEqual(latestCredential, credential)) return denied();
         const state = await this.options.store.read(identity.userId); const contact = state.contactRequests.get(identity.contactId);
-        if (!contact || !bound(contact, sid, from, to)) return denied();
+        if (!contact || !bound(contact, sid, from, to, provider)) return denied();
         const parsed = Session.safeParse(state.voiceSessions.get(identity.sessionId));
         if (!parsed.success) return denied();
         const session = parsed.data;
@@ -227,7 +252,7 @@ export class VoiceWebhook {
         await this.save(identity.userId, identity.sessionId, { ...next, events: { ...next.events, [turn]: { hash, twiml } } });
         return success(twiml);
       });
-    } catch { return { status: 503, twiml: end() }; }
+    } catch { return { status: 503, twiml: end(provider) }; }
   }
   private async save(userId: string, sessionId: string, session: Session) {
     await this.options.store.transaction(userId, state => { state.voiceSessions.set(sessionId, session); });

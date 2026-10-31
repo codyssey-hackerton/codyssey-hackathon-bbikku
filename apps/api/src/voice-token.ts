@@ -35,9 +35,9 @@ export class VoiceTokens {
       return now.getTime() < payload.expiresAt ? payload : null;
     } catch { return null; }
   }
-  url(token: string, turn: number, retry = 0): string {
+  url(token: string, turn: number, retry = 0, provider: 'twilio' | 'clawops' = 'twilio'): string {
     if (!/^[A-Za-z0-9_-]{1,2048}$/.test(token) || !Number.isInteger(turn) || turn < 0 || turn > 8 ||
-        !Number.isInteger(retry) || retry < 0 || retry > 3) throw new Error('VOICE_URL_INVALID');
-    return `${this.publicBaseUrl}/v1/voice/twilio/${token}?turn=${turn}&retry=${retry}`;
+        !Number.isInteger(retry) || retry < 0 || retry > 3 || !['twilio', 'clawops'].includes(provider)) throw new Error('VOICE_URL_INVALID');
+    return `${this.publicBaseUrl}/v1/voice/${provider}/${token}?turn=${turn}&retry=${retry}`;
   }
 }

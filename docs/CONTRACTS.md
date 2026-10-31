@@ -196,19 +196,23 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 | `GET /v1/calendar/calendars` | 인증 | `{calendars: [{id, summary, timeZone?}]}` |
 | `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
 | `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
-| `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null}`; 비밀 반환 없음 |
-| `POST /v1/phone-connection` | `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
+| `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio}`; 비밀 반환 없음 |
+| `POST /v1/phone-connection` | ClawOps `{requestId, provider:"clawops", accountId, apiKey, signingSecret, fromNumber}` / 기존 Twilio `{requestId, accountSid, authToken, fromNumber}` | 위 연결 상태. HTTPS 또는 명시적 로컬 개발 loopback만, 사용자별 서버 비밀 저장 |
 | `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
 
 **Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
 
 가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
 
-**전화:** Account SID/Auth Token과 계정 소유 voice 발신번호를 입력한다. 현재 API Key SID/Secret·검증된 외부 caller ID는 입력 지원 범위가 아니다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 읽기 전용 번호 조회이며 발신 승인이 아니다. 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
+**전화:** 신규 연결은 ClawOps를 기본으로 하며 계정 ID·API 키·별도 웹훅 서명키와 계정 소유 발신번호를 입력한다. 기존 Twilio의 Account SID/Auth Token 입력과 저장 파일은 보존한다. 번호는 앱·저장소에서 E.164를 유지하고 ClawOps 전송 시 한국 번호를 국내 형식으로 바꾼다. 자격증명은 사용자별 서버 private 디렉터리/0600 파일에 저장하고 일정 JSONB·응답·로그·클라이언트 영속 저장에 넣지 않는다. 연결 확인은 읽기 전용 번호 조회이며 서명키의 실제 제공자 일치나 실통화 성공을 검증하지 않는다. 발신 승인이 아니며 계정 설정 POST와 실제 발신 모두 PostgreSQL 등 지속 저장소가 필요하다.
 
 전화 설정 POST는 기존 사용자별 PG 잠금 안에서 제공자 번호 조회(15초 timeout)와 파일 저장을 순서대로 처리한다. 같은 사용자의 다른 쓰기는 그동안 기다릴 수 있으며 다른 사용자와는 분리된다. 다중 인스턴스는 같은 DB와 자격 저장 위치를 전제로 한다. 잠금은 활성 DB 트랜잭션 동안의 순서 제어이며 파일 저장과 DB commit이 원자적이라는 뜻은 아니다. 원자 파일에 저장된 `lastRequestId`와 발신번호가 둘 다 요청과 일치할 때만 클라이언트가 응답 유실을 해소한다. 번호만 같은 이전 연결을 새 설정 성공으로 간주하지 않는다.
 
-기존 단방향 TTS 어댑터를 바탕으로 §9의 제한된 양방향 경로를 연결한다. 발송 채널을 바꾸어 승인 경계를 우회할 수 없고 채널 불일치는 부작용 전에 거절한다. `sent_or_connected`는 Twilio API 접수를 의미하며 실제 통화 연결/본문 청취/상대 수락의 증거가 아니다. 실패·결과 불명은 자동 재발신하지 않는다. 불특정 수신 전화에 응대하는 기능은 포함하지 않는다.
+기존 승인 경계를 유지해 §9의 제한된 양방향 경로를 연결한다. 발송 채널을 바꾸어 승인 경계를 우회할 수 없고 채널 불일치는 부작용 전에 거절한다. `sent_or_connected`는 선택한 전화 제공자의 API 접수를 의미하며 실제 통화 연결/본문 청취/상대 수락의 증거가 아니다. 실패·결과 불명은 자동 재발신하지 않는다. 불특정 수신 전화에 응대하는 기능은 포함하지 않는다.
+
+**ClawOps 콜백:** `POST /v1/voice/clawops/:token`은 `X-Signature`의 HMAC-SHA256을 신뢰된 공개 URL·원본 form 파라미터·별도 서명키로 검증한 뒤 필드를 정규화한다. `CallId`·계정·발신/수신 번호를 암호화 토큰의 사용자·연락과 결합한다. 최초 요청에는 `AccountId`가 필요하며 후속 action/초기 대기 Redirect에는 없는 것이 공식 계약이다. 단계를 건너뛰거나 다른 통화/계정으로 재사용할 수 없다. VoiceML은 승인된 설명·대안 낭독→키패드 선택→선택 내용 복창→명시적 키패드 재확인만 지원한다. ClawOps에서는 안내를 Gather 밖에서 재생하고 빈 Gather로 입력받는다. 자유 음성 대화나 STT를 지원한다고 표시하지 않으며, 무응답·불명확한 응답은 자동 수락이 아니다. 무응답이면 제공자 action이 호출되지 않아 현재 awaiting_response로 남을 수 있다. 기존 Twilio 경로와 서명은 별개로 유지한다.
+
+발신 직전·동일 콜백 처리 중 자격 변경은 재확인한다. 전체 통화 수명에 최초 자격 fingerprint를 고정하는 정책은 없다. 같은 계정·발신번호·서명키를 유지한 API 키 교체만으로 진행 중 통화를 취소한다고 보장하지 않는다.
 
 ## 9. 상대 회신 조회·확인·조건부 일정 반영
 

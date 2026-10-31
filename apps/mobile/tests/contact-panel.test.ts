@@ -735,6 +735,7 @@ test('전화 연결 시 자격 증명 입력은 즉시 비우고 미결 요청 �
   const pending = deferred<any>(); mock.api.postHook = (path: string) => path === '/v1/phone-connection' ? pending.promise : undefined;
   const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
   await openContact(view);
+  press(view, 'Twilio 선택');
   assert.equal(input(view, '전화 계정 SID').props.secureTextEntry, true);
   assert.equal(input(view, '전화 인증 토큰').props.secureTextEntry, true);
   enter(view, '전화 계정 SID', 'test-sid'); enter(view, '전화 인증 토큰', 'test-token'); enter(view, '발신 전화번호', '+15550000001');
@@ -753,6 +754,24 @@ test('전화 연결 시 자격 증명 입력은 즉시 비우고 미결 요청 �
   press(view, '발신 번호 다시 확인'); await view.settle();
   assert.equal(operationGuard.hasUnresolved(), false);
   assert.equal(button(view, '전화 요청').props.disabled, false);
+  assert.equal(posts(mock.calls, '/call').length, 0);
+});
+
+test('연락 화면의 ClawOps 연결은 제공자까지 일치해야 미결 잠금을 해제한다', async t => {
+  const { ContactPanel, operationGuard, ApiError } = await components;
+  const phoneReady = { ...ready, channel: 'phone', recipientSnapshot: { ...ready.recipientSnapshot, channel: 'phone', address: '+821012345678' } };
+  const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
+  mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
+  const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
+  await openContact(view);
+  enter(view, 'ClawOps 계정 ID', 'account'); enter(view, 'ClawOps API 키', 'key'); enter(view, 'ClawOps 서명 비밀', 'signing');
+  enter(view, '발신 전화번호', '+15550000001'); press(view, '전화 연결 설정'); await view.settle();
+  const call = posts(mock.calls, '/phone-connection')[0]; assert.equal(call.body.provider, 'clawops');
+  assert.equal(operationGuard.hasUnresolved(), true);
+  mock.api.phoneConnection = { status: 'available', provider: 'twilio', senderNumber: '+15550000001', lastRequestId: call.body.requestId };
+  press(view, '발신 번호 다시 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), true);
+  mock.api.phoneConnection = { status: 'available', provider: 'clawops', senderNumber: '+15550000001', lastRequestId: call.body.requestId };
+  press(view, '발신 번호 다시 확인'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
   assert.equal(posts(mock.calls, '/call').length, 0);
 });
 
@@ -793,7 +812,7 @@ test('전화 설정 결과 불명 뒤 다른 발신 번호가 조회되어도 �
   const mock = memoryApi([phoneReady]); mock.api.phoneConnection = { status: 'not_configured', senderNumber: null };
   mock.api.postHook = (path: string) => { if (path === '/v1/phone-connection') throw new ApiError('timeout', 'timeout', true); };
   const view = harness.renderer(ContactPanel, directProps(mock.api)); t.after(() => view.unmount());
-  await openContact(view); enter(view, '전화 계정 SID', 'sid'); enter(view, '전화 인증 토큰', 'token'); enter(view, '발신 전화번호', '+15550000001');
+  await openContact(view); press(view, 'Twilio 선택'); enter(view, '전화 계정 SID', 'sid'); enter(view, '전화 인증 토큰', 'token'); enter(view, '발신 전화번호', '+15550000001');
   press(view, '전화 연결 설정'); await view.settle();
   mock.api.phoneConnection = { status: 'available', senderNumber: '+15550000002', lastRequestId: posts(mock.calls, '/phone-connection')[0].body.requestId };
   press(view, '발신 번호 다시 확인'); await view.settle();
