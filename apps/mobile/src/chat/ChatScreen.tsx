@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
+  ActivityIndicator, Platform, Pressable, ScrollView,
   StyleSheet, View,
 } from 'react-native';
 import type { ScrollViewInstance } from 'react-native';
@@ -294,7 +294,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
 
   return (
     <ScreenBackground variant="ai">
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <View style={styles.container}>
       <View style={styles.heading}>
         <Text style={styles.title} accessibilityRole="header">PIKKU</Text>
         <View style={styles.links}>
@@ -408,7 +408,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         <TextInput accessibilityLabel="채팅 메시지" multiline placeholder="메시지 입력" placeholderTextColor="#58667E" selectionColor="#3563E9" value={messageDraft} onChangeText={editMessage} editable={!busy} style={styles.input} />
         <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || entryChanging || !messageDraft.trim() }} disabled={busy || entryChanging || !messageDraft.trim()} onPress={() => send()} style={({ pressed }) => [styles.send, (busy || entryChanging || !messageDraft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </View>
     </ScreenBackground>
   );
 }

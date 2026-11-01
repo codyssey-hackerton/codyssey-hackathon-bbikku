@@ -212,7 +212,7 @@ test('폼 AI 초안은 미리보기 후 명시적으로 입력 화면에 전달�
   const view = render(Screen, { ...base, entryContext, onApplyDraft: (value: any) => applied.push(value),
     client: { async sendMessage(input: any) { calls.push(input); return { conversationId: 'c', result: { kind: 'reply', message: '확인', draft: proposed } }; } } });
   assert.ok(nodes(view.tree).some(node => node.type === 'Image' && node.props.pointerEvents === 'none'));
-  assert.ok(nodes(view.tree).some(node => node.type === 'KeyboardAvoidingView' && node.props.behavior === 'padding' && !node.props.style.backgroundColor));
+  assert.ok(!nodes(view.tree).some(node => node.type === 'KeyboardAvoidingView'));
   type(view, '추천해줘'); press(view, '메시지 보내기'); await view.settle();
   assert.deepEqual(calls[0].entryContext, { kind: 'form', draft: entryContext.draft });
   assert.deepEqual(applied, []); assert.match(text(view.tree), /제목: 운동/); assert.match(text(view.tree), /월, 수/);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useFonts } from 'expo-font';
 import { FontReadyContext, Text, TextInput } from './src/ui/typography';
 import { colors } from './src/ui/theme';
@@ -9,7 +9,7 @@ import { GlassSurface } from './src/ui/GlassSurface';
 import { BottomSheet } from './src/ui/BottomSheet';
 import { PikkuCharacter } from './src/ui/PikkuCharacter';
 import { ScreenBackground } from './src/ui/ScreenBackground';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { createApiClient } from './src/api/http';
 import { normalizeApiBaseUrl } from './src/api/connection';
@@ -65,7 +65,8 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
   return <View style={[styles.screen, !visible && styles.hidden]} accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>{children}</View>;
 }
 
-function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null }) {
+function ConnectedWorkspace({ api, timezone, onOpenSettings, member, topNoticeHeight }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null; topNoticeHeight: number }) {
+  const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>('home');
   const [googleReturnTo, setGoogleReturnTo] = useState<'main' | 'scheduleCall' | 'calendarImport' | 'proposals'>('main');
   const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall' | 'upcomingPreview'>('main');
@@ -216,7 +217,8 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
   if (onboarding === 'show') return <OnboardingPanel profile={profile} reviewApi={api} deviceTimezone={timezone} scope={member?.id}
     onComplete={() => setOnboarding('hidden')} onBack={() => setOnboarding('hidden')} />;
 
-  return <>
+  return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    enabled={Platform.OS === 'ios' && chatVisible} keyboardVerticalOffset={insets.top + topNoticeHeight}>
     <AutoCalendarImport api={api} timezone={timezone} selectedDate={tab === 'calendar' && calendarMode === 'month' ? visibleCalendarMonth : selectedDate} enabled={!!member && panel === 'main'}
       refreshVersion={refreshVersion} onScheduleChanged={refresh} />
     {navigationError !== '' && <View style={styles.navigationNotice}><Text accessibilityRole="alert" style={[styles.error, styles.noticeText]}>{navigationError}</Text>
@@ -312,10 +314,11 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
       <Pressable accessibilityRole="button" accessibilityLabel="PIKKU에게 부탁하기" onPress={() => ask()} style={styles.askButton}><PikkuCharacter size={42} /><View style={styles.askText}><Text style={styles.askTitle}>PIKKU에게 부탁하기</Text><Text style={styles.hint}>새 일정·할 일·루틴을 함께 만들어요</Text></View><Icon name="arrowRight" color={colors.primary} /></Pressable>
       {(['event', 'task', 'routine'] as const).map(kind => <Pressable key={kind} accessibilityRole="button" accessibilityLabel={{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]} onPress={() => openAdd(kind)} style={styles.connectionRow}><Icon name={kind === 'event' ? 'calendar' : kind === 'routine' ? 'repeat' : 'day'} /><Text style={styles.connectionText}>{{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]}</Text><Icon name="plus" /></Pressable>)}
     </BottomSheet>
-  </>;
+  </KeyboardAvoidingView>;
 }
 
 function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
+  const [fontNoticeHeight, setFontNoticeHeight] = useState(0);
   const [baseUrl, setBaseUrl] = useState(defaultApiUrl);
   const [sessionToken, setSessionToken] = useState('');
   const [member, setMember] = useState<Member | null>(null);
@@ -412,7 +415,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       <StatusBar style="dark" />
       {Platform.OS === 'web' && process.env.EXPO_PUBLIC_PREVIEW_ONLY === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 화면 미리보기</Text><Text style={styles.hint}>공유 API와 로그인 연결을 준비 중입니다. 실제 AI 대화와 일정 저장은 연결 완료 후 사용할 수 있습니다.</Text></View>}
       {Platform.OS === 'web' && process.env.EXPO_PUBLIC_TEAM_PREVIEW === 'true' && <View style={styles.settings}><Text style={styles.settingLabel}>팀 공유 · 기능 테스트</Text><Text style={styles.hint}>참여 코드를 입력해 기능을 테스트할 수 있습니다.</Text></View>}
-      {fontUnavailable && <Text accessibilityRole="alert" style={styles.fontNotice}>글꼴을 불러오지 못해 기본 글꼴로 표시합니다.</Text>}
+      {fontUnavailable && <Text accessibilityRole="alert" style={styles.fontNotice} onLayout={event => setFontNoticeHeight(event.nativeEvent.layout.height)}>글꼴을 불러오지 못해 기본 글꼴로 표시합니다.</Text>}
       {(showSettings || healthOpen) && <View style={styles.topBar}>
         <View style={styles.brandGroup}>
           <View style={styles.brandMark} accessible={false}><Text style={styles.brandMarkText}>p</Text></View>
@@ -448,7 +451,7 @@ function MobileApp({ fontUnavailable = false }: { fontUnavailable?: boolean }) {
       )}
       {!sessionToken && !authOpen && !showSettings && !healthOpen && <WelcomeScreen onStart={() => { setAuthMode('signup'); setAuthOpen(true); }}
         onLogin={() => { setAuthMode('login'); setAuthOpen(true); }} onDeveloperSettings={toggleSettings} />}
-      {sessionToken !== '' && <Scene visible={!healthOpen && !authOpen && !showSettings}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} onOpenSettings={toggleSettings} member={member} /></Scene>}
+      {sessionToken !== '' && <Scene visible={!healthOpen && !authOpen && !showSettings}><ConnectedWorkspace key={connectionRevision} api={api} timezone={timezone} onOpenSettings={toggleSettings} member={member} topNoticeHeight={fontUnavailable ? fontNoticeHeight : 0} /></Scene>}
       {healthMounted && <Scene visible={healthOpen && !authOpen}><HealthPanel key={connectionRevision} timezone={timezone} visible={healthOpen && !authOpen} onBack={() => setHealthOpen(false)} /></Scene>}
       {authOpen && <AuthPanel key={baseUrl} baseUrl={baseUrl} mode={authMode} onFlowActiveChange={setAuthFlowActive}
         onBack={() => { setAuthOpen(false); setAuthFlowActive(false); }} onSignedIn={signedIn} />}
