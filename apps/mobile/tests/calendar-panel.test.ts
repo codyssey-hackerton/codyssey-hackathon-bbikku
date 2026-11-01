@@ -521,7 +521,9 @@ test('automatic import uses only the primary calendar and skips this account’s
   assert.equal(posts[0].body.skipExisting, true);
   assert.deepEqual(posts[0].body.selectedEvents, [{ id: 'event-2', etag: events[1].etag }]);
   assert.equal(posts[0].body.from, '2026-10-31T15:00:00.000Z'); assert.equal(posts[0].body.to, '2026-11-30T15:00:00.000Z');
-  assert.equal(changed, 1); view.unmount();
+  assert.equal(changed, 1);
+  assert.equal(view.tree, null, 'successful automatic import leaves no banner above the app');
+  view.unmount();
 });
 
 test('automatic import requires a choice without a primary and reuses the same key after an uncertain outcome', async () => {

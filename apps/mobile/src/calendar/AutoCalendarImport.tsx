@@ -31,7 +31,7 @@ export default function AutoCalendarImport({ api, timezone, selectedDate, enable
   const [selection, setSelection] = useState<{ accountRef: string; calendarId: string } | null>(null);
   const [choices, setChoices] = useState<{ accountRef: string; calendars: Calendar[] } | null>(null);
   const mutation = useMutation<CalendarImportInput, CalendarImportResult>(op => client.importEvents(op), result => {
-    setMessage(result.items.length ? 'Google 캘린더의 새 일정을 가져왔습니다.' : 'Google 캘린더를 확인했습니다.');
+    setMessage('');
     if (result.items.length) callback.current();
   });
   let period: { from: string; to: string } | undefined;
@@ -48,7 +48,7 @@ export default function AutoCalendarImport({ api, timezone, selectedDate, enable
     const key = JSON.stringify([from, to, timezone, refreshVersion, retry]);
     if (attempted.current.has(key)) return;
     if (!from || !to) { setMessage('캘린더 시간대를 확인해 주세요.'); return; }
-    attempted.current.add(key); preparing.current = true; setMessage('Google 캘린더를 확인하고 있습니다.');
+    attempted.current.add(key); preparing.current = true; setMessage('');
     const active = () => alive.current && generation.current === current;
     void (async () => {
       try {
@@ -66,7 +66,7 @@ export default function AutoCalendarImport({ api, timezone, selectedDate, enable
         if (!active()) return;
         const missing = newCalendarEvents(remote.events, local.items, connection.accountRef, calendar.id);
         if (missing.length > 100) { setMessage('새 일정이 100개를 넘어 자동으로 가져오지 않았습니다. 캘린더 가져오기에서 직접 선택해 주세요.'); return; }
-        if (!missing.length) { setMessage(remote.unsupportedCount ? `일정을 확인했습니다. 지원하지 않는 일정 ${remote.unsupportedCount}개는 제외됐습니다.` : 'Google 캘린더를 확인했습니다.'); return; }
+        if (!missing.length) { setMessage(remote.unsupportedCount ? `일정을 확인했습니다. 지원하지 않는 일정 ${remote.unsupportedCount}개는 제외됐습니다.` : ''); return; }
         if (operationGuard.hasUnresolved()) { setMessage('진행 중인 요청을 확인한 뒤 다시 가져와 주세요.'); return; }
         mutation.submit({ calendarId: calendar.id, from, to, selectedEvents: missing.map(({ id, etag }) => ({ id, etag })), expectedScheduleRevision: local.scheduleRevision,
           expectedAccountRef: connection.accountRef, skipExisting: true });
@@ -81,9 +81,9 @@ export default function AutoCalendarImport({ api, timezone, selectedDate, enable
   }, [client, schedule, enabled, from, to, timezone, refreshVersion, retry, settled, selection, mutation.state.status]);
   if (!enabled) return null;
   const error = mutation.state.status === 'error' ? mutation.state : null;
+  if (!error && !message && !choices) return null;
   return <View>
     <Text accessibilityLiveRegion="polite">{error ? (error.uncertain ? '가져오기 결과를 확인하지 못했습니다. 같은 요청을 다시 확인해 주세요.' : '일정을 가져오지 못했습니다. 다시 확인해 주세요.') : message}</Text>
-    <Text>새 일정만 가져오며, 이미 가져온 일정의 원본 변경과 삭제는 자동 반영되지 않습니다.</Text>
     {choices?.calendars.map(calendar => <Pressable key={calendar.id} accessibilityRole="button" onPress={() => {
       setSelection({ accountRef: choices.accountRef, calendarId: calendar.id }); setChoices(null); setRetry(value => value + 1);
     }}><Text>{calendar.summary}</Text></Pressable>)}
