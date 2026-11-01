@@ -23,7 +23,7 @@ const react = {
 const native = { Pressable: 'Pressable', ScrollView: 'ScrollView', View: 'View', Text: 'Text', TextInput: 'TextInput', ActivityIndicator: 'ActivityIndicator',
   StyleSheet: { create: styles => styles }, AppState: { addEventListener: () => ({ remove() {} }) } };
 globalThis.__dayScreenHarness = { react, native, jsx, fragment };
-const built = await build({ stdin: { contents: `export {default as DayScreen} from './DayScreen'; export {default as HomeScreen} from './HomeScreen'; export {ApiError} from '../api/http'; export {operationGuard} from '../api/operationGuard';`,
+const built = await build({ stdin: { contents: `export {default as DayScreen} from './DayScreen'; export {default as HomeScreen} from './HomeScreen'; export {ChatScheduleSummary} from '../chat/ChatScheduleSummary'; export {ApiError} from '../api/http'; export {operationGuard} from '../api/operationGuard';`,
   resolveDir: dirname(fileURLToPath(import.meta.url)), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   loader: { '.png': 'dataurl' }, plugins: [{ name: 'screen-host', setup(builder) {
     builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/(typography|ScheduleCard|BottomSheet|PastScheduleStack|Icon|ProfileAvatar)|.*\/(ScheduleForm|PreparationProposalPanel|ScheduleStatus))$/ }, args => ({ path: args.path, namespace: 'screen-host' }));
@@ -42,7 +42,7 @@ const built = await build({ stdin: { contents: `export {default as DayScreen} fr
       'exports.jsx=exports.jsxs=globalThis.__dayScreenHarness.jsx;exports.Fragment=globalThis.__dayScreenHarness.fragment' }));
   } }] });
 const compiled = { exports: {} }; new Function('module','exports',built.outputFiles[0].text)(compiled, compiled.exports);
-const { DayScreen, HomeScreen, ApiError, operationGuard } = compiled.exports;
+const { DayScreen, HomeScreen, ChatScheduleSummary, ApiError, operationGuard } = compiled.exports;
 function render(Component, initialProps) {
   const view = { props: initialProps, dirty: true, effects: [], instances: new Map(), tree: null };
   function node(value, path, seen) {
@@ -75,6 +75,19 @@ function press(view, label) { const node = nodes(view.tree).find(item => item.ty
 const slotTime = () => { const start = new Date(Date.now() - 60_000); const end = new Date(Date.now() + 3_600_000); return { startsAt: start.toISOString(), endsAt: end.toISOString(), timezone: 'UTC' }; };
 function item(id, kind, involvement = 'personal') { return { id, revision: 1, kind, title: id, timeSlot: slotTime(), durationMinutes: kind === 'task' ? 60 : null,
   deadline: null, flexibility: 'flexible', involvement, completion: 'pending', sourceRefs: [] }; }
+
+test('all-day items show an all-day label in the timeline, detail and chat summary', async t => {
+  const allDay = { ...item('종일 일정', 'event'), allDay: true, notes: '확인할 메모', timeSlot: { startsAt: '2026-11-01T00:00:00Z', endsAt: '2026-11-02T00:00:00Z', timezone: 'UTC' } };
+  const client = { async list() { return { items: [allDay], scheduleRevision: 1 }; } };
+  const date = new Date('2026-11-01T12:00:00Z');
+  const day = render(DayScreen, { selectedDate: date, onSelectDate() {}, client, timezone: 'UTC', refreshVersion: 0,
+    onScheduleChanged() {}, onCoordinate() {}, onRecovery() {}, onOpenPreparationProposals() {}, api: {}, visible: false });
+  const summary = render(ChatScheduleSummary, { client, selectedDate: date, timezone: 'UTC', refreshVersion: 0 });
+  t.after(() => { day.unmount(); summary.unmount(); }); await day.settle(); await summary.settle();
+  assert.match(text(day.tree), /종일/); assert.doesNotMatch(text(day.tree), /다음 날 00:00/);
+  assert.match(text(summary.tree), /종일/); assert.doesNotMatch(text(summary.tree), /00:00/);
+  press(day, '상세:종일 일정'); assert.match(text(day.tree), /메모: 확인할 메모/); assert.doesNotMatch(text(day.tree), /다음 날 00:00/);
+});
 
 test('day week strip follows the reference Saturday start across month boundaries', t => {
   let selected;

@@ -14,16 +14,17 @@ const react = {
  useMemo(fn, deps) { const { instance, index } = slot(); if (!instance.hooks[index] || !same(instance.hooks[index].deps, deps)) instance.hooks[index] = { deps, value: fn() }; return instance.hooks[index].value; },
  useEffect(fn, deps) { const { instance, index } = slot(), effect = instance.hooks[index] ??= {}; if (!same(effect.deps, deps)) { effect.deps = deps; instance.view.effects.push(() => { effect.cleanup?.(); effect.cleanup = fn(); }); } },
 };
-globalThis.__profilePanelHarness = { react, jsx, Fragment, native: { View: 'View', ScrollView: 'ScrollView', Pressable: 'Pressable', StyleSheet: { create: styles => styles } } };
-const built = await build({ stdin: { contents: "export {usePlanningProfile} from './usePlanningProfile'; export {OnboardingPanel} from './OnboardingPanel'; export {ProfilePanel} from './ProfilePanel'; export {ApiError} from '../api/http';", resolveDir: dirname(fileURLToPath(import.meta.url)), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
- plugins: [{ name: 'host', setup(b) { b.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/(typography|ActionButton|PikkuCharacter|ProfileAvatar|Icon))$/ }, a => ({ path: a.path, namespace: 'host' }));
+globalThis.__profilePanelHarness = { react, jsx, Fragment, native: { View: 'View', ScrollView: 'ScrollView', Pressable: 'Pressable', Switch: 'Switch', StyleSheet: { create: styles => styles } } };
+const built = await build({ stdin: { contents: "export {usePlanningProfile} from './usePlanningProfile'; export {OnboardingPanel} from './OnboardingPanel'; export {ProfilePanel} from './ProfilePanel'; export {ApiError} from '../api/http'; export {DailyReviewNotifications} from '../review/DailyReviewNotifications'; export {operationGuard} from '../api/operationGuard';", resolveDir: dirname(fileURLToPath(import.meta.url)), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
+ plugins: [{ name: 'host', setup(b) { b.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*notifications\/adapter|.*ui\/(typography|ActionButton|PikkuCharacter|ProfileAvatar|Icon|DateTimeFields))$/ }, a => ({ path: a.path, namespace: 'host' }));
   b.onLoad({ filter: /.*/, namespace: 'host' }, ({ path }) => ({ loader: 'js', contents: path === 'react' ? 'module.exports=globalThis.__profilePanelHarness.react' :
-   path === 'react-native' ? 'module.exports=globalThis.__profilePanelHarness.native' : path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
+   path === 'react-native' ? 'module.exports=globalThis.__profilePanelHarness.native' : path.endsWith('/notifications/adapter') ? 'exports.createReminderAdapter=()=>globalThis.__reviewNotificationAdapter || {requestPermission:async()=>"not_supported"}' : path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
    path.endsWith('/ActionButton') ? 'exports.ActionButton=({label,onPress,disabled})=>globalThis.__profilePanelHarness.jsx("Pressable",{accessibilityLabel:label,onPress,disabled,children:label})' :
    path.endsWith('/PikkuCharacter') ? 'exports.PikkuCharacter=()=>null' : path.endsWith('/ProfileAvatar') ? 'exports.ProfileAvatar=()=>null' : path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
+   path.endsWith('/DateTimeFields') ? 'exports.DateTimeFields=({label,value,onChange,disabled})=>globalThis.__profilePanelHarness.jsx("Time",{label,value,onChange,disabled})' :
    'exports.jsx=exports.jsxs=globalThis.__profilePanelHarness.jsx;exports.Fragment=globalThis.__profilePanelHarness.Fragment' })); } }] });
 const mod = { exports: {} }; new Function('module', 'exports', built.outputFiles[0].text)(mod, mod.exports);
-const { usePlanningProfile, OnboardingPanel, ProfilePanel, ApiError } = mod.exports;
+const { usePlanningProfile, OnboardingPanel, ProfilePanel, ApiError, DailyReviewNotifications, operationGuard } = mod.exports;
 function render(Component, props) {
  const view = { props, dirty: true, effects: [], instances: new Map(), tree: null };
  function node(value, path, seen) {
@@ -46,7 +47,69 @@ function text(v) { if (v == null) return ''; if (typeof v === 'string' || typeof
 function press(view, label) { const n = nodes(view.tree).find(n => n.type === 'Pressable' && (n.props.accessibilityLabel === label || text(n.children) === label)); assert.ok(n, `missing ${label}`); assert.notEqual(n.props.disabled, true); n.props.onPress(); view.flush(); }
 function input(view, label, value) { const n = nodes(view.tree).find(n => n.type === 'TextInput' && n.props.accessibilityLabel === label); assert.ok(n, label); if (value !== undefined) { n.props.onChangeText(value); view.flush(); return; } return n.props.value; }
 const fact = value => ({ id: 'f', revision: 1, kind: 'preference', key: 'planning_preferences', value, source: { type: 'user', ref: 'a' }, recordedAt: '2026-11-01T00:00:00Z', validUntil: null });
-function root({ api, onComplete }) { const profile = usePlanningProfile(api); return jsx(OnboardingPanel, { profile, onComplete }); }
+function root({ api, onComplete, reviewApi, deviceTimezone, scope }) { const profile = usePlanningProfile(api); return jsx(OnboardingPanel, { profile, onComplete, reviewApi, deviceTimezone, scope }); }
+test('review onboarding saves the explicit new defaults and can be skipped without writing', async t => {
+ let completed = 0; const writes = [];
+ const api = { async get() { return { facts: [], contextRevision: 2 }; }, async post(path, body) { return { fact: fact(body.value), contextRevision: 3 }; } };
+ const reviewApi = { async get() { return { reviewSchedule: { revision: 0, timezone: 'UTC', morning: { enabled: false, localTime: null }, evening: { enabled: false, localTime: null } } }; },
+   async post(path, body) { writes.push(body); return { reviewSchedule: { ...body, revision: body.expectedRevision + 1 } }; } };
+ const view = render(root, { api, reviewApi, deviceTimezone: 'Asia/Seoul', scope: 'member', onComplete: () => completed++ }); t.after(view.close); await view.settle();
+ press(view, '다음'); press(view, '저장하고 완료'); await view.settle();
+ assert.equal(writes.length, 0); assert.equal(completed, 0);
+ press(view, '시간 저장'); await view.settle();
+ assert.equal(writes.length, 1); assert.equal(writes[0].timezone, 'Asia/Seoul');
+ assert.deepEqual(writes[0].morning, { enabled: true, localTime: '09:00' }); assert.deepEqual(writes[0].evening, { enabled: true, localTime: '21:00' });
+ assert.match(text(view.tree), /이 기기의 알림/); press(view, '시작하기'); assert.equal(completed, 1);
+ const skip = render(root, { api, reviewApi, deviceTimezone: 'Asia/Seoul', onComplete: () => completed++ }); t.after(skip.close); await skip.settle();
+ press(skip, '다음'); press(skip, '저장하고 완료'); await skip.settle(); press(skip, '나중에 설정');
+ assert.equal(completed, 2); assert.equal(writes.length, 1);
+});
+
+test('review onboarding preserves existing schedule until explicitly changed', async t => {
+ const api = { async get() { return { facts: [], contextRevision: 2 }; }, async post(path, body) { return { fact: fact(body.value), contextRevision: 3 }; } };
+ const existing = { revision: 5, timezone: 'America/New_York', morning: { enabled: true, localTime: '07:00' }, evening: { enabled: false, localTime: null } }; let written;
+ const reviewApi = { async get() { return { reviewSchedule: existing }; }, async post(path, body) { written = body; return { reviewSchedule: { ...body, revision: 6 } }; } };
+ const view = render(root, { api, reviewApi, deviceTimezone: 'Asia/Seoul', onComplete() {} }); t.after(view.close); await view.settle();
+ press(view, '다음'); press(view, '저장하고 완료'); await view.settle(); press(view, '시간 저장'); await view.settle();
+ assert.equal(written.expectedRevision, 5); assert.equal(written.timezone, existing.timezone); assert.deepEqual(written.morning, existing.morning); assert.deepEqual(written.evening, existing.evening);
+});
+
+test('onboarding requests device permission only on explicit connection and uses saved times', async t => {
+ const calls = []; globalThis.__reviewNotificationAdapter = {
+   async requestPermission() { calls.push('permission'); return 'granted'; },
+   async scheduleDaily(input) { calls.push(input); return { status: 'scheduled', identifier: input.id, delivery: 'device' }; },
+   async cancel(id) { calls.push({ cancel: id }); return { status: 'cancelled' }; },
+ }; t.after(() => { delete globalThis.__reviewNotificationAdapter; });
+ const api = { async get() { return { facts: [], contextRevision: 2 }; }, async post(path, body) { return { fact: fact(body.value), contextRevision: 3 }; } };
+ const reviewApi = { async get() { return { reviewSchedule: { revision: 0, timezone: 'UTC', morning: { enabled: false, localTime: null }, evening: { enabled: false, localTime: null } } }; },
+   async post(path, body) { return { reviewSchedule: { ...body, revision: 1 } }; } };
+ const view = render(root, { api, reviewApi, deviceTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone, scope: 'member', onComplete() {} }); t.after(view.close); await view.settle();
+ press(view, '다음'); press(view, '저장하고 완료'); await view.settle(); press(view, '시간 저장'); await view.settle();
+ assert.deepEqual(calls, []); press(view, '이 기기에 알림 설정'); await view.settle();
+ assert.equal(calls[0], 'permission'); assert.deepEqual(calls.slice(1).map(call => call.localTime), ['09:00', '21:00']);
+ assert.match(text(view.tree), /이 기기의 알림 설정을 적용/);
+});
+
+test('unmount and failed cancellation retain a scope-bound guard until explicit recovery', async t => {
+ let release, count = 0, cancellations = 0; const gate = new Promise(resolve => { release = resolve; });
+ globalThis.__reviewNotificationAdapter = {
+   async requestPermission() { return 'granted'; },
+   async scheduleDaily() { count++; await gate; return { status: 'error' }; },
+   async cancel() { cancellations++; return { status: cancellations === 1 ? 'error' : 'cancelled' }; },
+ }; t.after(() => { delete globalThis.__reviewNotificationAdapter; });
+ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+ const schedule = { revision: 1, timezone, morning: { enabled: true, localTime: '09:00' }, evening: { enabled: true, localTime: '21:00' } };
+ const original = render(DailyReviewNotifications, { schedule, deviceTimezone: timezone, scope: 'owner-a' });
+ press(original, '이 기기에 알림 설정'); await original.settle(); assert.equal(count, 1); assert.equal(operationGuard.hasUnresolved(), true);
+ original.close(); release(); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+ assert.equal(operationGuard.hasUnresolved(), true); assert.equal(cancellations, 1);
+ const other = render(DailyReviewNotifications, { schedule, deviceTimezone: timezone, scope: 'owner-b' }); t.after(other.close);
+ press(other, '이 기기에 알림 설정'); await other.settle(); assert.equal(count, 1);
+ const reopened = render(DailyReviewNotifications, { deviceTimezone: timezone, scope: 'owner-a' }); t.after(reopened.close);
+ assert.match(text(reopened.tree), /아침 알림 결과를 확인하지 못했습니다/);
+ press(reopened, '아침 알림 취소 확인'); await reopened.settle();
+ assert.equal(cancellations, 2); assert.equal(operationGuard.hasUnresolved(), false);
+});
 test('onboarding saves selected inputs only and completion follows explicit success', async t => {
  let finish, completed = 0, sent;
  const api = { async get() { return { facts: [], contextRevision: 2 }; }, post(path, body) { sent = body; return new Promise(resolve => { finish = resolve; }); } };
@@ -74,8 +137,10 @@ test('profile goal and period edits preserve existing timing and explicit member
  let saved; const api = { async get() { return { facts: [fact(initial)], contextRevision: 7 }; }, async post(path, body) { saved = body; return { fact: fact(body.value), contextRevision: 8 }; } };
  const callbacks = { onBack() {}, onOpenGoogle() {}, onOpenReview() {}, onOpenAccount() {}, onOpenMemory() {} };
  const view = render(profileRoot, { api, callbacks }); t.after(view.close); await view.settle(); assert.match(text(view.tree), /실제 사용자/);
- assert.doesNotMatch(text(view.tree), /준비·이동·여유시간/);
- press(view, '목표·활동 및 선호'); press(view, '운동·건강건강한 루틴 이어가기'); press(view, '오후가 편해요'); press(view, '저장'); await view.settle();
+ assert.match(text(view.tree), /목표: 업무·공부 · 편한 시간대: 오전/);
+ assert.doesNotMatch(text(view.tree), /준비시간|이동 예상시간|도착 여유시간/);
+ press(view, '목표·활동 및 선호'); assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '목표·활동 및 선호').props.accessibilityState.expanded, true);
+ press(view, '생활 선호 수정'); press(view, '운동·건강건강한 루틴 이어가기'); press(view, '오후가 편해요'); press(view, '저장'); await view.settle();
  assert.deepEqual(saved.value, { ...initial, goals: ['work', 'health'], preferredPeriod: 'afternoon' }); assert.equal(saved.expectedContextRevision, 7);
  assert.match(text(view.tree), /내 프로필/);
 });
@@ -84,7 +149,7 @@ test('optional time editor preserves null and zero, validates, and saves only ex
  const writes = []; const api = { async get() { return { facts: [fact(initial)], contextRevision: 7 }; }, async post(path, body) { writes.push(body); return { fact: fact(body.value), contextRevision: 8 }; } };
  const callbacks = { onBack() {}, onOpenGoogle() {}, onOpenReview() {}, onOpenAccount() {}, onOpenMemory() {} };
  const view = render(profileRoot, { api, callbacks }); t.after(view.close); await view.settle();
- assert.doesNotMatch(text(view.tree), /저장된 시간 기준 수정/); press(view, '목표·활동 및 선호');
+ assert.doesNotMatch(text(view.tree), /저장된 시간 기준 수정/); press(view, '목표·활동 및 선호'); press(view, '생활 선호 수정');
  const toggle = nodes(view.tree).find(node => node.props?.accessibilityLabel === '저장된 시간 기준 수정');
  assert.equal(toggle.props.accessibilityState.expanded, false);
  assert.ok(!nodes(view.tree).some(node => node.type === 'TextInput')); press(view, '저장된 시간 기준 수정');

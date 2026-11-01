@@ -118,9 +118,10 @@ const components = build({
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.otf': 'empty', '.ttf': 'empty', '.png': 'empty' },
   plugins: [{ name: 'mock-native', setup(builder) {
     builder.onResolve({ filter: /^\.\/usePlanningProfile$/ }, () => ({ path: 'profile-hook', namespace: 'app-native' }));
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface))$/ }, (args) => ({ path: args.path, namespace: 'app-native' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|react-native-safe-area-context|expo-status-bar|expo-font|\.\/(Icon|typography)|.*ui\/(typography|Icon|GlassSurface|DateTimeFields))$/ }, (args) => ({ path: args.path, namespace: 'app-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-native' }, ({ path }) => ({
       contents: path === 'profile-hook' ? 'exports.usePlanningProfile=()=>globalThis.__appIntegrationHarness.profile' :
+        path.endsWith('/DateTimeFields') ? 'exports.DateTimeFields=({label,value,disabled,onChange})=>globalThis.__appIntegrationHarness.jsx("TextInput",{accessibilityLabel:label,value,editable:!disabled,onChangeText:onChange})' :
         path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
         path.endsWith('ui/GlassSurface') ? 'exports.GlassSurface=({children})=>children' :
         path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"; exports.FontReadyContext={Provider:({children})=>children}' :
@@ -134,7 +135,7 @@ const components = build({
     builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen|screens\/HomeScreen)$/ }, (args) => ({ path: args.path, namespace: 'app-screen' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-screen' }, ({ path }) => ({
       contents: path.endsWith('ChatScreen')
-        ? 'const R=require("react"), {jsx}=require("react/jsx-runtime"); module.exports=function ChatScreen(props){const [marker]=R.useState(()=>++globalThis.__appIntegrationHarness.marker);return jsx("ChatScreen",{...props,marker})}'
+        ? 'const R=require("react"), {jsx}=require("react/jsx-runtime"); module.exports=function ChatScreen(props){const [marker]=R.useState(()=>++globalThis.__appIntegrationHarness.marker);return jsx("ChatScreen",{...props,marker,children:globalThis.__appIntegrationHarness.inlineProposalId ? props.renderProposal?.(globalThis.__appIntegrationHarness.inlineProposalId) : null})}'
         : path.endsWith('HomeScreen')
         ? 'const {jsx}=require("react/jsx-runtime"); module.exports=function HomeScreen(props){return jsx("HomeScreen",{...props,children:jsx("Pressable",{accessibilityLabel:"설정 열기",onPress:props.onOpenSettings})})}'
         : `const {jsx}=require('react/jsx-runtime'); module.exports=function Stub(props){return jsx(${JSON.stringify(path.split('/').pop())},props)}`,
@@ -207,7 +208,7 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { harness.cleanup(); globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
+test.afterEach(() => { harness.cleanup(); delete (globalThis as any).__appIntegrationHarness.inlineProposalId; globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
 
 test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 요청으로 이동한다', async () => {
   const { App } = await components;
@@ -216,20 +217,20 @@ test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 
   assert.match(textOf(view.tree), /당신의 하루를/);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'HomeScreen'));
-  for (const label of ['홈', '캘린더', 'AI 비서', '추가', '루틴']) {
+  for (const label of ['홈', '캘린더', 'PIKKU', '추가', '루틴']) {
     assert.ok(visibleNodes(view.tree).some(item => item.type === 'Pressable' && item.props.accessibilityLabel === label), label);
   }
   visiblePress(view, '추가');
   assert.match(textOf(view.tree), /무엇을 추가할까요/);
-  for (const label of ['삐꾸에게 부탁하기', '일정 추가', '할 일 추가', '루틴 추가']) {
+  for (const label of ['PIKKU에게 부탁하기', '일정 추가', '할 일 추가', '루틴 추가']) {
     assert.ok(visibleNodes(view.tree).some(item => item.type === 'Pressable' && (item.props.accessibilityLabel === label || textOf(item.children) === label)), label);
   }
-  visiblePress(view, '삐꾸에게 부탁하기');
+  visiblePress(view, 'PIKKU에게 부탁하기');
   assert.equal(chat(view).props.entryContext.kind, 'create');
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
 });
 
-test('선호·상황에서 뒤로 가면 진입한 프로필 또는 연결 화면으로 돌아간다', async () => {
+test('선호·상황은 프로필에서만 열리고 뒤로 가면 프로필로 돌아간다', async () => {
   const { App } = await components;
   globalThis.fetch = async () => response([]);
   const view = harness.renderer(App);
@@ -238,10 +239,44 @@ test('선호·상황에서 뒤로 가면 진입한 프로필 또는 연결 화�
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'MemoryPanel'));
   node(view, 'MemoryPanel').props.onBack(); view.flush();
   assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '내 선호와 상황'));
-  visiblePress(view, '계정'); visiblePress(view, '내 정보·선호');
+  visiblePress(view, '계정');
+  assert.equal(visibleNodes(view.tree).filter(item => item.props?.accessibilityLabel === '내 프로필').length, 1);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '내 정보·선호'), false);
+  visiblePress(view, '내 프로필'); visiblePress(view, '내 선호와 상황');
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'MemoryPanel'));
   node(view, 'MemoryPanel').props.onBack(); view.flush();
-  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '연결 및 설정 닫기'));
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '내 선호와 상황'));
+  view.unmount();
+});
+
+test('설정의 예시 일정은 기존 대화와 미해결 요청을 유지하며 읽기 전용이다', async t => {
+  const { App, operationGuard } = await components;
+  const owner = {}; t.after(() => operationGuard.clear(owner));
+  const writes: string[] = [];
+  globalThis.fetch = async (raw, init) => {
+    if (init?.method && init.method !== 'GET') writes.push(new URL(String(raw)).pathname);
+    return response([]);
+  };
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  const marker = chat(view).props.marker;
+  openConnections(view);
+  operationGuard.update(owner, { status: 'pending' });
+  visiblePress(view, '예시 일정 미리보기');
+  assert.equal(chat(view).props.marker, marker); assert.equal(operationGuard.hasUnresolved(), true);
+  assert.match(textOf(view.tree), /시연용 예시입니다/);
+  const list = node(view, 'ScrollView', item => item.props.accessibilityLabel === '예시 일정 목록');
+  const cards = nodes(list.children).filter(item => item.type === 'Pressable' &&
+    item.props.accessibilityRole === undefined && item.props.accessibilityLabel?.startsWith('예시 · '));
+  assert.equal(cards.length, 10); assert.ok(cards.every(item => item.props.disabled === true));
+  const previewControls = nodes(list.children).filter(item => item.type === 'Pressable' && item.props.accessibilityLabel?.startsWith('예시 · '));
+  assert.ok(previewControls.length > cards.length); assert.ok(previewControls.every(item => item.props.disabled === true));
+  assert.deepEqual(writes, []);
+  visiblePress(view, '예시 닫기');
+  assert.equal(chat(view).props.marker, marker); assert.equal(operationGuard.hasUnresolved(), true);
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '예시 일정 미리보기'));
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '예시 일정 목록'), false);
+  assert.deepEqual(writes, []);
   view.unmount();
 });
 
@@ -266,7 +301,7 @@ test('폼 AI 초안 왕복에서 원래 날짜와 입력을 보존하고 새 요
   assert.equal(firstContext.kind, 'form'); assert.equal(firstContext.draft.fields.title, '직접 작성');
   visiblePress(view, '캘린더'); visiblePress(view, '월간 캘린더로');
   node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-01-20T12:00:00Z')); view.flush();
-  visiblePress(view, 'AI 비서');
+  visiblePress(view, 'PIKKU');
   chat(view).props.onApplyDraft({ kind: 'event', fields: { title: 'AI 제안' } }); view.flush(); await view.settle();
   assert.equal(input(view, '시작 날짜').props.value, originalDate);
   assert.equal(input(view, '제목').props.value, '직접 작성');
@@ -293,13 +328,13 @@ test('미확정 요청 중 추가 폼을 작성하고 확인 화면을 오가며
   const view = harness.renderer(App);
   try {
     press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
-    visiblePress(view, '추가'); visiblePress(view, '삐꾸에게 부탁하기');
+    visiblePress(view, '추가'); visiblePress(view, 'PIKKU에게 부탁하기');
     const existingContext = chat(view).props.entryContext; assert.equal(existingContext.kind, 'create');
     visiblePress(view, '캘린더'); node(view, 'CalendarScreen').props.onSelectDate(new Date('2027-01-11T12:00:00Z')); view.flush();
     operationGuard.update(owner, { status: 'pending' });
     node(view, 'DayScreen').props.createRequest(); view.flush(); visiblePress(view, '할 일 추가'); await view.settle();
     assert.match(textOf(view.tree), /초안은 작성할 수 있습니다/);
-    enter(view, '제목', '보존할 초안'); enter(view, '소요시간 (분)', '30');
+    enter(view, '제목', '보존할 초안'); enter(view, '시작 시간', '09:00'); enter(view, '종료 시간', '09:30');
     visiblePress(view, '저장'); assert.equal(writes.length, 0);
     assert.match(textOf(view.tree), /요청을 시작한 화면에서 확인한 뒤 저장/);
     operationGuard.update(owner, { status: 'error', error: new Error('timeout'), uncertain: true });
@@ -307,12 +342,12 @@ test('미확정 요청 중 추가 폼을 작성하고 확인 화면을 오가며
     const marker = chat(view).props.marker; const oldContext = chat(view).props.entryContext;
     visiblePress(view, 'AI로 작성하기'); assert.equal(chat(view).props.entryContext, oldContext);
     assert.equal(input(view, '제목').props.value, '보존할 초안');
-    visiblePress(view, 'AI 비서 열기'); assert.equal(chat(view).props.marker, marker);
-    visiblePress(view, '추가'); visiblePress(view, '삐꾸에게 부탁하기');
+    visiblePress(view, 'PIKKU 열기'); assert.equal(chat(view).props.marker, marker);
+    visiblePress(view, '추가'); visiblePress(view, 'PIKKU에게 부탁하기');
     assert.equal(chat(view).props.entryContext, existingContext);
     visiblePress(view, '추가'); visiblePress(view, '일정 추가'); await view.settle();
     assert.equal(input(view, '제목').props.value, '보존할 초안');
-    assert.equal(input(view, '소요시간 (분)').props.value, '30');
+    assert.equal(input(view, '시작 시간').props.value, '09:00'); assert.equal(input(view, '종료 시간').props.value, '09:30');
     operationGuard.update(owner, { status: 'success', result: null });
     visiblePress(view, '저장'); await view.settle();
     assert.equal(writes.length, 1); assert.equal(writes[0].changeSet.changes[0].after.title, '보존할 초안');
@@ -333,7 +368,7 @@ test('preloaded proposals refresh when chat creates a proposal without resetting
   assert.equal(reads, 2);
   assert.equal(chat(view).props.marker, marker);
   chat(view).props.onOpenProposals(); view.flush();
-  assert.match(textOf(view.tree), /새로운 제안/);
+  assert.match(textOf(view.tree), /제안 목록/); assert.match(textOf(view.tree), /일정/); assert.doesNotMatch(textOf(view.tree), /새로운 제안/);
   view.unmount();
 });
 
@@ -346,7 +381,7 @@ test('제안의 준비시간 관계는 연결된 일정과 확인 필요 여부�
     ? Response.json({ requestId: 'r', data: { proposal: withTiming } }) : response([withTiming]);
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
-  chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 시간 관계 제안, 확인 대기, 상세 보기'); await view.settle();
+  chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 일정, 확인 대기, 상세 보기'); await view.settle();
   assert.match(textOf(view.tree), /준비와 이동/); assert.match(textOf(view.tree), /관련 약속 확인 필요/);
   assert.match(textOf(view.tree), /준비 15분 · 이동 0분 · 여유 미확인/); assert.match(textOf(view.tree), /준비 일정: 일정/);
   assert.match(textOf(view.tree), /이동 일정: 별도 일정 없음/); assert.doesNotMatch(textOf(view.tree), /기준 약속: event-1|연결된 변경 ID/);
@@ -392,7 +427,7 @@ test('a different account on the same API remounts state and ignores old-user li
   globalThis.fetch = async (_url, init) => {
     const auth = (init?.headers as Record<string, string>).Authorization;
     if (auth === 'Bearer old-user') return new Promise<Response>((resolve) => { resolveOld = resolve; });
-    return response([proposal('새 사용자 제안')]);
+    const item = proposal('새 사용자 제안'); item.changeSet.changes[0].after.title = '새 사용자 일정'; return response([item]);
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'old-user'); press(view, '설정 적용');
@@ -401,11 +436,11 @@ test('a different account on the same API remounts state and ignores old-user li
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'new-user'); press(view, '설정 적용');
   await view.settle();
   assert.notEqual(chat(view).props.marker, oldMarker);
-  assert.match(textOf(view.tree), /새 사용자 제안/);
-  resolveOld(response([proposal('이전 사용자 제안')]));
+  assert.match(textOf(view.tree), /새 사용자 일정/);
+  const oldItem = proposal('이전 사용자 제안'); oldItem.changeSet.changes[0].after.title = '이전 사용자 일정'; resolveOld(response([oldItem]));
   await view.settle();
-  assert.doesNotMatch(textOf(view.tree), /이전 사용자 제안/);
-  assert.match(textOf(view.tree), /새 사용자 제안/);
+  assert.doesNotMatch(textOf(view.tree), /이전 사용자 일정/);
+  assert.match(textOf(view.tree), /새 사용자 일정/);
   view.unmount();
 });
 
@@ -424,7 +459,7 @@ test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사
     if (path === '/v1/calendar-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', accountLabel: null } });
     if (path === '/v1/email-connection' || path === '/v1/email-reply-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', senderAddress: null } });
     if (path === '/v1/google/oauth/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret } });
-    if (path === '/v1/google/oauth/complete') return Response.json({ requestId: 'r', data: { status: 'connected' } });
+    if (path === '/v1/google/oauth/complete') return Response.json({ requestId: 'r', data: { status: init?.body && JSON.parse(String(init.body)).confirmationCode ? 'connected' : 'pending' } });
     throw new Error(`unexpected ${path}`);
   };
   const view = harness.renderer(App);
@@ -436,11 +471,11 @@ test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사
   assert.deepEqual(requests.find((item) => item.path === '/v1/google/oauth/start').body, { kind: 'gmail_send' });
   press(view, 'Google 동의 화면 열기'); await view.settle();
   assert.deepEqual((globalThis as any).__appIntegrationHarness.openedLinks, [authorizationUrl]);
-  assert.match(textOf(view.tree), /다른 사람에게 전달하지 마세요/);
+  press(view, '자동 확인이 안 되나요?'); assert.match(textOf(view.tree), /다른 사람에게 전달하지 마세요/);
   assert.equal(input(view, 'Google 연결 확인 코드').props.secureTextEntry, true);
   enter(view, 'Google 연결 확인 코드', confirmationCode); press(view, 'Google 연결 확인'); await view.settle();
-  assert.deepEqual(requests.find((item) => item.path === '/v1/google/oauth/complete').body, { completionSecret, confirmationCode });
-  assert.equal(requests.filter((item) => item.path === '/v1/google/oauth/complete').length, 1);
+  assert.deepEqual(requests.find((item) => item.path === '/v1/google/oauth/complete' && item.body.confirmationCode).body, { completionSecret, confirmationCode });
+  assert.equal(requests.filter((item) => item.path === '/v1/google/oauth/complete' && item.body.confirmationCode).length, 1);
   assert.doesNotMatch(textOf(view.tree), /qqqqqqqqqq|zzzzzzzzzz/);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'new-user'); press(view, '설정 적용'); await view.settle();
   openSettingsOption(view, 'Google 연결'); await view.settle();
@@ -450,27 +485,30 @@ test('사용자별 Google 동의는 별도 버튼으로 열고 URL과 이전 사
   view.unmount();
 });
 
-test('Google 연결 확인 응답 유실은 자동 재시도하지 않고 새 연결을 안내한다', async () => {
-  const { App } = await components; let completions = 0;
+test('Google 연결 확인 응답 유실은 같은 흐름을 잠그고 명시 취소로 해제한다', async () => {
+  const { App, operationGuard } = await components; let completions = 0;
   const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code',
     state: 's'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback',
     scope: 'openid email https://www.googleapis.com/auth/gmail.send' })}`;
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
     if (path === '/v1/proposals') return response([]);
     if (path === '/v1/calendar-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', accountLabel: null } });
     if (path === '/v1/email-connection' || path === '/v1/email-reply-connection') return Response.json({ requestId: 'r', data: { status: 'not_configured', senderAddress: null } });
     if (path === '/v1/google/oauth/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
-    if (path === '/v1/google/oauth/complete') { completions++; throw new Error('connection lost'); }
+    if (path === '/v1/google/oauth/complete') { const body = JSON.parse(String(init?.body));
+      if (body.cancel) return apiResponse({ status: 'cancelled' });
+      if (!body.confirmationCode) return apiResponse({ status: 'pending' });
+      completions++; throw new Error('connection lost'); }
     throw new Error(`unexpected ${path}`);
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test-user'); press(view, '설정 적용'); await view.settle();
   openSettingsOption(view, 'Google 연결'); await view.settle(); press(view, 'Gmail 발송 연결 시작'); await view.settle();
-  enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); press(view, 'Google 연결 확인'); await view.settle();
-  assert.equal(completions, 1); assert.match(textOf(view.tree), /연결 결과를 확인하지 못했습니다/);
-  assert.equal(nodes(view.tree).some((item) => item.type === 'TextInput' && item.props.accessibilityLabel === 'Google 연결 확인 코드'), false);
-  press(view, '연결 상태 다시 확인'); await view.settle(); assert.equal(completions, 1);
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); press(view, 'Google 연결 확인'); await view.settle();
+  assert.equal(completions, 1); assert.match(textOf(view.tree), /연결 결과를 확인하고 있습니다/);
+  assert.equal(operationGuard.hasUnresolved(), true);
+  press(view, '진행 중인 Google 연결 취소'); await view.settle(); assert.equal(operationGuard.hasUnresolved(), false);
   view.unmount();
 });
 
@@ -549,7 +587,7 @@ test('a real in-flight mutation blocks account changes until its response is con
   view.unmount();
 });
 
-const reviewDefaults = { revision: 0, timezone: 'UTC', evening: { enabled: false, localTime: null }, morning: { enabled: false, localTime: null } };
+const reviewDefaults = { revision: 0, timezone: 'Asia/Seoul', evening: { enabled: false, localTime: null }, morning: { enabled: false, localTime: null } };
 const capabilities = { storage: { mode: 'memory', durable: false }, model: { status: 'degraded' }, scheduler: { status: 'not_configured' } };
 function apiResponse(data: unknown, status = 200) { return new Response(JSON.stringify({ requestId: 'response', data }), { status }); }
 function toggle(view: any, label: string, value: boolean) {
@@ -586,7 +624,7 @@ test('chat opens initially disabled review settings; valid changes save the cont
   press(view, '자동 검토 설정 저장');
   assert.match(textOf(view.tree), /저녁 자동 검토를 켜려면 시각이 필요/);
   assert.equal(writes.length, 0);
-  enter(view, '시간대', 'Asia/Seoul'); enter(view, '저녁 시각', '21:45');
+  enter(view, '저녁 시각', '21:45');
   toggle(view, '아침 자동 검토', true); enter(view, '아침 시각', '07:30');
   press(view, '자동 검토 설정 저장'); await view.settle();
   assert.equal(writes.length, 1);
@@ -617,7 +655,7 @@ test('uncertain review save stays retryable across navigation and blocks a conne
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용');
   openReview(view); await view.settle();
-  enter(view, '시간대', 'Asia/Seoul'); toggle(view, '저녁 자동 검토', true); enter(view, '저녁 시각', '21:00');
+  toggle(view, '저녁 자동 검토', true); enter(view, '저녁 시각', '21:00');
   press(view, '자동 검토 설정 저장'); await view.settle();
   assert.match(textOf(view.tree), /저장 여부가 불확실합니다/);
   assert.equal(operationGuard.hasUnresolved(), true);
@@ -744,7 +782,7 @@ test('proposal detail opens an editable revision draft with all changes and with
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용');
   await view.settle();
   chat(view).props.onOpenProposals(); view.flush();
-  press(view, '제안 원본 제안, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '제안 일정 외 1개, 확인 대기, 상세 보기'); await view.settle();
   press(view, '수정 요청');
   const request = chat(view).props.revisionRequest;
   assert.equal(request.proposalId, 'p1');
@@ -822,7 +860,10 @@ test('Google 계정 로그인은 기존 세션 없이 인증하고 사용자 교
   globalThis.fetch = async (url, init) => {
     const path = new URL(String(url)).pathname; calls.push({ path, method: init?.method, headers: init?.headers, credentials: init?.credentials });
     if (path === '/v1/auth/google/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
-    if (path === '/v1/auth/google/complete') return Response.json({ requestId: 'r', data: { sessionToken: 'synthetic-member-token', expiresAt: '2030-01-01T00:00:00Z', member: { id: 'member:123', email: 'synthetic@example.test', displayName: '테스트 사용자' } } });
+    if (path === '/v1/auth/google/complete') return Response.json({ requestId: 'r', data: JSON.parse(String(init?.body)).confirmationCode
+      ? { sessionToken: 'synthetic-member-token', expiresAt: '2030-01-01T00:00:00Z', member: { id: 'member:123', email: 'synthetic@example.test', displayName: '테스트 사용자' } }
+      : { status: 'pending' } });
+    if (path === '/v1/calendar-connection') return apiResponse({ status: 'not_configured', accountLabel: null, accountRef: null });
     if (path === '/v1/auth/logout') return Response.json({ requestId: 'r', data: { status: 'logged_out' } });
     if (path === '/v1/proposals') return response([]);
     throw new Error(`unexpected ${path}`);
@@ -835,11 +876,12 @@ test('Google 계정 로그인은 기존 세션 없이 인증하고 사용자 교
   press(view, 'Google 로그인 또는 가입'); assert.match(textOf(view.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
   operationGuard.clear(owner); press(view, 'Google 로그인 또는 가입');
   press(view, 'Google 로그인 시작'); await view.settle(); press(view, 'Google 로그인 화면 열기'); await view.settle();
-  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
   assert.match(textOf(view.tree), /PERSONALIZE · 1 \/ 2/);
   press(view, '다음'); assert.match(textOf(view.tree), /PERSONALIZE · 2 \/ 2/);
-  press(view, '이전'); press(view, '이전');
+  press(view, '이전'); press(view, '이전'); await view.settle();
   assert.notEqual(chat(view).props.marker, before);
+  assert.equal(calls.filter(item => item.path === '/v1/calendar-connection').length, 1);
   for (const request of calls.filter(item => item.path.startsWith('/v1/auth/google/'))) {
     assert.equal((request.headers as Record<string, string>).Authorization, undefined); assert.equal(request.credentials, 'omit');
   }
@@ -875,8 +917,13 @@ test('루틴 생성과 요일 수정 및 회차 생성은 계약을 따르고 �
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev'); press(view, '설정 적용'); await view.settle();
-  press(view, '루틴'); await view.settle(); assert.match(textOf(view.tree), /이미 생성한 회차는 미래 일정까지 그대로 유지/); press(view, '전체 루틴');
+  press(view, '루틴'); await view.settle(); assert.match(textOf(view.tree), /이미 생성한 회차는 미래 일정까지 그대로 유지/);
+  assert.match(textOf(view.tree), /목요일 루틴 미리보기/);
+  for (const title of ['아침 스트레칭', '독서', '가벼운 걷기']) assert.match(textOf(view.tree), new RegExp(title));
+  assert.match(textOf(view.tree), /예시이며 등록된 루틴이나 완료 기록이 아닙니다/); assert.equal(writes.length, 0);
+  press(view, '전체 루틴');
   enter(view, '루틴 이름', '운동'); press(view, '월요일'); enter(view, '루틴 시작일', '2026-11-01'); press(view, '루틴 등록'); await view.settle();
+  assert.doesNotMatch(textOf(view.tree), /목요일 루틴 미리보기/);
   assert.deepEqual(writes[0].body.weekdays, [1]); assert.ok((writes[0].headers as Record<string, string>)['Idempotency-Key']);
   press(view, '운동 편집'); press(view, '화요일'); press(view, '루틴 변경 저장'); await view.settle();
   assert.equal(writes[1].method, 'PATCH'); assert.deepEqual(writes[1].body.weekdays, [1, 2]); assert.equal(writes[1].body.expectedRevision, 1);
@@ -885,25 +932,29 @@ test('루틴 생성과 요일 수정 및 회차 생성은 계약을 따르고 �
   assert.equal(writes[2].body.fromDate, '2026-11-01'); press(view, '하루 일정 보기'); view.unmount();
 });
 
-test('로그인 완료 응답 유실은 자동 재시도하지 않고 기존 계정을 유지한다', async () => {
-  const { App } = await components; let completions = 0;
+test('로그인 완료 응답 유실은 같은 흐름을 잠그고 취소 후 기존 계정을 유지한다', async () => {
+  const { App, operationGuard } = await components; let completions = 0;
   const authorizationUrl = `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: 'test-client', response_type: 'code', state: `member_${'s'.repeat(43)}`,
     nonce: 'n'.repeat(43), code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback', scope: 'openid email profile' })}`;
-  globalThis.fetch = async url => {
+  globalThis.fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
     if (path === '/v1/proposals') return response([]);
     if (path === '/v1/auth/google/start') return Response.json({ requestId: 'r', data: { authorizationUrl, completionSecret: 'q'.repeat(43) } });
-    if (path === '/v1/auth/google/complete') { completions++; throw new Error('lost'); }
+    if (path === '/v1/auth/google/complete') { const body = JSON.parse(String(init?.body));
+      if (body.cancel) return apiResponse({ status: 'cancelled' });
+      if (!body.confirmationCode) return apiResponse({ status: 'pending' });
+      completions++; throw new Error('lost'); }
     throw new Error(`unexpected ${path}`);
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'preview'); press(view, '설정 적용'); await view.settle();
   const before = chat(view).props.marker;
   press(view, '개발 연결 설정'); press(view, 'Google 로그인 또는 가입'); press(view, 'Google 로그인 시작'); await view.settle();
-  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
-  assert.equal(completions, 1); assert.match(textOf(view.tree), /로그인 결과를 확인하지 못했습니다/);
-  assert.equal(nodes(view.tree).some(item => item.type === 'TextInput' && item.props.accessibilityLabel === 'Google 로그인 확인 코드'), false);
-  press(view, '뒤로'); assert.equal(chat(view).props.marker, before); view.unmount();
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); press(view, 'Google 로그인 확인'); await view.settle();
+  assert.equal(completions, 1); assert.match(textOf(view.tree), /로그인 결과를 확인하고 있습니다/);
+  assert.equal(operationGuard.hasUnresolved(), true);
+  press(view, '진행 중인 로그인 취소'); await view.settle();
+  assert.equal(operationGuard.hasUnresolved(), false); assert.equal(chat(view).props.marker, before); view.unmount();
 });
 
 test('동기화는 쓰기 권한 캘린더와 명시 선택한 일정만 연결하고 결과 불명을 재전송하지 않는다', async () => {
@@ -1042,7 +1093,7 @@ test('로그인 완료 처리 중에는 건강 화면 전환을 차단한다', a
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
   assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '걸음 수 선택'), false);
@@ -1060,7 +1111,7 @@ test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하�
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); visiblePress(view, '뒤로'); visiblePress(view, '캘린더');
+  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); visiblePress(view, '캘린더');
   const calendar = node(view, 'CalendarScreen'); const timezone = calendar.props.timezone;
   const localDate = (date: Date) => {
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(part => [part.type, part.value]));
@@ -1070,7 +1121,7 @@ test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하�
   visiblePress(view, '루틴'); await view.settle();
   assert.equal(input(view, '루틴 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 종료일').props.value, localDate(first));
   enter(view, '루틴 이름', '작성 중'); enter(view, '루틴 시작일', '2027-02-01'); enter(view, '회차 시작일', '2027-02-02');
-  visiblePress(view, '뒤로'); const second = new Date('2027-01-20T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(second); view.flush();
+  visiblePress(view, '캘린더'); const second = new Date('2027-01-20T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(second); view.flush();
   visiblePress(view, '루틴'); await view.settle();
   assert.equal(input(view, '루틴 이름').props.value, '작성 중'); assert.equal(input(view, '루틴 시작일').props.value, '2027-02-01');
   assert.equal(input(view, '회차 시작일').props.value, '2027-02-02'); assert.equal(input(view, '회차 종료일').props.value, localDate(second)); view.unmount();
@@ -1167,7 +1218,7 @@ test('동기화 쓰기 권한 연결 후 화면에 다시 들어오면 목록을
   assert.match(textOf(view.tree), /캘린더 목록을 확인하지 못했습니다/); assert.equal(calendarReads, 1);
   visiblePress(view, '뒤로'); openSettingsOption(view, 'Google 연결'); await view.settle();
   visiblePress(view, 'Google 캘린더 동기화 연결 시작'); await view.settle();
-  enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 연결 확인'); await view.settle();
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 연결 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 연결 확인'); await view.settle();
   visiblePress(view, '뒤로'); openSettingsOption(view, 'Google 캘린더 동기화'); await view.settle();
   assert.equal(calendarReads, 2); assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '캘린더 새로 연결된 달력')); view.unmount();
 });
@@ -1179,23 +1230,23 @@ function memberAuthFixture(secret = 'q'.repeat(43)) {
 }
 
 test('인증 준비 중에는 연결 전환이 숨겨지고 명시적 취소 후에만 새 서버를 사용한다', async t => {
-  const { App } = await components; const requests: { origin: string; path: string }[] = [];
-  globalThis.fetch = async raw => {
-    const url = new URL(String(raw)); requests.push({ origin: url.origin, path: url.pathname });
+  const { App } = await components; const requests: { origin: string; path: string; body?: any }[] = [];
+  globalThis.fetch = async (raw, init) => {
+    const url = new URL(String(raw)); requests.push({ origin: url.origin, path: url.pathname, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
     if (url.pathname === '/v1/auth/google/start') return memberAuthFixture();
     throw new Error('unexpected synthetic request');
   };
   const view = harness.renderer(App); t.after(() => view.unmount());
   visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43));
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43));
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === 'API 서버 주소'), false);
   visiblePress(view, '뒤로');
   visiblePress(view, '개발 연결 설정'); enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
   visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
+  press(view, '자동 확인이 안 되나요?'); assert.equal(input(view, 'Google 로그인 확인 코드').props.value, '');
   assert.equal(requests.filter(item => item.path === '/v1/auth/google/start').at(-1)?.origin, 'https://new.example.test');
-  assert.equal(requests.some(item => item.path === '/v1/auth/google/complete'), false);
+  assert.equal(requests.some(item => item.path === '/v1/auth/google/complete' && !item.body?.cancel), false);
 });
 
 test('인증 시작 요청 중에는 전환과 취소가 막히고 응답 후 취소할 수 있다', async t => {
@@ -1217,7 +1268,7 @@ test('인증 시작 요청 중에는 전환과 취소가 막히고 응답 후 �
   visiblePress(view, '뒤로'); visiblePress(view, '개발 연결 설정');
   enter(view, 'API 서버 주소', 'https://new.example.test'); visiblePress(view, '설정 적용');
   visiblePress(view, '로그인'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  assert.equal(input(view, 'Google 로그인 확인 코드').props.value, ''); assert.equal(starts, 2);
+  press(view, '자동 확인이 안 되나요?'); assert.equal(input(view, 'Google 로그인 확인 코드').props.value, ''); assert.equal(starts, 2);
 });
 
 test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 원래 요청을 보존한다', async t => {
@@ -1230,7 +1281,7 @@ test('로그인 완료 응답 대기 중에는 API 서버를 바꾸지 않고 �
   };
   const view = harness.renderer(App); t.after(() => view.unmount());
   visiblePress(view, '개발 연결 설정'); visiblePress(view, 'Google 로그인 또는 가입'); visiblePress(view, 'Google 로그인 시작'); await view.settle();
-  enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
+  press(view, '자동 확인이 안 되나요?'); enter(view, 'Google 로그인 확인 코드', 'z'.repeat(43)); visiblePress(view, 'Google 로그인 확인'); await view.settle();
   assert.equal(operationGuard.hasUnresolved(), true);
   assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '개발 연결 설정'), false);
   assert.equal(visibleNodes(view.tree).find(item => item.props?.accessibilityLabel === '뒤로')?.props.disabled, true);
@@ -1262,5 +1313,82 @@ test('전화 미연결 안내에서 설정을 열고 돌아와도 입력한 번�
   visiblePress(view, '전화 연결 설정 열기'); await view.settle(); assert.match(textOf(visibleNodes(view.tree)), /전화 외부 연결/);
   visiblePress(view, '뒤로'); assert.equal(input(view, '받는 전화번호').props.value, '01012345678');
   assert.match(textOf(visibleNodes(view.tree)), /전화 계정 연결/); assert.equal(calls, 1);
+  view.unmount();
+});
+
+
+test('normal chat proposal shows only accept and reject actions and can be accepted directly', async t => {
+  const { App, operationGuard } = await components;
+  const owner = {}; t.after(() => operationGuard.clear(owner));
+  const item = proposal('운동을 추천하는 자세한 이유는 상세에서만 보여야 합니다.');
+  item.changeSet.changes[0].after.title = '운동';
+  const writes: string[] = [];
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (init?.method === 'POST') {
+      writes.push(path);
+      return apiResponse({ outcome: 'applied', proposal: { ...item, revision: 2, status: 'applied' }, scheduleRevision: 1 });
+    }
+    return path === '/v1/proposals/p1' ? apiResponse({ proposal: item }) : response([item]);
+  };
+  (globalThis as any).__appIntegrationHarness.inlineProposalId = 'p1';
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, 'PIKKU'); await view.settle();
+  const marker = chat(view).props.marker;
+  assert.doesNotMatch(textOf(view.tree), /자세한 이유는 상세|제안 상세|GMT|확인 기한/);
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '수락'));
+  assert.doesNotMatch(textOf(chat(view).children), /확인 대기|이유 보기/);
+  assert.equal(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '수정'), false);
+  assert.doesNotMatch(textOf(view.tree), /없음 \(새 일정\)/);
+  assert.deepEqual(writes, []);
+  operationGuard.update(owner, { status: 'pending' });
+  chat(view).props.renderProposal('p1').props.onRequestRevision(item); view.flush();
+  assert.equal(chat(view).props.revisionRequest, undefined);
+  assert.equal(chat(view).props.marker, marker);
+  assert.match(textOf(view.tree), /현재 대화와 제안을 유지/);
+  operationGuard.clear(owner);
+  visiblePress(view, '수락'); await view.settle();
+  assert.deepEqual(writes, ['/v1/proposals/p1/decision']);
+  assert.equal(chat(view).props.marker, marker);
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
+  assert.match(textOf(view.tree), /일정이 반영되었습니다/);
+  view.unmount();
+});
+
+test('approval card shows all-day dates and explicit note and time-block changes without expanding notes', async () => {
+  const { App } = await components;
+  const item: any = proposal('변경 검토');
+  const base = item.changeSet.changes[0].after;
+  const original = '기존 메모' + '가'.repeat(19_990);
+  const updated = '변경 메모' + '나'.repeat(19_990);
+  const allDay = { startsAt: '2026-11-01T00:00:00+09:00', endsAt: '2026-11-03T00:00:00+09:00', timezone: 'Asia/Seoul' };
+  item.beforeItems = [
+    { ...base, id: 'old', revision: 1, sourceRefs: [], notes: original },
+    { ...base, id: 'kept', revision: 1, sourceRefs: [], allDay: true, timeSlot: allDay, blocksTime: false, notes: '유지 메모' },
+    { ...base, id: 'removed', revision: 1, sourceRefs: [], notes: '삭제 전 메모' },
+  ];
+  item.changeSet.changes = [
+    { changeId: 'c1', operation: 'update', targetId: 'old', expectedRevision: 1, after: { ...base, allDay: true, timeSlot: allDay, blocksTime: false, notes: updated } },
+    { changeId: 'c2', operation: 'update', targetId: 'kept', expectedRevision: 1, after: { ...base, title: '제목만 변경', timeSlot: allDay } },
+    { changeId: 'c3', operation: 'update', targetId: 'removed', expectedRevision: 1, after: { ...base, notes: null } },
+    { changeId: 'c4', operation: 'create', after: { ...base, notes: '새 메모' } },
+  ];
+  globalThis.fetch = async url => new URL(String(url)).pathname === '/v1/proposals/p1' ? apiResponse({ proposal: item }) : response([item]);
+  (globalThis as any).__appIntegrationHarness.inlineProposalId = 'p1';
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, 'PIKKU'); await view.settle();
+  const shown = textOf(chat(view).children);
+  assert.match(shown, /종일 · 2026년 11월 1일 ~ 2026년 11월 2일/);
+  assert.match(shown, /종일: 시간 지정 → 종일/);
+  assert.match(shown, /시간 차단: 함 → 안 함/);
+  assert.match(shown, /메모 변경 \(수정\)/); assert.match(shown, /메모 변경 \(삭제\)/); assert.match(shown, /메모 변경 \(추가\)/);
+  assert.doesNotMatch(shown, /기존 메모|변경 메모|유지 메모|삭제 전 메모|새 메모/);
+  assert.equal((shown.match(/메모 변경/g) ?? []).length, 3);
+  visiblePress(view, '메모 변경 (수정) · 펼치기');
+  assert.ok(textOf(chat(view).children).includes(original)); assert.ok(textOf(chat(view).children).includes(updated));
+  visiblePress(view, '메모 변경 (삭제) · 펼치기'); assert.match(textOf(chat(view).children), /삭제 전 메모/);
+  visiblePress(view, '메모 변경 (추가) · 펼치기'); assert.match(textOf(chat(view).children), /새 메모/);
   view.unmount();
 });

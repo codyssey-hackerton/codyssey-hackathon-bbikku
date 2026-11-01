@@ -60,7 +60,7 @@ export default function CalendarSyncPanel({ api, timezone, selectedDate, visible
     <ActionButton label="뒤로" onPress={onBack} secondary />
     <Text accessibilityRole="header" style={styles.title}>Google 캘린더 동기화</Text>
     <Text style={styles.text}>Google 연결에서 캘린더 동기화 쓰기 권한을 별도로 연결한 뒤 캘린더를 선택하세요. 읽기 연결만으로는 동기화할 수 없습니다.</Text>
-    <Text style={styles.text}>동기화 실행 시 선택한 Google 캘린더의 지원 일정과 기존 연결 일정이 대상입니다. 삐꾸 일정은 아래에서 직접 선택한 항목만 Google로 내보냅니다. 개인 일정 전체를 자동으로 내보내지 않습니다.</Text>
+    <Text style={styles.text}>동기화 실행 시 선택한 Google 캘린더의 지원 일정과 기존 연결 일정이 대상입니다. PIKKU 일정은 아래에서 직접 선택한 항목만 Google로 내보냅니다. 개인 일정 전체를 자동으로 내보내지 않습니다.</Text>
     <Text style={styles.text}>양쪽에서 바뀐 일정과 지원하지 않는 일정은 자동으로 덮어쓰지 않고 확인 대상으로 남깁니다. 변경 이력이 만료되면 전체 조회를 시도합니다.</Text>
     <Text style={styles.text}>내가 소유한 캘린더에서 내가 주최한 기존 공동 약속은 승인된 연락과 응답, 변경 내용 및 원본이 모두 확인되면 시간 변경을 반영할 수 있습니다. 새 공동 약속 내보내기, 삭제, 다른 사람 주최, Google에서 변경된 공동 약속이나 확인되지 않은 변경은 검토 대상으로 남습니다.</Text>
     {(calendars.status === 'loading' || connections.status === 'loading') && <><ActivityIndicator /><Text>연결 상태를 확인하는 중입니다.</Text></>}
@@ -79,7 +79,7 @@ export default function CalendarSyncPanel({ api, timezone, selectedDate, visible
     {calendars.status === 'success' && calendars.data.length === 0 && <Text>조회된 캘린더가 없습니다.</Text>}
     {calendars.status === 'success' && calendars.data.map(item => <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={`캘린더 ${item.summary || item.id}`} accessibilityState={{ checked: calendarId === item.id, disabled: blocked || !['owner', 'writer'].includes(item.accessRole) }}
       disabled={blocked || !['owner', 'writer'].includes(item.accessRole)} onPress={() => setCalendarId(item.id)} style={styles.choice}><Text>{calendarId === item.id ? '◉' : '○'} {item.summary || item.id} · {item.accessRole}</Text></Pressable>)}
-    <Text accessibilityRole="header" style={styles.section}>내보낼 삐꾸 일정 선택</Text>
+    <Text accessibilityRole="header" style={styles.section}>내보낼 PIKKU 일정 선택</Text>
     <Text style={styles.text}>{formatCivilDate(civilDate(selectedDate, timezone))}의 외부 원본이 없는 시간 지정 개인 이벤트를 최대 100건 선택할 수 있습니다. 할 일과 루틴 회차는 Google로 내보내지 못합니다.</Text>
     {schedule.status === 'loading' && <Text>일정을 불러오는 중입니다.</Text>}
     {schedule.status === 'error' && <><Text accessibilityRole="alert">내보낼 일정을 확인하지 못했습니다.</Text><ActionButton label="일정 다시 조회" onPress={schedule.retry} secondary /></>}
@@ -105,7 +105,7 @@ export default function CalendarSyncPanel({ api, timezone, selectedDate, visible
     {action.state.status === 'success' && action.state.result.kind === 'run' && <View style={styles.card}>
       <Text>가져옴 {action.state.result.result.imported}건 · 내보냄 {action.state.result.result.exported}건 · 삭제 {action.state.result.result.deleted}건</Text>
       {(action.state.result.result.conflicts.length > 0 || action.state.result.result.unsupportedCount > 0) && <Text accessibilityRole="alert">일부 항목은 처리하지 못했거나 검토가 필요합니다. 지원하지 않는 항목 {action.state.result.result.unsupportedCount}건</Text>}
-      {action.state.result.result.conflicts.map((item, i) => <Text key={`${item.reason}:${i}`}>{reasons[item.reason] ?? `확인 필요 (${item.reason})`}{item.itemId ? ` · 삐꾸 일정 ${item.itemId}` : ''}{item.eventId ? ` · Google 일정 ${item.eventId}` : ''}</Text>)}
+      {action.state.result.result.conflicts.map((item, i) => <Text key={`${item.reason}:${i}`}>{reasons[item.reason] ?? `확인 필요 (${item.reason})`}{item.itemId ? ` · PIKKU 일정 ${item.itemId}` : ''}{item.eventId ? ` · Google 일정 ${item.eventId}` : ''}</Text>)}
       {action.state.result.result.connection.status === 'review_required' && <Text accessibilityRole="alert">외부 처리 결과를 검토해야 합니다. 자동으로 재전송하지 않습니다.</Text>}
     </View>}
   </ScrollView>;

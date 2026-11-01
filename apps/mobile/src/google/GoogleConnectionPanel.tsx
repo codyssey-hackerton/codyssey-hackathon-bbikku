@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, ScrollView, StyleSheet, View } from 'react-native';
 import { ApiError, type ApiClient } from '../api/http';
 import { operationGuard } from '../api/operationGuard';
+import { isUncertainMutationError } from '../api/mutation';
 import { colors } from '../ui/theme';
 import { Text, TextInput } from '../ui/typography';
 import { ActionButton } from '../ui/ActionButton';
@@ -21,8 +22,8 @@ function message(error: unknown): string {
   const code = error instanceof ApiError ? error.code : '';
   return code === 'not_configured' ? 'Google 연결이 아직 설정되지 않았습니다. 관리자에게 설정을 요청해 주세요.' :
     code === 'expired' ? 'Google 연결 준비 시간이 지났습니다. 연결을 다시 시작해 주세요.' :
-    code === 'unauthenticated' ? '삐꾸 로그인 세션을 확인한 뒤 다시 시도해 주세요.' :
-    code === 'permission_denied' ? '현재 삐꾸 계정에서 이 연결을 확인할 권한이 없습니다.' :
+    code === 'unauthenticated' ? 'PIKKU 로그인 세션을 확인한 뒤 다시 시도해 주세요.' :
+    code === 'permission_denied' ? '현재 PIKKU 계정에서 이 연결을 확인할 권한이 없습니다.' :
     code === 'invalid_response' ? 'Google 연결 상태 응답을 확인할 수 없습니다.' : '연결 상태를 불러오지 못했습니다. 서버 연결을 확인한 뒤 다시 시도해 주세요.';
 }
 
@@ -36,9 +37,13 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
   const [attempt, setAttempt] = useState(0);
   const [start, setStart] = useState<Start>({ status: 'idle' });
   const [opened, setOpened] = useState(false);
+  const [manual, setManual] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [uncertain, setUncertain] = useState(false);
   const [confirmationCode, setConfirmationCode] = useState('');
   const activeFlow = useRef<{ url: string; completionSecret: string; startedAt: number } | null>(null);
   const completionLock = useRef(false);
+  const uncertainRef = useRef(false);
   const completionOwner = useRef<object>({});
   const generation = useRef(0);
   const startGeneration = useRef(0);
@@ -52,11 +57,65 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
     });
     return () => { generation.current += 1; };
   }, [client, attempt]);
-  useEffect(() => () => { startGeneration.current += 1; activeFlow.current = null; operationGuard.clear(completionOwner.current); }, [client]);
+  function cancelFlow() {
+    const previous = activeFlow.current; activeFlow.current = null;
+    if (previous) void client.cancel(previous.completionSecret).catch(() => {});
+  }
+  useEffect(() => () => { startGeneration.current += 1; cancelFlow(); operationGuard.clear(completionOwner.current); }, [client]);
+  useEffect(() => {
+    if (!opened || start.status !== 'ready') return;
+    const current = startGeneration.current; let stopped = false; let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (delay: number) => { if (!stopped) timer = setTimeout(() => { void poll(); }, delay); };
+    async function poll() {
+      const flow = activeFlow.current;
+      if (stopped || current !== startGeneration.current || !flow) return;
+      const elapsed = globalThis.performance?.now() - flow.startedAt;
+      if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= 600_000) {
+        if (uncertainRef.current) return;
+        cancelFlow(); setStart({ status: 'error', error: new ApiError('expired', '연결 준비 시간이 지났습니다.') }); return;
+      }
+      if (completionLock.current || (!uncertainRef.current && operationGuard.hasUnresolved())) { schedule(6_000); return; }
+      completionLock.current = true; setPolling(true); operationGuard.update(completionOwner.current, { status: 'pending' });
+      try {
+        const result = await client.poll(flow.completionSecret);
+        if (stopped || current !== startGeneration.current || activeFlow.current !== flow) return;
+        if (result === 'pending') { schedule(6_000); return; }
+        uncertainRef.current = false; setUncertain(false);
+        activeFlow.current = null; setStart({ status: 'complete' }); setAttempt(value => value + 1);
+      } catch (error) {
+        if (stopped || current !== startGeneration.current) return;
+        if (isUncertainMutationError(error)) { uncertainRef.current = true; setUncertain(true); }
+        if (error instanceof ApiError && ['invalid_request', 'unauthenticated', 'permission_denied'].includes(error.code)) {
+          if (uncertainRef.current) return;
+          cancelFlow(); setStart({ status: 'error', error });
+        } else schedule(error instanceof ApiError && error.code === 'rate_limited' ? 65_000 : 6_000);
+      } finally {
+        completionLock.current = false;
+        if (uncertainRef.current && current === startGeneration.current) operationGuard.update(completionOwner.current, { status: 'error', error: null, uncertain: true });
+        else operationGuard.clear(completionOwner.current);
+        if (!stopped && current === startGeneration.current) setPolling(false);
+      }
+    }
+    schedule(0);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [client, opened, start.status]);
+
+  async function cancelUncertain() {
+    const flow = activeFlow.current, current = startGeneration.current;
+    if (!flow || !uncertainRef.current || completionLock.current) return;
+    completionLock.current = true; setPolling(true);
+    try {
+      await client.cancel(flow.completionSecret);
+      if (current !== startGeneration.current || activeFlow.current !== flow) return;
+      startGeneration.current += 1; activeFlow.current = null; uncertainRef.current = false; setUncertain(false);
+      operationGuard.clear(completionOwner.current); onBack();
+    } catch { /* Keep the flow until its outcome or cancellation is confirmed. */ }
+    finally { completionLock.current = false; if (current === startGeneration.current) setPolling(false); }
+  }
 
   async function prepare(kind: GoogleConnectionKind) {
-    if (start.status === 'pending' || start.status === 'completing' || completionLock.current) return;
-    const current = ++startGeneration.current; activeFlow.current = null; setConfirmationCode(''); setOpened(false); setStart({ status: 'pending' });
+    if (start.status === 'pending' || start.status === 'completing' || completionLock.current || uncertainRef.current) return;
+    const current = ++startGeneration.current; cancelFlow(); setConfirmationCode(''); setManual(false); setOpened(false); setStart({ status: 'pending' });
     try {
       const startedAt = globalThis.performance?.now();
       if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) throw new ApiError('not_configured', '연결 유효기간을 확인할 수 없습니다.');
@@ -64,6 +123,7 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
       const elapsed = globalThis.performance.now() - startedAt;
       if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= 10 * 60_000) throw new ApiError('expired', '연결 준비 시간이 지났습니다.');
       if (startGeneration.current === current) { activeFlow.current = { url: authorizationUrl, completionSecret, startedAt }; setStart({ status: 'ready', kind }); }
+      else void client.cancel(completionSecret).catch(() => {});
     } catch (error) {
       if (startGeneration.current === current) setStart({ status: 'error', error });
     }
@@ -78,7 +138,7 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
       await Linking.openURL(flow.url);
       if (current === startGeneration.current) setOpened(true);
     } catch (error) {
-      if (current === startGeneration.current) { activeFlow.current = null; setConfirmationCode(''); setStart({ status: 'error', error }); }
+      if (current === startGeneration.current) { cancelFlow(); setConfirmationCode(''); setStart({ status: 'error', error }); }
     }
   }
   async function complete() {
@@ -86,24 +146,29 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
     if (start.status !== 'ready' || !flow || !/^[A-Za-z0-9_-]{43}$/.test(code) || completionLock.current) return;
     const elapsed = globalThis.performance?.now() - flow.startedAt;
     if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= 10 * 60_000) {
-      activeFlow.current = null; setConfirmationCode(''); setStart({ status: 'error', error: new ApiError('expired', '연결 준비 시간이 지났습니다.') }); return;
+      cancelFlow(); setConfirmationCode(''); setStart({ status: 'error', error: new ApiError('expired', '연결 준비 시간이 지났습니다.') }); return;
     }
-    const current = startGeneration.current;
-    completionLock.current = true; activeFlow.current = null; setConfirmationCode(''); setStart({ status: 'completing' });
+    const current = startGeneration.current, kind = start.kind;
+    completionLock.current = true; setConfirmationCode(''); setStart({ status: 'completing' });
     operationGuard.update(completionOwner.current, { status: 'pending' });
     try {
       await client.complete(flow.completionSecret, code);
-      if (current === startGeneration.current) { setStart({ status: 'complete' }); setAttempt((value) => value + 1); }
-    } catch {
-      if (current === startGeneration.current) setStart({ status: 'completion_unknown' });
+      if (current === startGeneration.current) { activeFlow.current = null; setStart({ status: 'complete' }); setAttempt((value) => value + 1); }
+    } catch (error) {
+      if (current === startGeneration.current) {
+        if (isUncertainMutationError(error)) { uncertainRef.current = true; setUncertain(true); setOpened(true); setStart({ status: 'ready', kind }); }
+        else { cancelFlow(); setStart({ status: 'error', error }); }
+      }
     } finally {
-      completionLock.current = false; operationGuard.clear(completionOwner.current);
+      completionLock.current = false;
+      if (uncertainRef.current && current === startGeneration.current) operationGuard.update(completionOwner.current, { status: 'error', error: null, uncertain: true });
+      else operationGuard.clear(completionOwner.current);
     }
   }
   return <ScrollView contentContainerStyle={styles.container}>
     <Text style={styles.eyebrow}>GOOGLE 연결 관리</Text>
     <Text accessibilityRole="header" style={styles.title}>Google 서비스 연결</Text>
-    <Text style={styles.intro}>삐꾸 로그인과 Google 서비스 연결은 별도입니다. 현재 삐꾸 사용자에게 필요한 권한만 Google 동의 화면에서 직접 확인해 주세요.</Text>
+    <Text style={styles.intro}>PIKKU 로그인과 Google 서비스 연결은 별도입니다. 현재 PIKKU 사용자에게 필요한 권한만 Google 동의 화면에서 직접 확인해 주세요.</Text>
     <View style={styles.notice}><Text style={styles.noticeTitle}>동의 없이 연결하지 않아요</Text>
       <Text style={styles.detail}>캘린더·Gmail·연락처 권한은 각각 연결합니다. 연결만으로 일정 변경이나 메일 발송이 이루어지지 않습니다.</Text></View>
     <Text accessibilityRole="header" style={styles.section}>Google Calendar</Text>
@@ -122,24 +187,27 @@ export default function GoogleConnectionPanel({ api, onBack, onOpenCalendarImpor
       {status.status === 'success' && status.data.status === 'not_configured' && <Text style={styles.detail}>이 권한은 아직 연결되지 않았습니다.</Text>}
       {kind === 'calendar' && status.status === 'success' && status.data.status === 'available' && onOpenCalendarImport &&
         <Button label="캘린더 일정 가져오기" primary onPress={onOpenCalendarImport} disabled={start.status === 'pending' || start.status === 'completing'} />}
-      <Button label={`${title} 연결 시작`} disabled={start.status === 'pending' || start.status === 'completing'} onPress={() => { void prepare(kind); }} />
+      <Button label={`${title} 연결 시작`} disabled={start.status === 'pending' || start.status === 'completing' || polling || uncertain} onPress={() => { void prepare(kind); }} />
     </View></View>; })}
     {start.status === 'pending' && <Text accessibilityLiveRegion="polite" style={styles.text}>Google 동의 화면을 준비하고 있습니다.</Text>}
     {start.status === 'error' && <Text accessibilityRole="alert" style={styles.error}>{message(start.error)}</Text>}
     {start.status === 'ready' && <>
       <Text style={styles.text}>{connections.find((item) => item.kind === start.kind)?.title} 권한을 Google에서 직접 확인해 주세요.</Text>
-      <Button label="Google 동의 화면 열기" onPress={() => { void openConsent(); }} />
-      {opened && <Text style={styles.text}>동의 화면 열기를 요청했습니다. 화면이 보이지 않으면 팝업 설정을 확인해 주세요.</Text>}
-      <Text style={styles.text}>Google 동의가 끝나면 브라우저에 표시된 연결 확인 코드를 복사해 아래에 입력해 주세요. 이 코드를 다른 사람에게 전달하지 마세요.</Text>
+      <Button label="Google 동의 화면 열기" disabled={polling || uncertain} onPress={() => { void openConsent(); }} />
+      {opened && <Text style={styles.text}>Google에서 동의한 뒤 앱으로 돌아오면 연결을 자동으로 확인합니다.</Text>}
+      <Button label={manual ? '확인 코드 입력 닫기' : '자동 확인이 안 되나요?'} disabled={polling || uncertain} onPress={() => setManual(!manual)} />
+      {manual && <><Text style={styles.text}>브라우저에 표시된 확인 코드를 입력해 주세요. 이 코드를 다른 사람에게 전달하지 마세요.</Text>
       <TextInput accessibilityLabel="Google 연결 확인 코드" value={confirmationCode} onChangeText={setConfirmationCode}
         secureTextEntry autoComplete="off" autoCapitalize="none" autoCorrect={false} maxLength={43} style={styles.input} />
-      <Button label="Google 연결 확인" disabled={!/^[A-Za-z0-9_-]{43}$/.test(confirmationCode.trim())} onPress={() => { void complete(); }} />
+      <Button label="Google 연결 확인" disabled={polling || uncertain || !/^[A-Za-z0-9_-]{43}$/.test(confirmationCode.trim())} onPress={() => { void complete(); }} /></>}
     </>}
     {start.status === 'completing' && <Text accessibilityLiveRegion="polite" style={styles.text}>Google 연결을 확인하는 중입니다.</Text>}
     {start.status === 'complete' && <Text accessibilityLiveRegion="polite" style={styles.text}>연결을 확인했습니다. 권한별 상태를 다시 조회합니다.</Text>}
     {start.status === 'completion_unknown' && <Text accessibilityRole="alert" style={styles.error}>연결 결과를 확인하지 못했습니다. 연결 상태를 다시 확인해 주세요. 기존 계정이 이미 연결되어 있었다면 상태만으로 이번 변경 여부를 알 수 없으므로 필요하면 처음부터 다시 시작해 주세요.</Text>}
+    {uncertain && <><Text accessibilityLiveRegion="polite" style={styles.text}>연결 결과를 확인하고 있습니다. 확인 전에는 다른 연결을 시작할 수 없습니다.</Text>
+      <Button label="진행 중인 Google 연결 취소" disabled={polling} onPress={() => { void cancelUncertain(); }} /></>}
     <Button label="연결 상태 다시 확인" disabled={start.status === 'pending' || start.status === 'completing'} onPress={() => { setAttempt((value) => value + 1); }} />
-    <Button label="뒤로" primary onPress={onBack} disabled={start.status === 'pending' || start.status === 'completing'} />
+    <Button label="뒤로" primary onPress={() => { if (completionLock.current || uncertainRef.current) return; startGeneration.current += 1; cancelFlow(); onBack(); }} disabled={start.status === 'pending' || start.status === 'completing' || polling || uncertain} />
   </ScrollView>;
 }
 

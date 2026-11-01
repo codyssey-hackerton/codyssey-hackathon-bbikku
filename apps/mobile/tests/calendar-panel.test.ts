@@ -24,6 +24,7 @@ const importedItem = {
   completion: 'pending', sourceRefs: [{ provider: 'google_calendar', accountRef: 'test-account',
     calendarId, externalEventId: events[0].id, lastSyncedAt: from, sourceVersion: events[0].etag }],
 };
+const importedItem2 = { ...importedItem, id: 'imported-2', sourceRefs: [{ ...importedItem.sourceRefs[0], externalEventId: events[1].id, sourceVersion: events[1].etag }] };
 const input: CalendarImportInput = { calendarId, from, to, selectedEvents: [{ id: events[0].id, etag: events[0].etag }], expectedScheduleRevision: 7 };
 const op: Mutation<CalendarImportInput> = { input, requestId: 'request-1', idempotencyKey: 'key-1' };
 const wait = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -87,8 +88,42 @@ test('import rejects missing or extra items and revisions other than the next re
   const twoEvents = { ...op, input: { ...input, expectedScheduleRevision: 0, selectedEvents: selectedEventRefs(events, new Set(events.map(event => event.id))) } };
   response = { items: [importedItem], scheduleRevision: 1 };
   await assert.rejects(client.importEvents(twoEvents), invalid);
-  response = { items: [importedItem, { ...importedItem, id: 'imported-2' }], scheduleRevision: 1 };
+  response = { items: [importedItem, importedItem2], scheduleRevision: 1 };
   assert.deepEqual(await client.importEvents(twoEvents), response);
+});
+
+test('automatic import accepts only consistent partial or unchanged results', async () => {
+  let response: unknown;
+  const client = createCalendarClient({ get: async <T>() => response as T, post: async <T>() => response as T });
+  const auto = { ...op, input: { ...input, selectedEvents: events.map(({ id, etag }) => ({ id, etag })), skipExisting: true } };
+  for (response of [{ items: [], scheduleRevision: 7 }, { items: [importedItem], scheduleRevision: 8 }]) {
+    assert.deepEqual(await client.importEvents(auto), response);
+  }
+  for (response of [{ items: [], scheduleRevision: 8 }, { items: [importedItem], scheduleRevision: 7 },
+    { items: [importedItem, importedItem, importedItem], scheduleRevision: 8 }]) {
+    await assert.rejects(client.importEvents(auto), (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
+  }
+});
+
+test('automatic import rejects malformed, unrelated or duplicated returned source items', async () => {
+  let response: unknown;
+  const client = createCalendarClient({ get: async <T>() => response as T, post: async <T>() => response as T });
+  const auto = { ...op, input: { ...input, selectedEvents: events.map(({ id, etag }) => ({ id, etag })), expectedAccountRef: 'test-account', skipExisting: true } };
+  const ref = importedItem.sourceRefs[0];
+  for (const items of [
+    [null], [{ ...importedItem, timeSlot: null }], [{ ...importedItem, sourceRefs: [] }],
+    [{ ...importedItem, sourceRefs: [{ ...ref, accountRef: 'other' }] }],
+    [{ ...importedItem, sourceRefs: [{ ...ref, calendarId: 'other' }] }],
+    [{ ...importedItem, sourceRefs: [{ ...ref, externalEventId: 'other' }] }],
+    [{ ...importedItem, sourceRefs: [{ ...ref, sourceVersion: 'old' }] }],
+    [importedItem, { ...importedItem, id: 'other-id' }],
+    [importedItem, { ...importedItem2, id: importedItem.id }],
+    [{ ...importedItem, sourceRefs: [{ ...ref, occurrenceKey: 'series-instance' }] },
+      { ...importedItem2, sourceRefs: [{ ...importedItem2.sourceRefs[0], occurrenceKey: 'series-instance' }] }],
+  ]) {
+    response = { items, scheduleRevision: 8 };
+    await assert.rejects(client.importEvents(auto), (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
+  }
 });
 
 test('uncertain import blocks the guard and retries the same immutable intent until resolved', async () => {
@@ -227,10 +262,10 @@ function createHarness() {
 
 const harness = createHarness();
 const panelModule = build({
-  stdin: { contents: `export { default as Panel } from '../src/calendar/CalendarImportPanel'; export { ScheduleForm } from '../src/schedule/ScheduleForm'; export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
+  stdin: { contents: `export { default as Panel } from '../src/calendar/CalendarImportPanel'; export { default as AutoImport } from '../src/calendar/AutoCalendarImport'; export { ScheduleForm } from '../src/schedule/ScheduleForm'; export { operationGuard } from '../src/api/operationGuard'; export { ApiError } from '../src/api/http';`, resolveDir: resolve(__dirname), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'mock-native-calendar', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*ui\/typography)$/ }, args => ({ path: args.path, namespace: 'calendar-native' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|.*\/typography)$/ }, args => ({ path: args.path, namespace: 'calendar-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'calendar-native' }, ({ path }) => ({ contents:
       path.endsWith('/typography') ? 'exports.Text="Text"; exports.TextInput="TextInput"' :
       path === 'react' ? 'module.exports=globalThis.__calendarPanelHarness.react' :
@@ -275,13 +310,16 @@ function press(view: any, label: string) {
   found.props.onPress(); view.flush();
 }
 function inputNode(view: any, label: string) {
-  const found = nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === label);
+  const found = nodes(view.tree).find(node => (node.type === 'TextInput' && node.props.accessibilityLabel === label) || (node.type === 'input' && node.props['aria-label'] === label));
   assert.ok(found, `missing input: ${label}`); return found;
 }
 function enter(view: any, label: string, value: string) {
   const found = inputNode(view, label);
   assert.notEqual(found.props.editable, false, `locked input: ${label}`);
-  found.props.onChangeText(value); view.flush();
+  assert.notEqual(found.props.disabled, true, `locked input: ${label}`);
+  if (found.type === 'input') found.props.onChange({ currentTarget: { value } });
+  else found.props.onChangeText(value);
+  view.flush();
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -290,11 +328,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-test('mount reads the connection and list only, and defaults to seven local days across DST', async t => {
+test('mount defaults to the current local month and queries through the next midnight across DST', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-08T15:00:00Z') });
   const { Panel } = await panelModule; const paths: string[] = [];
   const api = { get: async (path: string) => { paths.push(path); return path === '/v1/calendar-connection'
-    ? { status: 'available', accountLabel: null } : { calendars: [{ id: 'calendar', summary: '예시' }] }; }, post: async () => assert.fail('unexpected write') };
+    ? { status: 'available', accountLabel: null } : path === '/v1/calendar/calendars' ? { calendars: [{ id: 'calendar', summary: '예시' }] } : { events: [], unsupportedCount: 0 }; }, post: async () => assert.fail('unexpected write') };
   const view = harness.renderer(Panel, { api, timezone: 'America/New_York', onBack() {}, onScheduleChanged() {} });
   t.after(() => view.unmount());
   await view.settle();
@@ -302,9 +340,14 @@ test('mount reads the connection and list only, and defaults to seven local days
   assertWebChecked(nodes(view.tree).find(node => node.props?.accessibilityRole === 'radio'), false);
   assert.equal(nodes(view.tree).some(node => node.type === 'TextInput'), false);
   press(view, '예시');
-  assert.equal(inputNode(view, '조회 시작').props.value, '2026-03-08T05:00:00.000Z');
-  assert.equal(inputNode(view, '조회 종료').props.value, '2026-03-15T04:00:00.000Z');
+  assert.equal(inputNode(view, '조회 시작일').props.value, '2026-03-01');
+  assert.equal(inputNode(view, '조회 마지막 날').props.value, '2026-03-31');
+  assert.equal(inputNode(view, '조회 시작일').props.type, 'date');
   assert.equal(paths.length, 2);
+  press(view, '이 기간 일정 조회'); await view.settle();
+  const query = new URLSearchParams(paths[2].split('?')[1]);
+  assert.equal(query.get('from'), '2026-03-01T05:00:00.000Z');
+  assert.equal(query.get('to'), '2026-04-01T04:00:00.000Z');
 });
 
 test('a replaced client ignores the old connection response', async t => {
@@ -328,7 +371,7 @@ test('event selection stops at 100 and lets a selected item be deselected', asyn
   post: async () => assert.fail('unexpected write') };
   const view = harness.renderer(Panel, { api, timezone: 'Asia/Seoul', onBack() {}, onScheduleChanged() {} });
   t.after(() => view.unmount()); await view.settle(); press(view, '예시');
-  enter(view, '조회 시작', from); enter(view, '조회 종료', to); press(view, '이 기간 일정 조회'); await view.settle();
+  enter(view, '조회 시작일', '2026-11-01'); enter(view, '조회 마지막 날', '2026-11-06'); press(view, '이 기간 일정 조회'); await view.settle();
   const choices = () => nodes(view.tree).filter(node => node.props?.accessibilityRole === 'checkbox');
   for (let index = 0; index < 100; index++) { choices()[index].props.onPress(); view.flush(); }
   assert.equal(choices()[100].props.disabled, true); assert.equal(button(view, '선택한 100개 가져오기').props.disabled, false);
@@ -343,8 +386,8 @@ test('일정 폼 라디오는 선택 전후 네이티브 상태와 웹 aria-chec
   assertWebChecked(find('종류: 일정'), true); assertWebChecked(find('종류: 할 일'), false);
   press(view, '종류: 할 일');
   assertWebChecked(find('종류: 일정'), false); assertWebChecked(find('종류: 할 일'), true);
-  assertWebChecked(find('참여: 개인'), true); press(view, '참여: 공동');
-  assertWebChecked(find('참여: 개인'), false); assertWebChecked(find('참여: 공동'), true);
+  assertWebChecked(find('분류: 미분류'), true); press(view, '분류: 업무');
+  assertWebChecked(find('분류: 미분류'), false); assertWebChecked(find('분류: 업무'), true);
 });
 
 test('웹에서는 하드웨어 뒤로가기를 등록하지 않고 종료 후 늦은 조회를 무시한다', async t => {
@@ -389,7 +432,7 @@ test('panel treats an incomplete success as uncertain and retries the same impor
   assertWebChecked(calendarChoice(), false);
   press(view, '예시');
   assertWebChecked(calendarChoice(), true);
-  enter(view, '조회 시작', from); enter(view, '조회 종료', to);
+  enter(view, '조회 시작일', '2026-11-01'); enter(view, '조회 마지막 날', '2026-11-06');
   press(view, '이 기간 일정 조회'); await view.settle();
   assert.match(textOf(view.tree), /지원하지 않는 일정 2개/);
   assert.equal(requests.length, 0);
@@ -406,6 +449,8 @@ test('panel treats an incomplete success as uncertain and retries the same impor
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0].body.selectedEvents, [{ id: events[0].id, etag: events[0].etag }]);
   assert.equal(requests[0].body.expectedScheduleRevision, 7);
+  assert.equal(requests[0].body.from, '2026-10-31T15:00:00.000Z');
+  assert.equal(requests[0].body.to, '2026-11-06T15:00:00.000Z');
   assert.equal(operationGuard.hasUnresolved(), true);
   first.resolve({ items: [], scheduleRevision: 8 }); await view.settle();
   assert.match(textOf(view.tree), /처리 결과를 확인할 수 없습니다/);
@@ -441,7 +486,7 @@ test('a confirmed conflict requires fresh event read before another import', asy
     post: async () => { writes += 1; throw new PanelApiError('conflict', 'changed', false, 409); } };
   const view = harness.renderer(Panel, { api, timezone: 'Asia/Seoul', scheduleClient: { list: async () => ({ items: [], scheduleRevision: 7 }) }, onBack: () => {}, onScheduleChanged: () => assert.fail('must not report success') });
   await view.settle(); press(view, '예시');
-  enter(view, '조회 시작', from); enter(view, '조회 종료', to); press(view, '이 기간 일정 조회'); await view.settle();
+  enter(view, '조회 시작일', '2026-11-01'); enter(view, '조회 마지막 날', '2026-11-06'); press(view, '이 기간 일정 조회'); await view.settle();
   nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'checkbox').props.onPress(); view.flush();
   press(view, '선택한 1개 가져오기'); await view.settle();
   assert.equal(writes, 1); assert.match(textOf(view.tree), /변경되었습니다/);
@@ -449,4 +494,142 @@ test('a confirmed conflict requires fresh event read before another import', asy
   assert.equal(nodes(view.tree).some(node => node.props?.accessibilityRole === 'checkbox'), false);
   assert.equal(button(view, '이 기간 일정 조회').props.disabled, false);
   view.unmount();
+});
+
+test('automatic import uses only the primary calendar and skips this account’s imported events', async () => {
+  const { AutoImport } = await panelModule;
+  const calls: any[] = []; let changed = 0;
+  const api = {
+    async get(path: string) {
+      calls.push({ method: 'GET', path });
+      if (path === '/v1/calendar-connection') return { status: 'available', accountLabel: '테스트', accountRef: 'test-account' };
+      if (path === '/v1/calendar/calendars') return { calendars: [{ id: 'other', summary: '다른 캘린더' }, { id: calendarId, summary: '기본', primary: true }] };
+      if (path.startsWith('/v1/calendar/events?')) return { events, unsupportedCount: 0 };
+      if (path.startsWith('/v1/schedule?')) return { items: [importedItem], scheduleRevision: 7 };
+      throw new Error('unexpected GET');
+    },
+    async post(path: string, body: any, options: any) {
+      calls.push({ method: 'POST', path, body, key: options.idempotencyKey });
+      return { items: [importedItem2], scheduleRevision: 8 };
+    },
+  };
+  const view = harness.renderer(AutoImport, { api, timezone: 'Asia/Seoul', selectedDate: new Date('2026-11-02T00:00:00Z'), enabled: true, refreshVersion: 0, onScheduleChanged: () => { changed++; } });
+  await view.settle(); await view.settle();
+  const posts = calls.filter(call => call.method === 'POST');
+  assert.equal(posts.length, 1); assert.equal(posts[0].body.calendarId, calendarId);
+  assert.equal(posts[0].body.expectedAccountRef, 'test-account');
+  assert.equal(posts[0].body.skipExisting, true);
+  assert.deepEqual(posts[0].body.selectedEvents, [{ id: 'event-2', etag: events[1].etag }]);
+  assert.equal(posts[0].body.from, '2026-10-31T15:00:00.000Z'); assert.equal(posts[0].body.to, '2026-11-30T15:00:00.000Z');
+  assert.equal(changed, 1); view.unmount();
+});
+
+test('automatic import requires a choice without a primary and reuses the same key after an uncertain outcome', async () => {
+  const { AutoImport, ApiError: PanelError } = await panelModule;
+  const posts: any[] = [];
+  const api = {
+    async get(path: string) {
+      if (path === '/v1/calendar-connection') return { status: 'available', accountLabel: null, accountRef: 'test-account' };
+      if (path === '/v1/calendar/calendars') return { calendars: [{ id: calendarId, summary: '직접 선택' }] };
+      if (path.startsWith('/v1/calendar/events?')) return { events: [events[0]], unsupportedCount: 0 };
+      if (path.startsWith('/v1/schedule?')) return { items: [], scheduleRevision: 0 };
+      throw new Error('unexpected GET');
+    },
+    async post(path: string, body: any, options: any) {
+      posts.push({ path, body, key: options.idempotencyKey });
+      if (posts.length === 1) throw new PanelError('timeout', 'timeout');
+      return { items: [importedItem], scheduleRevision: 1 };
+    },
+  };
+  const props = { api, timezone: 'Asia/Seoul', selectedDate: new Date('2026-11-02T00:00:00Z'), enabled: true, refreshVersion: 0, onScheduleChanged: () => {} };
+  const view = harness.renderer(AutoImport, props); await view.settle();
+  assert.equal(posts.length, 0); assert.match(textOf(view.tree), /캘린더를 선택/);
+  button(view, '직접 선택').props.onPress(); view.flush(); await view.settle(); await view.settle();
+  assert.equal(posts.length, 1); assert.match(textOf(view.tree), /결과를 확인하지 못했습니다/);
+  button(view, '같은 요청 다시 확인').props.onPress(); view.flush(); await view.settle();
+  assert.equal(posts.length, 2); assert.deepEqual(posts[1], posts[0]); view.unmount();
+});
+
+test('invalid automatic import response stays uncertain and retries the identical request', async () => {
+  const { AutoImport } = await panelModule;
+  const posts: any[] = []; let changed = 0;
+  const api = {
+    async get(path: string) {
+      if (path === '/v1/calendar-connection') return { status: 'available', accountLabel: null, accountRef: 'test-account' };
+      if (path === '/v1/calendar/calendars') return { calendars: [{ id: calendarId, summary: '기본', primary: true }] };
+      if (path.startsWith('/v1/calendar/events?')) return { events: [events[0]], unsupportedCount: 0 };
+      if (path.startsWith('/v1/schedule?')) return { items: [], scheduleRevision: 7 };
+      throw new Error('unexpected GET');
+    },
+    async post(path: string, body: any, options: any) {
+      posts.push({ path, body, key: options.idempotencyKey });
+      return { items: posts.length === 1 ? [null] : [importedItem], scheduleRevision: 8 };
+    },
+  };
+  const view = harness.renderer(AutoImport, { api, timezone: 'Asia/Seoul', selectedDate: new Date('2026-11-02T00:00:00Z'), enabled: true,
+    refreshVersion: 0, onScheduleChanged: () => { changed++; } });
+  await view.settle(); await view.settle();
+  assert.equal(posts.length, 1); assert.equal(changed, 0); assert.match(textOf(view.tree), /결과를 확인하지 못했습니다/);
+  button(view, '같은 요청 다시 확인').props.onPress(); view.flush(); await view.settle();
+  assert.equal(posts.length, 2); assert.deepEqual(posts[1], posts[0]); assert.equal(changed, 1); view.unmount();
+});
+
+test('automatic import does not write when disabled while a read is pending', async () => {
+  const { AutoImport } = await panelModule;
+  let release!: (value: unknown) => void; let posts = 0;
+  const api = {
+    async get(path: string) {
+      if (path === '/v1/calendar-connection') return new Promise(resolve => { release = resolve; });
+      throw new Error('unexpected GET');
+    },
+    async post() { posts++; throw new Error('unexpected POST'); },
+  };
+  const props = { api, timezone: 'Asia/Seoul', selectedDate: new Date('2026-11-02T00:00:00Z'), enabled: true, refreshVersion: 0, onScheduleChanged: () => {} };
+  const view = harness.renderer(AutoImport, props); view.update({ ...props, enabled: false });
+  release({ status: 'available', accountLabel: null, accountRef: 'test-account' }); await view.settle();
+  assert.equal(posts, 0); view.unmount();
+});
+
+test('automatic import follows a new visible month after an earlier read completes', async () => {
+  const { AutoImport } = await panelModule;
+  let release!: (value: unknown) => void; let connectionReads = 0; const eventReads: string[] = [];
+  const api = {
+    async get(path: string) {
+      if (path === '/v1/calendar-connection') {
+        connectionReads++;
+        if (connectionReads === 1) return new Promise(resolve => { release = resolve; });
+        return { status: 'available', accountLabel: null, accountRef: 'test-account' };
+      }
+      if (path === '/v1/calendar/calendars') return { calendars: [{ id: calendarId, summary: '기본', primary: true }] };
+      if (path.startsWith('/v1/calendar/events?')) { eventReads.push(path); return { events: [], unsupportedCount: 0 }; }
+      if (path.startsWith('/v1/schedule?')) return { items: [], scheduleRevision: 0 };
+      throw new Error('unexpected GET');
+    },
+    async post() { throw new Error('unexpected POST'); },
+  };
+  const props = { api, timezone: 'Asia/Seoul', selectedDate: new Date('2026-11-02T00:00:00Z'), enabled: true, refreshVersion: 0, onScheduleChanged: () => {} };
+  const view = harness.renderer(AutoImport, props);
+  view.update({ ...props, selectedDate: new Date('2026-12-02T00:00:00Z') });
+  release({ status: 'available', accountLabel: null, accountRef: 'test-account' });
+  await view.settle(); await view.settle();
+  assert.equal(eventReads.length, 1); assert.match(eventReads[0], /2026-11-30T15%3A00%3A00\.000Z/);
+  assert.match(eventReads[0], /2026-12-31T15%3A00%3A00\.000Z/); view.unmount();
+});
+
+test('manual calendar import labels all-day and nonblocking events', async t => {
+  const { Panel } = await panelModule;
+  const allDay = { ...events[0], allDay: true, blocksTime: false, startsAt: '2026-11-01T15:00:00Z', endsAt: '2026-11-02T15:00:00Z' };
+  const api = {
+    async get(path: string) {
+      if (path === '/v1/calendar-connection') return { status: 'available', accountLabel: null };
+      if (path === '/v1/calendar/calendars') return { calendars: [{ id: calendarId, summary: '기본' }] };
+      if (path.startsWith('/v1/calendar/events?')) return { events: [allDay], unsupportedCount: 0 };
+      throw new Error('unexpected GET');
+    },
+    async post() { throw new Error('unexpected POST'); },
+  };
+  const view = harness.renderer(Panel, { api, timezone: 'Asia/Seoul', onBack() {}, onScheduleChanged() {} });
+  t.after(() => view.unmount()); await view.settle(); press(view, '기본');
+  enter(view, '조회 시작일', '2026-11-01'); enter(view, '조회 마지막 날', '2026-11-06'); press(view, '이 기간 일정 조회'); await view.settle();
+  assert.match(textOf(view.tree), /종일/); assert.match(textOf(view.tree), /시간 비차단/);
 });

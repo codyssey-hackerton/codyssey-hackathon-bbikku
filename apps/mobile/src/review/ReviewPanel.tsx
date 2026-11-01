@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
-import { Text, TextInput } from '../ui/typography';
+import { Text } from '../ui/typography';
+import { DateTimeFields } from '../ui/DateTimeFields';
+import { DailyReviewNotifications } from './DailyReviewNotifications';
 import { colors } from '../ui/theme';
 import type { ReviewSchedule } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import { createReviewClient } from './client';
 import type { CapabilityStatus, ReviewCapabilities, ReviewInput } from './client';
-import { draftFrom, parseReviewDraft } from './form';
+import { draftFrom, parseReviewDraft, timezoneName } from './form';
 import type { ReviewDraft } from './form';
 
 type Load = { status: 'loading' } | { status: 'error'; error: unknown } | { status: 'success'; data: ReviewSchedule };
@@ -58,20 +60,18 @@ function TimeSetting({ label, value, disabled, onChange }: {
       <Switch accessibilityLabel={`${label} 자동 검토`} value={value.enabled} disabled={disabled}
         onValueChange={(enabled) => onChange({ ...value, enabled })} />
     </View>
-    <Text style={styles.label}>{label} 시각 (HH:mm)</Text>
-    <TextInput accessibilityLabel={`${label} 시각`} accessibilityHint="켜져 있을 때 시각이 필요합니다. 24시간 형식으로 입력하세요."
-      value={value.localTime} onChangeText={(localTime) => onChange({ ...value, localTime })}
-      editable={!disabled} autoCapitalize="none" autoCorrect={false} placeholder="HH:mm"
-      style={[styles.input, disabled && styles.disabled]} />
+    <DateTimeFields label={`${label} 시각`} mode="time" value={value.localTime} disabled={disabled}
+      onChange={(localTime) => onChange({ ...value, localTime })} />
   </View>;
 }
 
-export default function ReviewPanel({ api, deviceTimezone, onBack }: { api: ApiClient; deviceTimezone: string; onBack: () => void }) {
+export default function ReviewPanel({ api, deviceTimezone, scope, onBack }: { api: ApiClient; deviceTimezone: string; scope?: string; onBack: () => void }) {
   const client = useMemo(() => createReviewClient(api), [api]);
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [capabilities, setCapabilities] = useState<Capabilities>({ status: 'loading' });
   const [draft, setDraft] = useState<ReviewDraft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [notificationBlocked, setNotificationBlocked] = useState(false);
   const active = useRef(false);
   const loadSequence = useRef(0);
   const capabilitySequence = useRef(0);
@@ -132,7 +132,7 @@ export default function ReviewPanel({ api, deviceTimezone, onBack }: { api: ApiC
     <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
       <View style={styles.row}>
         <Text accessibilityRole="header" style={styles.title}>자동 검토 설정</Text>
-        <Button label="뒤로" onPress={onBack} secondary />
+        <Button label="뒤로" onPress={onBack} disabled={notificationBlocked} secondary />
       </View>
       <Text style={styles.body}>저녁에는 다음 날을, 아침에는 오늘을 검토합니다. 자동 검토는 제안만 만들며 일정 변경이나 연락을 승인하지 않습니다.</Text>
       <Text style={styles.hint}>설정 저장과 스케줄러 실행 및 모델 사용 가능 여부는 별개입니다. 사용 가능 상태도 개별 실행의 성공을 보장하지 않습니다.</Text>
@@ -154,11 +154,9 @@ export default function ReviewPanel({ api, deviceTimezone, onBack }: { api: ApiC
       </View>}
       {load.status === 'success' && draft && <>
         <View style={styles.section}>
-          <Text style={styles.label}>시간대</Text>
-          <TextInput accessibilityLabel="시간대" value={draft.timezone} onChangeText={(timezone) => update({ timezone })}
-            editable={!locked} autoCapitalize="none" autoCorrect={false} placeholder="Asia/Seoul" style={[styles.input, locked && styles.disabled]} />
-          <Button label="기기 시간대 사용" onPress={() => update({ timezone: deviceTimezone })} disabled={locked} secondary />
-          <Text style={styles.hint}>현재 설정된 시간대 기준으로 예약합니다. 예: Asia/Seoul</Text>
+          <Text style={styles.label}>설정된 시간대: {timezoneName(draft.timezone)}</Text>
+          {draft.timezone !== deviceTimezone && <Button label="기기 시간대 사용" onPress={() => update({ timezone: deviceTimezone })} disabled={locked} secondary />}
+          <Text style={styles.hint}>기기 시간대: {timezoneName(deviceTimezone)}</Text>
         </View>
         <TimeSetting label="저녁" value={draft.evening} disabled={locked} onChange={(evening) => update({ evening })} />
         <TimeSetting label="아침" value={draft.morning} disabled={locked} onChange={(morning) => update({ morning })} />
@@ -176,6 +174,7 @@ export default function ReviewPanel({ api, deviceTimezone, onBack }: { api: ApiC
         <Button label="자동 검토 설정 저장" onPress={save} disabled={locked} />
         <Button label="저장된 설정 다시 불러오기" onPress={reload} disabled={saving || uncertain} secondary />
       </>}
+      <DailyReviewNotifications schedule={load.status === 'success' ? load.data : undefined} deviceTimezone={deviceTimezone} scope={scope} disabled={locked} onBlockingChange={setNotificationBlocked} />
     </ScrollView>
   </KeyboardAvoidingView>;
 }

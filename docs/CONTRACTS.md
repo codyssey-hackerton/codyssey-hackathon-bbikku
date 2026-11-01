@@ -54,6 +54,8 @@ update는 사용자에게 보여준 전체 편집 필드를 교체한다. 호환
 - `ai_proposal`이 동일 내용의 update만 포함하면 `no_effective_change`로 거절한다. 절대시각과 timezone을 포함해 전체 일정 필드의 동일성을 확인한다. 직접 저장(`user_command`)과 실질 변경이 섞인 ChangeSet은 기존 의미를 유지하며 일부 변경을 몰래 제거하지 않는다.
 - 수정 요청은 기존 제안을 덮어쓰는 승인이 아니다. 사용자가 편집한 채팅 요청에서 새 제안을 생성하고 전체 변경을 다시 승인한다. 원래 제안은 기존 상태/최신성 규칙을 따른다.
 
+`ScheduleFields`의 추가 선택 필드는 `location?:string|null`, `allDay?:boolean`, `blocksTime?:boolean`, `notes?:string|null`이다. 위치는 비어있지 않은 2,000자 이하, 메모는 20,000자 이하의 실행하지 않는 일반 텍스트다. update에서 생략은 보존, notes/location의 null은 지움이다. allDay 생략은 false이며 true는 원 시간대 자정부터 종료일 다음 자정(exclusive)까지다. blocksTime 생략은 true, Google transparent는 false이며 일정 표시와 시간 점유는 별개다. 비차단 원본은 충돌/빈 시간 계산에서 제외하고 AI가 이 플래그를 임의로 바꿔 충돌을 우회할 수 없다. 새로운 최상위 DB 필드는 추가하지 않는다.
+
 ## 3. Agent·Tool 계약
 
 기준은 `gpt-6.1-terra`, `reasoning.effort: high`, Responses API다. 실제 접근 검증 범위는 MODEL_VERIFICATION.md를 따른다. 접근 실패 시 다른 모델/effort로 자동 대체하지 않는다. 한 S LLM이 제출된 대화를 처리하며 “고마워”에 Tool이나 전체 재계획을 강제하지 않는다.
@@ -62,20 +64,35 @@ update는 사용자에게 보여준 전체 편집 필드를 교체한다. 호환
 
 Agent 입력: 인증된 사용자 범위, `requestId`, `conversationId`, `message` 또는 `TriggerEvent`, 선택적인 서버 검증 `coordinationTarget`, `now`, `timezone`, 관련 대화. 필요한 일정/Memory는 Tool로 조회한다. S LLM 내부 `proposalDraft`에는 `changeSet`, `reason`, `evidenceRefs`를 담는다. ID/검증 성공/승인을 모델이 발급하지 않는다.
 
+같은 채팅에서 제안을 수정할 때 서버가 저장한 최신 assistant turn의 선택적 `proposalIds`로 동일 사용자·대화의 정본만 조회해 내부 `context.previousProposals`로 전달한다. available이면 상태·유효기간·전체 changeSet·출처 참조를 제외한 beforeItems를 담는다. 최대3개·UTF-8 JSON 16,000 bytes를 넘으면 부분 내용을 전달하지 않고 unavailable로 표시한다. 누락·만료·외부 근거 만료도 unavailable이며, 기존 대화에 참조가 없으면 추정하지 않는다. 이 참조는 승인이나 저장된 일정이 아니며 수정은 새 제안·별도 승인 경로를 따른다. 외부 HTTP 입력·응답은 그대로이며 원본 제안과 일정은 자동 변경하지 않는다.
+
 서버가 앱에 반환하는 `AgentResult`:
 
 ```ts
 type AgentResult =
-  | { kind: 'reply'; message: string; draft?: FormDraft }
-  | { kind: 'question'; message: string; missingFields: string[] }
+  | { kind: 'reply'; message: string; draft?: FormDraft; suggestions?: ChatSuggestion[] }
+  | { kind: 'question'; message: string; missingFields: string[]; suggestions?: ChatSuggestion[] }
   | { kind: 'proposal'; message: string; proposalIds: string[] }
   | { kind: 'phone_request'; message: string; itemId: string; expectedRevision: number }
+  | { kind: 'reminder_request'; message: string; reminder: ReminderCandidate }
   | { kind: 'failure'; message: string; code: string; retryable: boolean };
 ```
 
 서버가 검증하고 저장한 Proposal만 proposalIds로 반환한다. 검증 실패는 질문/실패로 반환한다. 답변에 변경 완료라고 쓰는 것만으로 실행 완료가 되지 않는다.
 
+`ChatSuggestion={label:string,message:string}`는 reply/question 및 모델 answer/question의 선택적 대안이다. 존재하면1~2개, 공백 제외 label1~60자·message1~500자, 추가 필드 없는 객체만 받는다. 앱은 실제 전송할 내용을 보여주고 클릭 시 같은 대화에서 해당 message를 새로운 사용자 요청으로 전송한다. 직접 입력도 유지한다. 선택은 제안 생성/조회 요청이며 기존 제안 수락·연락 발신·알림 등록이 아니다. API/대화/선택 맥락/응답 세대가 바뀌었거나 미해결 요청이 있으면 오래된 선택지를 실행하지 않는다.
+
 `phone_request`는 현재 사용자가 명시적으로 요청하고, 선택한 일정 또는 `read_schedule`로 소유·버전을 확인한 event의 전화 승인 화면 진입이다. 도구 실행이나 발신 승인이 아니다. 예약 trigger·외부 전사의 지시로 생성하지 않으며, 일정 변경 시 다시 확인한다. 전화 연결이 미설정이어도 설정 안내와 함께 반환할 수 있다.
+
+**현재 위치와 이동수단.** 채팅은 선택적 `deviceContext: {currentLocation?: {latitude, longitude, accuracyMeters, capturedAt}, travelMode?: 'walk'|'transit'|'car', notificationSupport?: 'device'|'unsupported'|'unknown'}`를 받는다. 위치는 사용자 버튼과 기기 권한을 거쳐 측정한다. 좌표 범위·정확도(0m 초과~1,000m)·오프셋 ISO 시각(최근5분 미만, 미래15초 이하)을 검증한다. 원좌표는 요청 실행·재시도 스냅샷 메모리에서만 사용하고 모델·대화·Memory·응답에 넣지 않는다. 멱등 fingerprint에는 요청 해시가 포함된다. 경로 조회 시 서버가 카카오에 좌표를 전달한다. 공유 해제·5분 경과·앱 종료 후 다음 요청에 자동 재사용하지 않는다. 클라이언트는 만료된 원 요청의 POST를 `location_expired`로 차단하되 결과 불명이면 기존 쓰기 가드를 유지한다. retryable 상태조회만으로 요청을 폐기하지 않는다.
+
+`get_current_location`은 실행별 임의 placeId·정확도·유효시각만 반환한다. 미공유/잘못된 측정/만료는 `not_shared/invalid_location/location_expired`로 구분한다. 이동수단 미선택은 `mode_required`, 요청과 명시 선택 불일치는 `mode_mismatch`다. 이동 결과의 TTL은 제공자·양쪽 장소 근거 중 빠른 시각이다. `data.destinationName/destinationAddress`는 선택한 장소 원본 이름·도로명(없으면 지번)에서만 생성한다. 대중교통은 버스·지하철 통합 경로이고 버스만을 보장하지 않는다. ETA는 현재 교통 기준이며 미래 출발 예측이 아니다.
+
+**알림 후보.** 모델 출력은 `{kind:'reminder_request',text,itemId,expectedRevision,minutesBefore,basis:'event_start'|'departure',destinationPlaceId?}`다. 서버는 명시적 요청, 등록된 본인 일정·revision·관측 근거를 확인한다. departure는 현재 공유 위치와 선택한 수단으로 같은 실행에서 조회한 유효 경로가 필요하다. `departureAt = 약속 시작 - 현재 ETA`, `reminderAt = 기준 시각 - minutesBefore`로 계산하며 임의 여유시간을 추가하지 않는다. 과거 알림은 거절하고 일정·승인·서버 예약은 변경하지 않는다.
+
+`ReminderCandidate = {itemId,expectedRevision,title,appointmentAt,appointmentEndsAt,timezone,basis,minutesBefore,reminderAt,expiresAt,appointmentLocation?,departureAt?,travel?}`. departure의 travel은 `{mode,durationMinutes,provider:'kakao',basis:'current_time',destinationName,destinationAddress}`이며 TTL은 현재시각+5분과 외부 근거 만료 중 빠른 값이다. 앱은 원 일정 장소와 실제 도착지·주소·출발/알림 시각을 표시하고 명시 확인 체크 및 별도 설정 버튼을 요구한다. 서로 다른 장소명이 같은 실제 장소임을 서버가 보장하지 않는다. 목적지 증거가 없는 구 후보는 차단한다.
+
+알림 설정 직전 최신 일정 제목·장소·revision·시간을 재조회하고 OS 예약 직전까지 TTL을 확인한다. iOS/Android 설치형 앱의 로컬 알림이며 권한은 버튼에서 요청한다. 브라우저는 `not_supported`로 안내하고 성공으로 표현하지 않는다. Android는 best-effort이고 정확 알람 권한을 요청하지 않는다. 고정밀 시각은 최대1ms 미만 늦게 올림한다. 같은 회원·일정·기준의 카드 상태를 실행 중 공유하고 기존 알림 취소 후 재등록한다. 결과 불명은 가드를 유지하며 명시 취소로 확인한다. 고정시각 예약이라 외부 일정 변경에 자동 갱신되지 않는다. 카드/취소 상태는 메모리 한정이며 앱 재시작 후 복원은 보장하지 않는다. 로그아웃 시 기존 일반 문구 알림을 자동 취소하지 않는다. 실제 OS 전달·정시성은 기기 검증이 필요하다.
 
 채팅의 선택적 `entryContext`는 `{kind:'create'}`, `{kind:'item',id,expectedRevision}`, `{kind:'form',draft:FormDraft}` 중 하나다. `coordinationTarget`과 동시에 보낼 수 없다. item은 인증 사용자의 최신 항목과 버전을 서버에서 확인하고 모델에는 서버가 조회한 값만 제공한다. create는 새 입력 작성, item은 선택한 항목의 질문·변경 검토, form은 현재 입력 초안 지원이다.
 
@@ -85,10 +102,11 @@ type AgentResult =
 |---|---|---|
 | `read_schedule` | `{from, to, timezone}` | `{items, scheduleRevision}` |
 | `find_free_slots` | `{from, to, timezone, durationMinutes}` | 지정 구간의 최대 연속 빈 구간 `slots[{startsAt,endsAt}]`, `truncated`, `scheduleRevision`, `timezone`, `asOf`; 최대20개 |
-| `read_memory` | `{keys: string[], at: string}` | `{facts, contextRevision, missingFields}`; keys=[]이면 유효한 사실 전체, 지정하면 해당 키만 |
+| `read_memory` | `{keys: string[], at: string}` | `{facts, contextRevision, missingFields, truncated, omittedCount}`; 지정키만, keys=[]은 전체 유효 사실을 대상으로 상한 적용 |
 | `calculate_timing` | `{appointmentStart, preparationMinutes, travelMinutes, bufferMinutes}` | `{ready: true, departureAt, preparationStartAt}` 또는 `{ready: false, missingFields, message}` |
 | `validate_changes` | `{changeSet}` | 서버가 최신 snapshot을 조회한 `ValidationResult` |
 | `search_places` | `{query}` | 장소 ID·이름·주소, 선택 필요 여부 |
+| `get_current_location` | `{}` | 공유 위치의 실행별 placeId·정확도·유효시각, 원좌표 제외 |
 | `estimate_travel` | `{originPlaceId, destinationPlaceId, mode: walk/transit/car}` | 현재 시각 기준 이동 분, 미래 출발 예측 미지원 표시 |
 | `get_weather` | `{placeId, at}` | 오프셋 포함 시각의 예보·시간 기준·출처·라이선스 |
 | `get_subway_arrivals` | `{stationName}` | 해당 역의 열차 도착·원문 생성시각·오래됨 표시 |
@@ -98,6 +116,8 @@ type AgentResult =
 | `read_contact_replies` | `{contactRequestId}` | 발송 완료 이메일의 회신 후보(최대 20개), 사용자 확인 필요 |
 
 `find_free_slots`는 인증 사용자 실행의 동일 스냅샷을 읽는 순수 계산이다. from/to는 offset 포함 ISO 시각이며 범위는 최대31일, durationMinutes는 1~44640 정수다. 유효한 IANA timezone을 받고 반환하지만 baseline 시간대와 같을 필요는 없다. 절대시각 기준 반열림 구간에서 모든 시간 지정 일정을 점유로 취급하며 겹침을 병합하고 snapshot.now 이전을 제외한다. 반환은 요청 길이 이상의 최대 연속 빈 구간이지 자동 생성된 일정이 아니다. 시간대 표시는 최상위 timezone, 구간 ISO는 경계 원본 offset을 보존한다. 미배치 작업·미가져온 Calendar·미입력 준비/이동시간까지 가용성을 보장하지 않는다. asOf는 조회 스냅샷 시각이다. 답변 완료 시 스냅샷 최신성을 확인하고 현재 시각으로 재계산해 원 반환 구간마다 같은 종료 경계의 충분한 잔여 구간이 있는지 확인한다. durationMinutes를 확보할 수 없어진 후보가 있으면 stale_snapshot이며, 큰 구간의 시작이 지났다는 이유만으로 실패시키지는 않는다. 과거 시작은 지금부터 남은 구간으로 해석하도록 프롬프트에 명시한다. 제안 저장·승인 시 실제 선택 시각은 기존 현재 시각·충돌 검증을 적용한다.
+
+모델 기본 context에는 선호 본문을 전부 넣지 않는다. 같은 capture의 활성 Memory에서 중복 kind/key를 제거한 `memoryIndex={keys:[{kind,key}],truncated}`를 최대30개만 제공한다. 인덱스는 값을 포함하지 않으며 완전한 목록이나 선호 적용 증거가 아니다. 필요한 키를 read_memory로 선택 조회한다. 결과는 facts20개 및 전체 JSON UTF-8 16384바이트 이하이고 단일 사실은 원형을 유지해 넣거나 제외한다. 초과 사실을 자동 요약/잘라 새 사실로 만들지 않는다. omittedCount/truncated와 요청키별 누락을 missingFields로 표시하며 keys=[] 잘림은 memory.truncated다. 입력 keys는 최대100개, 중복 제거한 배열 JSON UTF-8 8192바이트 이하만 허용한다. null·미설정·만료와0/false/빈 문자열을 구분한다. 큰 단일 사실이 계속 제외되거나 필요한 키가 누락되면 확인이 필요하며 내용을 추정하지 않는다. 이 상한은 전체 모델 컨텍스트의 토큰 예산이나 환각 방지를 보장하지 않는다.
 
 Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못된 인수/권한 밖 조회는 거절한다. 외부 조회 어댑터는 §7 포트로 추가한다. LLM에 쓰기·발송 Executor를 직접 노출하지 않는다. 적용 직전 검증은 Tool 선택과 별개로 필수다. AI가 새로 배치하거나 시간을 바꾸는 일정의 시작이 검증 시점보다 과거이면 거절한다. 사용자 명시적 과거 기록과 시간이 그대로인 메타데이터 편집을 일괄 금지하는 규칙은 아니다.
 
@@ -123,7 +143,7 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 |---|---|---|
 | `GET /health` | 없음, 인증 불필요 | `{status: 'ok'}` (프로세스 생존만 뜻함) |
 | `GET /v1/capabilities` | 인증 | `{storage: {mode: memory/postgres, durable: boolean}, model: {id, reasoningEffort, status}, integrations: {calendar, email, phone, travel}, scheduler: {status}}`; 각 status는 not_configured/available/degraded. available은 실행 경로 사용 가능이며 이번 호출 성공 보장 아님 |
-| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}, entryContext?: ChatContext}` (두 context 동시 사용 불가) | `{conversationId, result: AgentResult}`; 초안은 §3 참고 |
+| `POST /v1/chat` | `{requestId, conversationId: string/null, message: string, timezone, coordinationTarget?: {id, expectedRevision}, entryContext?: ChatContext, deviceContext?: DeviceContext}` (coordinationTarget/entryContext 동시 사용 불가) | `{conversationId, result: AgentResult}`; 초안·위치·알림은 §3 참고 |
 | `GET /v1/chat/requests/:requestId` | 인증 + 원 요청의 `Idempotency-Key` 헤더 | `{status: running/retryable/completed, result?: {status,body}}`; completed만 원 HTTP 결과 포함 |
 | `GET /v1/schedule` | query `from`, `to`, `timezone`, `includeUnscheduled=true/false` (기본 false) | `{items: ScheduleItem[], scheduleRevision}`; 겹치는 구간 조회, true이면 미배치 task도 포함 |
 | `POST /v1/schedule/commands` | `{requestId, expectedScheduleRevision, changeSet}` | `{outcome: 'applied', items: ScheduleItem[], deletedIds: string[], scheduleRevision}` |
@@ -137,6 +157,7 @@ Tool 사용자 범위는 실행기가 주입한다. 알 수 없는 Tool/잘못�
 | `POST /v1/memory` | `{requestId, expectedContextRevision, kind: preference/situation, key, value, validUntil: string/null}` | `{fact, contextRevision}`; 같은 kind/key는 새 revision으로 대체, 출처는 서버가 user로 기록 |
 | `GET /v1/review-schedule` | 인증 | `{reviewSchedule: ReviewSchedule}` |
 | `POST /v1/review-schedule` | `{requestId, expectedRevision, timezone, evening: {enabled, localTime}, morning: {enabled, localTime}}` | `{reviewSchedule}`; 검증·저장하고 이후 예약에 반영 |
+| `GET /v1/review-digests` | 인증 | `{digests:[{id,reason,createdAt,message,proposalIds}]}`; 본인 최근7일 완료 브리핑/회고 최대10개, 정본 제안 참조만 반환 |
 | `POST /v1/recipients` | `{requestId, displayName, channel: email/phone, address, confirmed: true}` | `{recipient: {id, displayName, channel, address, confirmedByUserAt}}`; 사용자가 입력·확인한 수신자 참조 생성, 발송 없음 |
 | `POST /v1/contact-requests` | `{requestId, recipientRef, channel: email/phone, purpose, messageOrCallBrief, allowedOptions: {optionId, proposalId, proposalRevision}[]}` | `{contactRequest}`; 검증된 초안 저장만, 발송 없음 |
 | `GET /v1/contact-requests/:id` | ID | `{contactRequest}` |
@@ -167,7 +188,7 @@ PostgreSQL을 저장 기준으로 채택한다. 호스팅은 미정이다. Repos
 
 반영은 권한·승인 버전·만료·최신 시각·일정/맥락 버전·충돌을 다시 검사한다. `scheduleRevision`/`contextRevision`이 바뀌면 stale 처리하며 **내용이 같더라도 새 기준으로 검증한 제안을 재확인**한다. v1 제안 만료는 생성 후 30분, 판단 snapshot의 유효한 일시 상황 만료, 새로 배치/이동하는 시작 시각 중 가장 이른 값이다. 시간 경과로 Memory가 만료됐는데 revision이 같다는 이유로 오래된 근거를 재사용하지 않는다. 버전 조건부 일정 변경과 결과/중복 기록은 하나의 DB 트랜잭션으로 저장한다. 승인/작업 재전달에는 기존 결과를 돌려주며 이미 반영된 작업을 재실행하지 않는다.
 
-Scheduler는 서버의 pg-boss + PostgreSQL. TriggerEvent 필수: `id`, 서버 사용자 범위, `reason: evening_plan/morning_review/schedule_changed/checkin_changed`, `scheduledFor`, `timezone`, `targetDate`, `idempotencyKey`; 선택: `sourceRevision`. 사용자별 `ReviewSchedule = {revision, timezone, evening: {enabled, localTime}, morning: {enabled, localTime}}`, localTime은 HH:mm 또는 null. enabled=true이면 시각 필수, 초기 revision=0·disabled·localTime=null이다. 21시는 예시이고 기본 고정값이 아니다.
+Scheduler는 서버의 pg-boss + PostgreSQL. TriggerEvent 필수: `id`, 서버 사용자 범위, `reason: evening_plan/morning_review/schedule_changed/checkin_changed`, `scheduledFor`, `timezone`, `targetDate`, `idempotencyKey`; 선택: `sourceRevision`. 사용자별 `ReviewSchedule = {revision, timezone, evening: {enabled, localTime}, morning: {enabled, localTime}}`, localTime은 HH:mm 또는 null. enabled=true이면 시각 필수다. 서버의 미저장 초기값은 revision=0·disabled·localTime=null이며, 온보딩/설정의 신규 입력은 아침09:00·저녁21:00을 제시하고 사용자가 저장해야 활성화된다. 기존 설정은 보존한다. 아침은 당일 조회·간략 브리핑, 저녁은 당일 수행 기록을 조회해 회고를 질문하고 다음 날 준비를 추천한다. 미기록을 미완료로 처리하지 않는다. 예약 결과는 사용자별 ledger와 위 읽기 API로 전달하며 AI 창은 최신2건을 기본 표시한다. 일반 채팅은 동일 capture에서 최신2건·각2,000자 이하인 과거 안내를 recentReviews로 참고하고 trigger는 자기 기록을 입력받지 않는다. 이 참고는 현재 관측이나 승인이 아니다. 기기 반복 알림은 별도 사용자 버튼/권한이며 서버에서 생성한 AI 내용을 실시간 푸시하는 기능은 아니다.
 
 예약 발생 키는 사용자+이유+예약시각을, 상태 이벤트 키는 원본 변경 ID/버전을 포함한다. DB에 실행 상태와 결과를 기록한다. 전날 추천 대상은 다음 날, 아침 검토 대상은 당일. 기한 지난 예약은 무조건 몰아서 실행하지 않는다. **v1은 예정 시각으로부터 60분 초과 지연 시 skipped**, 이내이면 최신 맥락으로 1회 검토한다. 이 수치는 초기 운영값이며 설정 변경 가능하다. 자동 검토는 제안만 만들며 승인/발송 권한이 아니다. 예약 생성 제안은 GET /v1/proposals로 조회하며 앱 진입/새로고침에서 가져온다. 실제 푸시 전달은 별도 미정이다.
 
@@ -215,15 +236,15 @@ Gmail 우선 연결을 선택했고 Google Calendar 읽기·선택 가져오기�
 
 | API | 입력 | data / 동작 |
 |---|---|---|
-| `GET /v1/calendar-connection` | 인증 | `{status: available/not_configured, accountLabel: string/null}` |
-| `GET /v1/calendar/calendars` | 인증 | `{calendars: [{id, summary, timeZone?}]}` |
-| `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone}], unsupportedCount}` |
-| `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision}` + Idempotency-Key | `{items, scheduleRevision}`; 선택 전체를 검증 후 원자 저장 |
+| `GET /v1/calendar-connection` | 인증 | `{status: available/not_configured, accountLabel: string/null, accountRef: string/null}` |
+| `GET /v1/calendar/calendars` | 인증 | `{calendars: [{id, summary, timeZone?, primary?}]}` |
+| `GET /v1/calendar/events` | query `{calendarId, from, to}` | `{events: [{id, etag, title, startsAt, endsAt, timezone, allDay?, blocksTime?, notes?, occurrenceKey?}], unsupportedCount}` |
+| `POST /v1/calendar/import` | `{requestId, calendarId, from, to, selectedEvents: [{id, etag}], expectedScheduleRevision, expectedAccountRef?, skipExisting?}` + Idempotency-Key | `{items, scheduleRevision}`; 계정·원본 버전·일정 revision 재검증 후 원자 저장 |
 | `GET /v1/phone-connection` | 인증 | `{status: available/not_configured, senderNumber: string/null, lastRequestId?: string/null, provider?: clawops/twilio, mode?: agent/voiceml}`; 비밀 반환 없음 |
 | `POST /v1/phone-connection` | 인증 | `403 permission_denied`; 전화 자격은 운영자가 서버에서 관리하며 앱에서 입력·교체하지 않음 |
 | `POST /v1/contact-requests/:id/call` | `{requestId, contactRevision, expectedSenderNumber}` + Idempotency-Key | `{contactRequest}`; phone 채널의 승인·최신 상태·영속 실행 의도 확인 후 단일 발신 시도 |
 
-**Calendar:** 개발 사용자에게 바인딩한 별도 OAuth 연결이며 Gmail 발송 동의만으로 접근하지 않는다. 시간형 단일 일정만 가져온다. 종일·반복·취소/기타 미지원 원본은 개수와 미지원 안내로 구분한다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. 서버가 선택 원본을 재조회하고 사용자가 본 etag와 일치해야 한다. 원본 출처 키·사용자 범위·일정 revision·충돌을 확인하며 원본 중복은 409다. Google의 전체 동기화·원본 변경·교차 캘린더 중복 병합·삭제 전파 기능이 아니다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
+**Calendar:** 사용자별 별도 OAuth 연결이다. 시간형·종일·singleEvents로 확장된 반복 회차를 읽고 취소/잘못된 원본은 제외한다. 종일은 해당 Calendar 시간대와 exclusive 종료일을 보존하며 transparent도 표시하되 blocksTime=false다. 전체 페이지를 읽지 못하면 빈 결과/부분 성공을 반환하지 않는다. sourceRefs의 event id/occurrenceKey·etag·사용자 범위를 확인하고 가져오기에서만 overlap을 허용한다. 그 외 직접 저장/AI 충돌 검증은 유지한다. 자동 가져오기는 연결된 계정의 유일 primary 또는 사용자가 해당 계정 세션에서 선택한 Calendar의 현재 조회 월을 대상으로 새 원본 최대100개만 등록한다. 선택 전 임의 첫 Calendar를 사용하지 않는다. expectedAccountRef를 필수 전송하고 준비/최종 커밋 때 재검증하며 OAuth 자격 교체도 동일 사용자 atomic으로 직렬화한다. skipExisting=true는 전체 사용자 원본 참조를 기준으로 중복만 제외하고 신규를 저장한다(전부 중복이면 일정/revision 불변, 멱등 기록 등 DB 물리 쓰기는 가능). 수동에서 skipExisting 생략/false이면 기존 중복409를 유지한다. 실패 결과 불명은 같은 키로만 재확인한다. 새 원본 가져오기이며 원본 변경·삭제 자동 전파, 교차 Calendar 추정 병합은 하지 않는다. allDay/blocksTime=false/notes가 있는 항목의 기존 원본 쓰기·양방향 sync는 지원 범위 밖으로 차단해 손실 변환하지 않는다. Google 재조회와 로컬 커밋은 외부 원본에 대해 원자적이지 않다.
 
 가져오기 준비 조회는 사용자 DB 잠금 밖에서 실행하고 내부 ticket만 생성한다. 최종 저장은 멱등 결과와 같은 트랜잭션에서 재검증한다. ticket을 외부 요청 입력으로 받지 않는다. 프로세스 중단 후 안전한 조회/내부 쓰기 작업의 회복과 실제 외부 발송 재시도는 구분한다.
 
@@ -311,7 +332,9 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 인증된 `POST /v1/google/oauth/start`는 `{kind: 'calendar' | 'calendar_write' | 'gmail_send' | 'gmail_read' | 'contacts'}`를 받고 `{requestId, data: {authorizationUrl, completionSecret}}`을 반환한다. 앱은 외부 브라우저에서 동의를 열고 `completionSecret`은 앱 메모리에만 보관한다. 서버의 비인증 callback은 일회 state와 PKCE를 검증해 Google 코드를 교환한 뒤, Google 인증코드가 아닌 별도의 일회 **연결 확인 코드**를 브라우저에 표시한다. 이 시점에는 자격 파일을 확정 저장하지 않는다.
 
-사용자가 원래 앱에 확인 코드를 입력하면 인증된 `POST /v1/google/oauth/complete`에 `{completionSecret, confirmationCode}`를 보내고 성공 시 `{requestId, data: {status: 'connected'}}`를 받는다. 두 값은 43자 base64url이며 시작부터 10분 안에 같은 사용자에게서 함께 확인돼야 한다. 만료·불일치·재사용은 일반 400 오류다. 완료 요청은 한 번만 시도한다. 응답을 잃으면 자동 재시도하지 않고 연결 상태를 새로 조회하며, 연결되지 않았다면 처음부터 다시 시작한다. 기존 연결이 이미 있었다면 상태가 연결됨이어도 새 계정으로 변경됐는지는 확인할 수 없다. 취소·화면 이탈·계정 전환 시 앱의 비밀값을 지운다. 재시작 시 진행 중인 상태는 사라진다.
+기본 흐름은 Google 동의 뒤 원래 앱이 인증된 `POST /v1/google/oauth/complete {completionSecret}`를 순차 polling하는 자동 완료다. pending/completed를 반환하고 같은 사용자·secret·10분 TTL을 확인한 뒤 기존 안전 파일 저장을 수행한다. 6초 간격을 두며 동시에 재요청하지 않는다. 완료 결과는 TTL 안에 재확인할 수 있다. `{completionSecret,cancel:true}`는 성공 시 cancelled이고, 성공한 취소 이후 저장되지 않는다. 이미 저장이 먼저 끝난 경우 성공 결과를 지우지 않는다. 응답 불명은 같은 secret/흐름과 가드를 유지해 재확인하며 pending만으로 해제하지 않는다. TTL 뒤 결과 불명은 강제 초기화하지 않는다.
+
+수동 예외 메뉴는 `{completionSecret,confirmationCode}`→connected를 유지한다. 두 값은43자 base64url이며 Google API 토큰을 사용자가 입력하는 기능이 아니다. callback은 자동 복귀 안내와 수동 예외용 코드만 표시하며 원 자격·API 토큰은 노출하지 않는다. 화면 이탈·계정 변경 중 늦은 성공을 새 화면에 적용하지 않으며, 앱 강제종료 후 메모리 흐름 복원은 보장하지 않는다.
 
 계정·권한 확인 후 사용자별 0700 디렉터리에 자격 파일을 0600으로 저장한다. 진행 중인 OAuth 상태는 단일 프로세스 메모리에 있으며 다중 인스턴스에서 공유되지 않는다. Gmail 회신 계정은 같은 사용자의 발송 계정과 일치해야 한다. 인증코드·access/refresh token은 앱 응답에 반환하지 않으며, OAuth 동의는 메일 발송 승인이 아니다. 이 흐름은 기존 앱 사용자의 외부 Google 연결이며 회원가입이나 Google 계정으로 앱에 로그인하는 기능이 아니다. 실제 Google 동의·공개 배포 검증은 별도로 기록한다.
 
@@ -327,7 +350,7 @@ Gmail 어댑터는 별도 `gmail.readonly` 동의, 발송 계정과의 동일성
 
 ## 16. Google 회원 인증
 
-`POST /v1/auth/google/start {}`는 공개 경로이며 `{authorizationUrl,completionSecret}`을 반환한다. 기존 `/v1/google/oauth/callback`에서 `member_` state만 회원 흐름으로 전달한다. ID token 서명·aud/iss/exp·nonce·sub·email_verified와 PKCE/state를 검증한다. `POST /v1/auth/google/complete {completionSecret,confirmationCode}`는 `{sessionToken,expiresAt,member:{id,email,displayName}}`을 반환한다. 두 앱 확인 값은 43자 base64url, 10분 이내 일회용이다. 토큰 원문은 앱 메모리에만 두고 서버는 해시/7일 만료/취소 상태를 보관한다.
+`POST /v1/auth/google/start {}`는 공개 경로이며 `{authorizationUrl,completionSecret}`을 반환한다. 기존 `/v1/google/oauth/callback`에서 `member_` state만 회원 흐름으로 전달한다. ID token 서명·aud/iss/exp·nonce·sub·email_verified와 PKCE/state를 검증한다. `POST /v1/auth/google/complete {completionSecret}`는 pending 또는 completed와 `{sessionToken,expiresAt,member:{id,email,displayName}}`을 반환하는 자동 확인 경로다. state/PKCE/nonce와 시작 secret에 결속하며 동시 poll은 세션을 한 번만 생성하고 TTL 동안 같은 성공 결과를 재전달한다. `{completionSecret,cancel:true}`로 취소하며 저장 중 경합으로 만들어진 세션은 폐기한다. 수동 예외 `{completionSecret,confirmationCode}`의 기존 성공 응답도 유지한다. 두 앱 확인 값은 43자 base64url, 10분 이내 일회용이다. 토큰 원문은 앱 메모리에만 두고 서버는 해시/7일 만료/취소 상태를 보관한다.
 
 Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'logged_out'}`이다. 기존 preview/개발 세션은 별도 resolver로 유지하고 회원 오류가 유효 preview 인증을 대신 취소하지 않는다. 모든 응답은 기존 `{requestId,data}`/error 봉투, TLS·no-store·IP 제한을 따른다. 앱 인증은 Google 외부 서비스 권한 동의가 아니다.
 

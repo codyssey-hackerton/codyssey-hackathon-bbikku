@@ -7,10 +7,12 @@ import { colors } from '../ui/theme';
 import { PreferenceFields, fromDraft, toDraft } from './PreferenceFields';
 import { ProfileStatus, profileLocked } from './ProfileStatus';
 import type { PlanningProfile } from './usePlanningProfile';
+import type { ApiClient } from '../api/http';
+import { ReviewOnboarding } from '../review/ReviewOnboarding';
 
-export type OnboardingPanelProps = { profile: PlanningProfile; onComplete: () => void; onBack?: () => void };
+export type OnboardingPanelProps = { profile: PlanningProfile; onComplete: () => void; onBack?: () => void; reviewApi?: ApiClient; deviceTimezone?: string; scope?: string };
 export function OnboardingPanel(props: OnboardingPanelProps) { return <OnboardingContent key={props.profile.scope} {...props} />; }
-function OnboardingContent({ profile, onComplete, onBack }: OnboardingPanelProps) {
+function OnboardingContent({ profile, onComplete, onBack, reviewApi, deviceTimezone, scope }: OnboardingPanelProps) {
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState(() => toDraft(profile.load.status === 'success' ? profile.load.value : null));
   const [formError, setFormError] = useState('');
@@ -55,7 +57,7 @@ function OnboardingContent({ profile, onComplete, onBack }: OnboardingPanelProps
         <Text style={styles.hint}>지금까지 선택한 내용은 저장하지 않아요. 기존에 저장된 설정은 유지됩니다.</Text>
         {(step > 0 || onBack) && <ActionButton label="이전" secondary disabled={navigationLocked} onPress={() => step > 0 ? setStep(step - 1) : onBack?.()} />}
       </View>
-    </> : <View style={styles.complete}><PikkuCharacter size={96} /><Text accessibilityRole="header" style={styles.title}>준비가 끝났어요</Text>
+    </> : reviewApi && deviceTimezone ? <ReviewOnboarding api={reviewApi} deviceTimezone={deviceTimezone} scope={scope} onComplete={onComplete} /> : <View style={styles.complete}><PikkuCharacter size={96} /><Text accessibilityRole="header" style={styles.title}>준비가 끝났어요</Text>
       <Text style={styles.hint}>입력한 설정은 프로필에서 언제든 바꿀 수 있어요.</Text><ActionButton label="시작하기" onPress={onComplete} /></View>}
   </ScrollView>;
 }

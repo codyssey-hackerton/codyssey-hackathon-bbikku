@@ -316,7 +316,7 @@ test('real App routes only incomplete tasks into editable recovery and preserves
   await view.settle();
   assert.equal(ctx.intervals.size, 0);
   assert.equal(harness.host.listeners.size, 0);
-  press(view, 'AI 비서');
+  press(view, 'PIKKU');
   enter(view, regularDraft);
   await openDay(view);
   assert.equal(ctx.intervals.size, 1);
@@ -329,8 +329,8 @@ test('real App routes only incomplete tasks into editable recovery and preserves
     press(view, '닫기');
   }
   itemAction(view, taskA, '복구 상담');
-  assert.equal(selectedTab(view, 'AI 비서'), true);
-  assert.equal(ctx.intervals.size, 0);
+  assert.equal(selectedTab(view, 'PIKKU'), true);
+  assert.deepEqual([...ctx.intervals.values()].map((timer) => timer.delay), [60_000]);
   assert.equal(harness.host.listeners.size, 0);
   assert.match(input(view).props.value, new RegExp(taskA));
   assert.ok(input(view).props.value.includes(date));
@@ -381,7 +381,7 @@ test('coordination still sends its target; recovery question and follow-up never
   await view.settle();
   await openDay(view);
   itemAction(view, '테스트 공동 일정', '공동 약속 조정 검토');
-  assert.equal(selectedTab(view, 'AI 비서'), true);
+  assert.equal(selectedTab(view, 'PIKKU'), true);
   enter(view, '공동 일정 조정 요청');
   press(view, '메시지 보내기');
   assert.deepEqual(ctx.requests[0].coordinationTarget, { id: 'shared-event', expectedRevision: 3 });
@@ -466,7 +466,7 @@ test('pending and uncertain recovery lock draft switching and retry the identica
   const ctx = await setup(t, { send: () => [first, second, third][count++].promise });
   const view = ctx.render(ctx.App);
   await view.settle();
-  press(view, 'AI 비서');
+  press(view, 'PIKKU');
   enter(view, regularDraft);
   await openDay(view);
   itemAction(view, '테스트 공동 일정', '공동 약속 조정 검토');
@@ -492,7 +492,7 @@ test('pending and uncertain recovery lock draft switching and retry the identica
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   first.reject(new Error('synthetic network failure'));
   await view.settle();
-  assert.match(textOf(view.tree), /결과를 확인할 때까지 같은 요청만/);
+  assert.match(textOf(view.tree), /결과를 확인할 때까지 새 요청을 보내지 않습니다/);
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   assert.equal(nodes(view.tree).some((entry) => entry.type === 'Pressable' && textOf(entry.children) === '메시지 수정'), false);
   press(view, '같은 요청 다시 시도');
@@ -500,7 +500,7 @@ test('pending and uncertain recovery lock draft switching and retry the identica
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   second.reject(new ctx.ApiError('not_configured', 'synthetic unavailable', false, 503));
   await view.settle();
-  assert.match(textOf(view.tree), /결과를 확인할 때까지 같은 요청만/);
+  assert.match(textOf(view.tree), /결과를 확인할 때까지 새 요청을 보내지 않습니다/);
   assertLocked(view, [recoveryLabel(taskA, date), recoveryLabel(taskB, date), '기존 대화 초안으로']);
   press(view, '같은 요청 다시 시도');
   assert.deepEqual(ctx.requests[2], ctx.requests[0]);
@@ -519,7 +519,7 @@ test('a definite chat error keeps recovery and general drafts locked until editi
   const ctx = await setup(t, { send: () => new Promise((_resolve, fail) => { reject = fail; }) });
   const view = ctx.render(ctx.App);
   await view.settle();
-  press(view, 'AI 비서');
+  press(view, 'PIKKU');
   enter(view, regularDraft);
   await openDay(view);
   const date = dayLabel(view);

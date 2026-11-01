@@ -7,7 +7,25 @@ const EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events.readonly';
 const EVENTS_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const LIST_SCOPE = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly';
 const unavailable = () => new PlanningError(503, 'provider_unavailable', '캘린더 조회에 실패했습니다.');
-type CalendarEvent = { id: string; etag: string; title: string; startsAt: string; endsAt: string; timezone: string; involvement: 'personal' | 'shared' };
+type CalendarEvent = { id: string; etag: string; title: string; startsAt: string; endsAt: string; timezone: string; involvement: 'personal' | 'shared';
+  allDay?: boolean; notes?: string | null; blocksTime?: boolean; occurrenceKey?: string };
+
+function calendarDayStart(value: unknown, zone: string): string | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const nominal = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(nominal) || new Date(nominal).toISOString().slice(0, 10) !== value) return null;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA-u-ca-gregory-nu-latn', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const dateAt = (instant: number) => {
+      const parts = Object.fromEntries(formatter.formatToParts(instant).map(part => [part.type, part.value]));
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    let lower = nominal - 36 * 3_600_000, upper = nominal + 36 * 3_600_000;
+    if (dateAt(lower) >= value || dateAt(upper) < value) return null;
+    while (upper - lower > 1) { const middle = lower + Math.floor((upper - lower) / 2); if (dateAt(middle) < value) lower = middle; else upper = middle; }
+    return dateAt(upper) === value ? new Date(upper).toISOString() : null;
+  } catch { return null; }
+}
 
 export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; credentialPath?: string; fetcher?: typeof fetch; userId?: string }) {
   const clientId = options.env.PIKKU_GOOGLE_OAUTH_CLIENT_ID?.trim();
@@ -58,27 +76,40 @@ export async function getCalendarConnection(options: { env: NodeJS.ProcessEnv; c
     const result = await pages(new URL('https://www.googleapis.com/calendar/v3/users/me/calendarList'));
     if (result.items.some(c => c.deleted !== true && (typeof c.id !== 'string' || !c.id || typeof c.summary !== 'string' || !c.summary))) throw unavailable();
     const calendars = result.items.filter(c => c.deleted !== true)
-      .map(c => ({ id: c.id as string, summary: c.summary as string, ...(typeof c.timeZone === 'string' ? { timeZone: c.timeZone as string } : {}) }));
+      .map(c => ({ id: c.id as string, summary: c.summary as string, ...(typeof c.timeZone === 'string' ? { timeZone: c.timeZone as string } : {}),
+        ...(c.primary === true ? { primary: true as const } : {}) }));
     return { calendars };
   }
   async function resolveEvents(input: { calendarId: string; from: string; to: string }) {
     const from = parseOffsetDateTime(input.from), to = parseOffsetDateTime(input.to);
     if (!input.calendarId || from === null || to === null || from >= to || to - from > 366 * 86400000) throw new PlanningError(400, 'invalid_request', '조회 기간을 확인해 주세요.');
-    if (!(await listCalendars()).calendars.some(c => c.id === input.calendarId)) throw new PlanningError(404, 'not_found', '선택한 캘린더를 찾을 수 없습니다.');
+    const calendar = (await listCalendars()).calendars.find(c => c.id === input.calendarId);
+    if (!calendar) throw new PlanningError(404, 'not_found', '선택한 캘린더를 찾을 수 없습니다.');
     const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(input.calendarId)}/events`);
     url.search = new URLSearchParams({ timeMin: input.from, timeMax: input.to, singleEvents: 'true', showDeleted: 'true', maxResults: '250' }).toString();
     const result = await pages(url); const events: CalendarEvent[] = []; let unsupportedCount = 0;
     for (const value of result.items) {
-      const zone = value.start?.timeZone ?? result.timeZone; const start = value.start?.dateTime; const end = value.end?.dateTime;
+      if (value.status === 'cancelled') continue;
+      const allDay = typeof value.start?.date === 'string' && typeof value.end?.date === 'string';
+      const zone = allDay ? result.timeZone ?? calendar.timeZone : value.start?.timeZone ?? result.timeZone ?? calendar.timeZone;
+      const start = allDay && typeof zone === 'string' ? calendarDayStart(value.start.date, zone) : value.start?.dateTime;
+      const end = allDay && typeof zone === 'string' ? calendarDayStart(value.end.date, zone) : value.end?.dateTime;
       let validZone = false; try { new Intl.DateTimeFormat('en', { timeZone: zone }); validZone = typeof zone === 'string' && !!zone; } catch { /* unsupported */ }
-      const allowed = value.status !== 'cancelled' && !value.recurrence && !value.recurringEventId && !value.originalStartTime && !value.endTimeUnspecified && value.transparency !== 'transparent' &&
+      const allowed = !value.recurrence && !value.endTimeUnspecified && (value.transparency === undefined || value.transparency === 'opaque' || value.transparency === 'transparent') &&
+        (value.recurringEventId === undefined || (typeof value.recurringEventId === 'string' && !!value.recurringEventId && value.originalStartTime &&
+          (typeof value.originalStartTime.dateTime === 'string' || typeof value.originalStartTime.date === 'string'))) &&
+        (value.originalStartTime === undefined || value.recurringEventId !== undefined) &&
+        (value.description === undefined || (typeof value.description === 'string' && value.description.length <= 20_000)) &&
         !value.attendeesOmitted && value.organizer && (value.organizer.self === true || ((value.organizer.self === false || value.organizer.self === undefined) &&
           (typeof value.organizer.email === 'string' || typeof value.organizer.id === 'string'))) && (value.attendees === undefined || Array.isArray(value.attendees)) &&
         typeof value.id === 'string' && !!value.id && typeof value.etag === 'string' && !!value.etag && typeof value.summary === 'string' && !!value.summary.trim() && value.summary.length <= 2000 &&
         typeof start === 'string' && typeof end === 'string' && parseOffsetDateTime(start) !== null && parseOffsetDateTime(end) !== null && Date.parse(start) < Date.parse(end) && validZone;
       if (!allowed) { unsupportedCount++; continue; }
       const shared = value.organizer.self !== true || (value.attendees ?? []).some((a: any) => !a || a.self !== true);
-      events.push({ id: value.id, etag: value.etag, title: value.summary, startsAt: start, endsAt: end, timezone: zone, involvement: shared ? 'shared' : 'personal' });
+      const occurrenceKey = value.recurringEventId ? JSON.stringify([value.recurringEventId, value.originalStartTime.dateTime ?? value.originalStartTime.date]) : undefined;
+      events.push({ id: value.id, etag: value.etag, title: value.summary, startsAt: start, endsAt: end, timezone: zone, involvement: shared ? 'shared' : 'personal',
+        ...(allDay ? { allDay: true } : {}), ...(value.transparency === 'transparent' ? { blocksTime: false } : {}),
+        ...(value.description !== undefined ? { notes: value.description } : {}), ...(occurrenceKey ? { occurrenceKey } : {}) });
     }
     return { events, unsupportedCount };
   }

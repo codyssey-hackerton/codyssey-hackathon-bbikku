@@ -33,6 +33,8 @@ const fields = z.object({
   category: z.enum(['personal', 'work']).nullable().optional(),
   attendance: z.enum(['attended', 'absent', 'unknown']).nullable().optional(),
   location: z.string().max(2000).refine(value => value.trim().length > 0).nullable().optional(),
+  allDay: z.boolean().optional(), blocksTime: z.boolean().optional(),
+  notes: z.string().max(20_000).nullable().optional(),
 }).strict();
 const change = z.discriminatedUnion('operation', [
   z.object({ changeId: identifier, operation: z.literal('create'), after: fields }).strict(),

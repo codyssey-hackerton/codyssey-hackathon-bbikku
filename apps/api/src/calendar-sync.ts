@@ -20,6 +20,7 @@ const publicConnection = (c: SyncConnection) => ({ id: c.id, calendarId: c.calen
 const digest = (...parts: string[]) => createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const code = (error: unknown) => error && typeof error === 'object' && 'code' in error ? (error as { code: unknown }).code : undefined;
 const unsupported = (e: GoogleCalendarEvent) => Object.values(e.unsupported).some(Boolean) || !e.etag || !e.title || !e.timeSlot;
+const unsupportedItem = (item: ScheduleItem) => item.allDay === true || item.blocksTime === false || item.notes != null;
 const fields = (event: GoogleCalendarEvent): ScheduleFields => ({ kind: 'event', title: event.title!, timeSlot: event.timeSlot!, durationMinutes: null,
   deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'unknown' });
 function assess(userId: string, state: UserPlanningState, change: Change): boolean {
@@ -76,7 +77,7 @@ export class CalendarSyncService {
     if (!listed.calendars.some(c => c.id === input.calendarId && (c.accessRole === 'owner' || c.accessRole === 'writer'))) return unavailable();
     await this.google(userId, google.accountRef);
     const state = await this.planning.read(userId);
-    if ((input.exportItemIds ?? []).some(itemId => !state.items.has(itemId))) return bad();
+    if ((input.exportItemIds ?? []).some(itemId => { const item = state.items.get(itemId); return !item || unsupportedItem(item); })) return bad();
     return this.sync.update(userId, data => {
       if (data.connections.some(c => c.accountRef === google.accountRef && c.calendarId === input.calendarId)) return conflict();
       const connection: SyncConnection = { id: randomUUID(), calendarId: input.calendarId, accountRef: google.accountRef,
@@ -109,7 +110,7 @@ export class CalendarSyncService {
       for (const itemId of input.exportItemIds) {
         if (connection.mappings.some(mapping => mapping.itemId === itemId)) continue;
         const item = state.items.get(itemId);
-        if (!item || item.kind !== 'event' || item.involvement !== 'personal' || !item.timeSlot || item.sourceRefs.length) return bad();
+        if (!item || item.kind !== 'event' || item.involvement !== 'personal' || !item.timeSlot || item.sourceRefs.length || unsupportedItem(item)) return bad();
         pending.add(itemId);
       }
       if (pending.size > 100) return bad();
@@ -264,6 +265,7 @@ export class CalendarSyncService {
         }
         if (unsupported(event)) { unsupportedCount++; continue; }
         if (existing) {
+          if (unsupportedItem(existing)) { addConflict('unsupported_item', existing.id, event.id); continue; }
           const ref = existing.sourceRefs.find(r => r.provider === 'google_calendar' && r.calendarId === c.calendarId && r.externalEventId === event.id &&
             (r.accountRef === c.accountRef || r.accountRef === `google:${google.subject}`))!;
           if (existing.revision !== 1 || !ref.sourceVersion) { addConflict('missing_baseline', existing.id, event.id); continue; }
@@ -294,6 +296,7 @@ export class CalendarSyncService {
       for (const mapping of [...c.mappings]) {
         const state = await this.planning.read(userId);
         const snapshot = state.items.get(mapping.itemId);
+        if (snapshot && unsupportedItem(snapshot)) { addConflict('unsupported_item', mapping.itemId, mapping.eventId); continue; }
         let event = events.get(mapping.eventId);
         if (!event) {
           try { event = await google.getEvent({ calendarId: c.calendarId, eventId: mapping.eventId }); }
@@ -357,6 +360,7 @@ export class CalendarSyncService {
             const latestState = await this.planning.read(userId);
             const latest = latestState.items.get(mapping.itemId);
             if (latest?.revision !== snapshot?.revision) return conflict();
+            if (latest && unsupportedItem(latest)) return conflict();
             if (!latest) {
               const deleted = latestState.tombstones?.get(mapping.itemId);
               if (!deleted || deleted.itemId !== mapping.itemId || deleted.deletedRevision !== mapping.itemRevision + 1 || deleted.priorInvolvement !== 'personal') return conflict();
@@ -400,13 +404,13 @@ export class CalendarSyncService {
       if (!uncertain) for (const itemId of c.exportItemIds) {
         if (c.mappings.some(m => m.itemId === itemId)) continue;
         const item = (await this.planning.read(userId)).items.get(itemId);
-        if (!item || item.kind !== 'event' || item.involvement !== 'personal' || !item.timeSlot || item.sourceRefs.length) { addConflict('unsupported_item', itemId); continue; }
+        if (!item || item.kind !== 'event' || item.involvement !== 'personal' || !item.timeSlot || item.sourceRefs.length || unsupportedItem(item)) { addConflict('unsupported_item', itemId); continue; }
         const eventId = digest(c.accountRef, c.calendarId, item.id), bindingId = digest(c.accountRef, c.calendarId, item.id);
         let writeCompleted = false;
         try {
           await this.planning.atomic(userId, async () => {
             const latest = (await this.planning.read(userId)).items.get(itemId);
-            if (!latest || latest.revision !== item.revision) return conflict();
+            if (!latest || latest.revision !== item.revision || unsupportedItem(latest)) return conflict();
             const port = await this.google(userId, c.accountRef);
             writesStarted = true;
             const result = await port.insertEvent({ calendarId: c.calendarId, eventId, event: write(latest, bindingId) });

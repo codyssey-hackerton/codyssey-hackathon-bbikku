@@ -18,12 +18,17 @@ import type { ApiClient } from './src/api/http';
 import ChatScreen, { type RecoveryRequest, type RevisionRequest } from './src/chat/ChatScreen';
 import { createChatClient } from './src/chat/client';
 import type { ChatEntryContext, CoordinationTarget, FormDraft } from './src/chat/client';
-import ProposalPanel from './src/proposals/ProposalPanel';
+import ProposalPanel, { ChatProposalCard } from './src/proposals/ProposalPanel';
+import type { Proposal } from './src/proposals/client';
+import ReminderCard from './src/notifications/ReminderCard';
 import MemoryPanel from './src/memory/MemoryPanel';
 import ScheduleCallPanel from './src/contacts/ScheduleCallPanel';
 import ReviewPanel from './src/review/ReviewPanel';
+import ReviewDigests from './src/review/ReviewDigests';
 import CalendarScreen from './src/screens/CalendarScreen';
 import CalendarImportPanel from './src/calendar/CalendarImportPanel';
+import AutoCalendarImport from './src/calendar/AutoCalendarImport';
+import UpcomingPreview from './src/screens/UpcomingPreview';
 import PhoneConnectionPanel from './src/contacts/PhoneConnectionPanel';
 import GoogleConnectionPanel from './src/google/GoogleConnectionPanel';
 import HealthPanel from './src/health/HealthPanel';
@@ -62,10 +67,9 @@ function Scene({ visible, children }: { visible: boolean; children: ReactNode })
 function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: ApiClient; timezone: string; onOpenSettings: () => void; member: Member | null }) {
   const [tab, setTab] = useState<Tab>('home');
   const [googleReturnTo, setGoogleReturnTo] = useState<'main' | 'scheduleCall' | 'calendarImport' | 'proposals'>('main');
-  const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall'>('main');
+  const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall' | 'upcomingPreview'>('main');
   const [scheduleCallTarget, setScheduleCallTarget] = useState<{ itemId: string; expectedRevision: number } | null>(null);
   const [phoneReturnToCall, setPhoneReturnToCall] = useState(false);
-  const [memoryReturn, setMemoryReturn] = useState<'profile' | 'connections'>('profile');
   const profile = usePlanningProfile(api);
   const [onboarding, setOnboarding] = useState<'check' | 'show' | 'hidden'>(member ? 'check' : 'hidden');
   const [calendarMode, setCalendarMode] = useState<'month' | 'day'>('month');
@@ -73,6 +77,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
   const [calendarSyncOpened, setCalendarSyncOpened] = useState(false);
   const [reviewOpened, setReviewOpened] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
+  const [visibleCalendarMonth, setVisibleCalendarMonth] = useState(() => new Date());
   const [coordinationTarget, setCoordinationTarget] = useState<(CoordinationTarget & { title: string }) | undefined>();
   const [recoveryRequest, setRecoveryRequest] = useState<RecoveryRequest | undefined>();
   const [revisionRequest, setRevisionRequest] = useState<RevisionRequest | undefined>();
@@ -90,6 +95,19 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     setProposalRefreshVersion(version => version + 1);
   }, []);
   const refreshProposals = useCallback(() => setProposalRefreshVersion(version => version + 1), []);
+  function requestProposalRevision(proposal: Proposal) {
+    if (operationGuard.hasUnresolved()) {
+      setNavigationError('처리 중인 요청의 결과를 먼저 확인해 주세요. 현재 대화와 제안을 유지했습니다.');
+      return;
+    }
+    const target = proposal.coordinationTarget;
+    setEntryContext(undefined); setRecoveryRequest(undefined);
+    setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
+      text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
+      coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
+    setTab('chat'); setPanel('main');
+  }
+
   useEffect(() => {
     if (onboarding === 'check' && profile.load.status === 'success') setOnboarding(profile.load.value ? 'hidden' : 'show');
   }, [onboarding, profile.load]);
@@ -181,33 +199,49 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     { label: '캘린더 일정 가져오기', run: () => setPanel('calendarImport') },
     { label: 'Google 캘린더 동기화', run: () => { setCalendarSyncOpened(true); setPanel('calendarSync'); } },
     { label: '전화 서비스 상태', run: () => { setPhoneReturnToCall(false); setPanel('phoneConnection'); } },
-    { label: '내 정보·선호', run: () => { setMemoryReturn('connections'); setPanel('memory'); } },
     { label: '자동 검토 설정', run: () => { setReviewOpened(true); setPanel('review'); } },
+    { label: '예시 일정 미리보기', run: () => setPanel('upcomingPreview') },
     { label: '계정·앱 설정', run: onOpenSettings },
   ];
 
   if (onboarding === 'check') return <View style={styles.connectionMenu}>
-    <Text accessibilityRole="header" style={styles.menuTitle}>나의 삐꾸를 준비하고 있어요</Text>
+    <Text accessibilityRole="header" style={styles.menuTitle}>나의 PIKKU를 준비하고 있어요</Text>
     {profile.load.status === 'loading' ? <ActivityIndicator color={colors.primary} /> : <>
       <Text accessibilityRole="alert" style={styles.error}>개인화 설정을 불러오지 못했습니다. 기존 설정은 변경하지 않았어요.</Text>
       <Pressable accessibilityRole="button" onPress={profile.refresh} style={styles.connectionRow}><Text>개인화 설정 다시 조회</Text></Pressable>
       <Pressable accessibilityRole="button" onPress={() => setOnboarding('hidden')} style={styles.connectionRow}><Text>지금은 홈으로</Text></Pressable>
     </>}
   </View>;
-  if (onboarding === 'show') return <OnboardingPanel profile={profile} onComplete={() => setOnboarding('hidden')} onBack={() => setOnboarding('hidden')} />;
+  if (onboarding === 'show') return <OnboardingPanel profile={profile} reviewApi={api} deviceTimezone={timezone} scope={member?.id}
+    onComplete={() => setOnboarding('hidden')} onBack={() => setOnboarding('hidden')} />;
 
   return <>
+    <AutoCalendarImport api={api} timezone={timezone} selectedDate={tab === 'calendar' && calendarMode === 'month' ? visibleCalendarMonth : selectedDate} enabled={!!member && panel === 'main'}
+      refreshVersion={refreshVersion} onScheduleChanged={refresh} />
     {navigationError !== '' && <View style={styles.navigationNotice}><Text accessibilityRole="alert" style={[styles.error, styles.noticeText]}>{navigationError}</Text>
-      {showRequestReview && <Pressable accessibilityRole="button" accessibilityLabel="AI 비서 열기" onPress={() => { setTab('chat'); setPanel('main'); setNavigationError(''); setShowRequestReview(false); }} style={styles.noticeClose}><Text>AI 비서 열기</Text></Pressable>}
+      {showRequestReview && <Pressable accessibilityRole="button" accessibilityLabel="PIKKU 열기" onPress={() => { setTab('chat'); setPanel('main'); setNavigationError(''); setShowRequestReview(false); }} style={styles.noticeClose}><Text>PIKKU 열기</Text></Pressable>}
       <Pressable accessibilityRole="button" accessibilityLabel="안내 닫기" onPress={() => { setNavigationError(''); setShowRequestReview(false); }} style={styles.noticeClose}><Icon name="close" /></Pressable></View>}
     <View style={styles.screenContainer}>
+      <Scene visible={panel === 'upcomingPreview'}><UpcomingPreview timezone={timezone} onClose={() => setPanel('connections')} /></Scene>
       <Scene visible={panel === 'main' && tab === 'home'}><HomeScreen {...dayProps} selectedDate={new Date()} visible={panel === 'main' && tab === 'home'}
         onCalendar={() => { setSelectedDate(new Date()); setTab('calendar'); setCalendarMode('day'); }} onOpenProposals={() => setPanel('proposals')} onOpenSettings={() => setPanel('profile')} /></Scene>
       <Scene visible={chatVisible}>
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
+          reviewDigests={<ReviewDigests api={api} visible={chatVisible} refreshVersion={refreshVersion}
+            renderProposal={id => <ChatProposalCard api={api} id={id} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh}
+              onRequestRevision={requestProposalRevision} onOpenGoogleContacts={() => { setGoogleReturnTo('main'); setPanel('googleConnection'); }} />} />}
+          renderProposal={id => <ChatProposalCard api={api} id={id} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh}
+            onRequestRevision={requestProposalRevision} onOpenGoogleContacts={() => { setGoogleReturnTo('main'); setPanel('googleConnection'); }} />}
+          renderReminder={reminder => <ReminderCard api={api} reminder={reminder} scope={member?.id} />}
           onOpenProposals={() => setPanel('proposals')} onOpenReviewSchedule={() => { setReviewOpened(true); setPanel('review'); }} onProposalCreated={refreshProposals}
           coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest}
-          entryContext={entryContext} onClearEntryContext={() => setEntryContext(undefined)} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
+          entryContext={entryContext} onClearEntryContext={() => {
+            if (operationGuard.hasUnresolved()) {
+              setNavigationError('처리 중인 요청의 결과를 먼저 확인해 주세요. 현재 대화와 제안을 유지했습니다.');
+              return;
+            }
+            setEntryContext(undefined);
+          }} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
             if (scheduleCallTarget && (scheduleCallTarget.itemId !== target.itemId || scheduleCallTarget.expectedRevision !== target.expectedRevision)) {
               setNavigationError('진행 중인 전화 요청을 먼저 확인해 주세요.');
             } else if (!scheduleCallTarget) setScheduleCallTarget(target);
@@ -215,6 +249,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
           }} />
       </Scene>
       <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'month'}><CalendarScreen selectedDate={selectedDate} onImport={() => setPanel('calendarImport')}
+        onVisibleMonthChange={setVisibleCalendarMonth}
         onSelectDate={date => { setSelectedDate(date); setCalendarMode('day'); }} client={scheduleClient} timezone={timezone} refreshVersion={refreshVersion} /></Scene>
       <Scene visible={panel === 'main' && tab === 'calendar' && calendarMode === 'day'}>
         <Pressable accessibilityRole="button" accessibilityLabel="월간 캘린더로" onPress={() => setCalendarMode('month')} style={styles.backButton}><Icon name="chevronLeft" /><Text style={styles.settingsToggleText}>월간 캘린더</Text></Pressable>
@@ -232,25 +267,18 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         <Pressable accessibilityRole="link" accessibilityLabel="Streamline 아이콘 원본" onPress={() => { void Linking.openURL('https://github.com/webalys-hq/streamline-vectors/tree/main/core').catch(() => setNavigationError('아이콘 출처 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>Streamline 원본</Text></Pressable>
         <Pressable accessibilityRole="link" accessibilityLabel="CC BY 4.0 라이선스" onPress={() => { void Linking.openURL('https://creativecommons.org/licenses/by/4.0/').catch(() => setNavigationError('라이선스 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>CC BY 4.0 라이선스</Text></Pressable>
       </ScrollView></Scene>
-      <Scene visible={panel === 'proposals'}><ProposalPanel onOpenGoogleContacts={() => { setGoogleReturnTo('proposals'); setPanel('googleConnection'); }} api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={proposal => {
-        const target = proposal.coordinationTarget;
-        setEntryContext(undefined); setRecoveryRequest(undefined);
-        setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
-          text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
-          coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
-        setTab('chat'); setPanel('main');
-      }} /></Scene>
+      <Scene visible={panel === 'proposals'}><ProposalPanel onOpenGoogleContacts={() => { setGoogleReturnTo('proposals'); setPanel('googleConnection'); }} api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={requestProposalRevision} /></Scene>
       {panel === 'calendarImport' && <CalendarImportPanel onOpenGoogle={() => { setGoogleReturnTo('calendarImport'); setPanel('googleConnection'); }} api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel(phoneReturnToCall && scheduleCallTarget ? 'scheduleCall' : 'main')} />}
-      {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => { setPanel(googleReturnTo); setGoogleReturnTo('main'); }} onOpenCalendarImport={() => setPanel('calendarImport')} />}
+      {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => { refresh(); setPanel(googleReturnTo); setGoogleReturnTo('main'); }} onOpenCalendarImport={() => setPanel('calendarImport')} />}
       {calendarSyncOpened && <Scene visible={panel === 'calendarSync'}><CalendarSyncPanel api={api} timezone={timezone} selectedDate={selectedDate} visible={panel === 'calendarSync'} refreshVersion={refreshVersion} onBack={() => setPanel('main')} onScheduleChanged={refresh} /></Scene>}
       <Scene visible={panel === 'profile'}><ProfilePanel profile={profile} member={member} onBack={() => setPanel('main')}
         onOpenGoogle={() => setPanel('googleConnection')} onOpenReview={() => { setReviewOpened(true); setPanel('review'); }}
-        onOpenAccount={() => setPanel('connections')} onOpenMemory={() => { setMemoryReturn('profile'); setPanel('memory'); }} /></Scene>
-      <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={() => { refresh(); profile.refresh(); }} onBack={() => setPanel(memoryReturn)} /></Scene>
+        onOpenAccount={() => setPanel('connections')} onOpenMemory={() => setPanel('memory')} /></Scene>
+      <Scene visible={panel === 'memory'}><MemoryPanel api={api} onMemoryChanged={() => { refresh(); profile.refresh(); }} onBack={() => setPanel('profile')} /></Scene>
       {scheduleCallTarget && <Scene visible={panel === 'scheduleCall'}><ScheduleCallPanel api={api} {...scheduleCallTarget} onOpenGoogleContacts={() => { setGoogleReturnTo('scheduleCall'); setPanel('googleConnection'); }}
         onClose={() => { setTab('chat'); setPanel('main'); }} onFinish={() => { setScheduleCallTarget(null); setTab('chat'); setPanel('main'); }} onScheduleChanged={refresh} onOpenPhoneSettings={() => { setPhoneReturnToCall(true); setPanel('phoneConnection'); }} /></Scene>}
-      {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} onBack={() => setPanel('main')} /></Scene>}
+      {reviewOpened && <Scene visible={panel === 'review'}><ReviewPanel api={api} deviceTimezone={timezone} scope={member?.id} onBack={() => setPanel('main')} /></Scene>}
       {addSession && <Scene visible={panel === 'addItem'}><AddItemPanel key={addSession.key} api={api} client={scheduleClient} timezone={timezone}
         selectedDate={addSession.date} kind={addSession.kind} item={addSession.item} pendingDraft={pendingDraft} onDraftHandled={() => setPendingDraft(undefined)}
         onClose={() => { setAddSession(null); setPendingDraft(undefined); if (entryContext?.key === formRequest?.key) setEntryContext(undefined); setFormRequest(null); setPanel('main'); }} onScheduleChanged={refresh}
@@ -268,7 +296,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     </View>
     {panel === 'main' && <View style={styles.tabBar}><GlassSurface><View style={styles.tabs} accessibilityRole="tablist">
       {(['home', 'calendar', 'chat', 'add', 'routines'] as const).map(id => {
-        const label = { home: '홈', calendar: '캘린더', chat: 'AI 비서', add: '추가', routines: '루틴' }[id];
+        const label = { home: '홈', calendar: '캘린더', chat: 'PIKKU', add: '추가', routines: '루틴' }[id];
         const selected = id !== 'add' && tab === id;
         return <Pressable key={id} accessibilityRole={id === 'add' ? 'button' : 'tab'} accessibilityLabel={label} accessibilityState={{ selected }}
           onPress={() => { if (id === 'add') setAddVisible(true); else { setTab(id); if (id === 'routines') setRoutinesOpened(true); } }} style={[styles.tab, selected && styles.activeTab]}>
@@ -278,7 +306,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
       })}
     </View></GlassSurface></View>}
     <BottomSheet visible={addVisible} title="무엇을 추가할까요?" onClose={() => setAddVisible(false)}>
-      <Pressable accessibilityRole="button" accessibilityLabel="삐꾸에게 부탁하기" onPress={() => ask()} style={styles.askButton}><PikkuCharacter size={42} /><View style={styles.askText}><Text style={styles.askTitle}>삐꾸에게 부탁하기</Text><Text style={styles.hint}>새 일정·할 일·루틴을 함께 만들어요</Text></View><Icon name="arrowRight" color={colors.primary} /></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="PIKKU에게 부탁하기" onPress={() => ask()} style={styles.askButton}><PikkuCharacter size={42} /><View style={styles.askText}><Text style={styles.askTitle}>PIKKU에게 부탁하기</Text><Text style={styles.hint}>새 일정·할 일·루틴을 함께 만들어요</Text></View><Icon name="arrowRight" color={colors.primary} /></Pressable>
       {(['event', 'task', 'routine'] as const).map(kind => <Pressable key={kind} accessibilityRole="button" accessibilityLabel={{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]} onPress={() => openAdd(kind)} style={styles.connectionRow}><Icon name={kind === 'event' ? 'calendar' : kind === 'routine' ? 'repeat' : 'day'} /><Text style={styles.connectionText}>{{ event: '일정 추가', task: '할 일 추가', routine: '루틴 추가' }[kind]}</Text><Icon name="plus" /></Pressable>)}
     </BottomSheet>
   </>;

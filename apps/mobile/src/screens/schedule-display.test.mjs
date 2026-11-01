@@ -35,3 +35,12 @@ test('only today stacks ended items in reverse end order and reports overlaps', 
   assert.equal(today.layout.get('active').overlap, true); assert.equal(today.layout.get('old').overlap, false);
   assert.deepEqual(scheduleLayout(rows, now, new Date('2026-10-31T12:00Z'), 'UTC').past, []);
 });
+
+test('non-blocking entries never create a conflict indication', () => {
+  const first = make('a','event','pending','2026-11-01T09:00Z','2026-11-01T11:00Z');
+  const second = make('b','event','pending','2026-11-01T10:00Z','2026-11-01T12:00Z');
+  const free = { ...first, blocksTime: false };
+  const layout = scheduleLayout([free, second], Date.parse('2026-11-01T08:00Z'), new Date('2026-11-01T12:00Z'), 'UTC').layout;
+  assert.equal(layout.get('a').overlap, false); assert.equal(layout.get('b').overlap, false);
+  assert.equal(scheduleLayout([first, second], Date.parse('2026-11-01T08:00Z'), new Date('2026-11-01T12:00Z'), 'UTC').layout.get('b').overlap, true);
+});

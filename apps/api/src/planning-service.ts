@@ -7,11 +7,14 @@ import {
 import type { AgentDecision } from './agent.ts';
 import { changeSet as changeSetSchema, compareInstants, timestamp } from './planning-schemas.ts';
 import type { PlanningStore, UserPlanningState } from './planning-store.ts';
+import { listReviewDigests, type ReviewDigest } from './review-digests.ts';
 
 export class PlanningError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable = false, readonly details?: unknown) { super(message); }
 }
-type Baseline = { userId: string; snapshot: ContextSnapshot; factsKey: string; coordinationTarget?: CoordinationTarget; externalExpiresAt?: string };
+type Baseline = { userId: string; snapshot: ContextSnapshot; factsKey: string;
+  memoryIndex?: { keys: Array<{ kind: MemoryFact['kind']; key: string }>; truncated: boolean };
+  recentReviews?: ReviewDigest[]; coordinationTarget?: CoordinationTarget; externalExpiresAt?: string };
 type ProposalReview =
   | { ok: true; changes: ChangeSet; assessment: ReturnType<typeof proposalAssessment>; expiresAt: string }
   | { ok: false; result: AgentResult };
@@ -64,9 +67,10 @@ export function applyChanges(state: UserPlanningState, changes: ChangeSet, delet
       state.items.set(item.id, item); items.push(item);
     } else if (change.operation === 'update') {
       const before = state.items.get(change.targetId)!;
-      const { category, attendance, location, ...after } = change.after;
+      const { category, attendance, location, allDay, blocksTime, notes, ...after } = change.after;
       const item: ScheduleItem = { ...before, ...after, ...(category === undefined ? {} : { category }), ...(attendance === undefined ? {} : { attendance }),
         ...(location === undefined ? {} : { location }),
+        ...(allDay === undefined ? {} : { allDay }), ...(blocksTime === undefined ? {} : { blocksTime }), ...(notes === undefined ? {} : { notes }),
         id: before.id, revision: before.revision + 1, sourceRefs: before.sourceRefs };
       if (before.completion !== item.completion || (before.attendance ?? null) !== (item.attendance ?? null)) {
         const history = state.statusUndo ??= new Map(); const undo = history.get(before.id) ?? {};
@@ -98,7 +102,8 @@ export class PlanningService {
   private now(): string { return this.clock().toISOString(); }
 
   async capture(userId: string, timezone: string, target?: CoordinationTarget): Promise<Baseline> {
-    const current = snapshot(await this.store.read(userId), timezone, this.now());
+    const state = await this.store.read(userId);
+    const current = snapshot(state, timezone, this.now());
     if (target) {
       const item = current.items.find(value => value.id === target.id);
       if (!item) throw new PlanningError(404, 'not_found', '선택한 일정을 찾을 수 없습니다.');
@@ -107,7 +112,11 @@ export class PlanningService {
         throw new PlanningError(409, 'conflict', '선택한 일정은 공동 조정 대상으로 사용할 수 없습니다.');
       }
     }
-    return { userId, snapshot: current, factsKey: factsKey(current.facts), ...(target ? { coordinationTarget: target } : {}) };
+    const memoryKeys = [...new Map(current.facts.map(({ kind, key }) => [JSON.stringify([kind, key]), { kind, key }])).values()];
+    return { userId, snapshot: current, factsKey: factsKey(current.facts),
+      memoryIndex: { keys: memoryKeys.slice(0, 30), truncated: memoryKeys.length > 30 },
+      recentReviews: listReviewDigests(state, new Date(current.now)).digests.slice(0, 2).filter(value => value.message.length <= 2000),
+      ...(target ? { coordinationTarget: target } : {}) };
   }
   async latest(baseline: Baseline): Promise<ContextSnapshot> {
     return snapshot(await this.store.read(baseline.userId), baseline.snapshot.timezone, this.now());

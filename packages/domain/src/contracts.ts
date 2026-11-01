@@ -16,6 +16,9 @@ export interface ScheduleFields {
   category?: "personal" | "work" | null;
   attendance?: "attended" | "absent" | "unknown" | null;
   location?: string | null;
+  allDay?: boolean;
+  blocksTime?: boolean;
+  notes?: string | null;
 }
 
 export interface ScheduleItem extends ScheduleFields {
@@ -134,12 +137,30 @@ export interface Approval {
   actorRef: string;
 }
 
+export type ChatSuggestion = { label: string; message: string };
+
 export type AgentResult =
-  | { kind: "reply"; message: string }
+  | { kind: "reply"; message: string; suggestions?: ChatSuggestion[] }
+  | { kind: "reminder_request"; message: string; reminder: ReminderCandidate }
   | { kind: "phone_request"; message: string; itemId: string; expectedRevision: number }
-  | { kind: "question"; message: string; missingFields: string[] }
+  | { kind: "question"; message: string; missingFields: string[]; suggestions?: ChatSuggestion[] }
   | { kind: "proposal"; message: string; proposalIds: string[] }
   | { kind: "failure"; message: string; code: string; retryable: boolean };
+
+export type DeviceContext = {
+  currentLocation?: { latitude: number; longitude: number; accuracyMeters: number; capturedAt: string };
+  travelMode?: "walk" | "transit" | "car";
+  notificationSupport?: "device" | "unsupported" | "unknown";
+};
+
+export type ReminderCandidate = {
+  itemId: string; expectedRevision: number; title: string; appointmentAt: string; appointmentEndsAt: string; timezone: string;
+  basis: "event_start" | "departure"; minutesBefore: number; reminderAt: string; expiresAt: string;
+  appointmentLocation?: string;
+  departureAt?: string;
+  travel?: { mode: "walk" | "transit" | "car"; durationMinutes: number; provider: "kakao"; basis: "current_time";
+    destinationName: string; destinationAddress: string };
+};
 
 export interface ReadScheduleInput {
   from: string;
@@ -186,6 +207,7 @@ export interface ChatInput {
   message: string;
   timezone: string;
   coordinationTarget?: CoordinationTarget;
+  deviceContext?: DeviceContext;
 }
 
 export interface ChatOutput {

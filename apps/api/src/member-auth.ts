@@ -9,7 +9,9 @@ const secretPattern = /^[A-Za-z0-9_-]{43}$/;
 const hash = (value: string) => createHash('sha256').update(value).digest();
 const flowTtl = 10 * 60_000;
 const sessionTtl = 7 * 24 * 60 * 60_000;
-type Flow = { verifier: string; nonce: string; completionHash: Buffer; expiresAt: number; ticketHash?: string };
+type LoginResult = { sessionToken: string; expiresAt: string; member: Member };
+type Flow = { state: string; verifier: string; nonce: string; completionHash: Buffer; expiresAt: number; ticketHash?: string;
+  cancelled?: boolean; result?: LoginResult; completing?: Promise<LoginResult | null> };
 type Pending = { flow: Flow; identity: { subject: string; email: string; displayName: string } };
 
 async function tokenResponse(response: Response): Promise<unknown> {
@@ -48,21 +50,23 @@ export function createMemberAuth(options: { pool: Pool; env: NodeJS.ProcessEnv; 
     !redirectUrl.username && !redirectUrl.password && !redirectUrl.search && !redirectUrl.hash &&
     redirectUrl.pathname === '/v1/google/oauth/callback';
   const verifier = new OAuth2Client({ clientId, transporterOptions: { timeout: 15_000, retry: false } });
-  const states = new Map<string, Flow>(); const pending = new Map<string, Pending>(); let inFlight = 0;
+  const states = new Map<string, Flow>(); const pending = new Map<string, Pending>(); const flows = new Map<string, Flow>();
   const now = () => { const value = clock().getTime(); if (!Number.isFinite(value)) throw new Error('MEMBER_AUTH_CLOCK'); return value; };
   const cleanup = (current: number) => {
     for (const [state, flow] of states) if (flow.expiresAt <= current) states.delete(state);
     for (const [key, item] of pending) if (item.flow.expiresAt <= current) pending.delete(key);
+    for (const [key, flow] of flows) if (flow.expiresAt <= current) { flow.cancelled = true; flows.delete(key); }
   };
 
   function start(): { authorizationUrl: string; completionSecret: string } | undefined {
     if (!configured) return undefined;
     const current = now(); cleanup(current);
-    if (states.size + pending.size + inFlight >= 1000) throw new Error('MEMBER_AUTH_UNAVAILABLE');
+    if (flows.size >= 1000) throw new Error('MEMBER_AUTH_UNAVAILABLE');
     const state = `member_${randomToken()}`, codeVerifier = randomToken(), nonce = randomToken(), completionSecret = randomToken();
-    const flow: Flow = { verifier: codeVerifier, nonce, completionHash: hash(completionSecret), expiresAt: current + flowTtl };
+    const flow: Flow = { state, verifier: codeVerifier, nonce, completionHash: hash(completionSecret), expiresAt: current + flowTtl };
     states.set(state, flow);
-    const timer = setTimeout(() => { states.delete(state); if (flow.ticketHash) pending.delete(flow.ticketHash); }, flowTtl);
+    const flowKey = flow.completionHash.toString('hex'); flows.set(flowKey, flow);
+    const timer = setTimeout(() => { flow.cancelled = true; states.delete(state); if (flow.ticketHash) pending.delete(flow.ticketHash); flows.delete(flowKey); }, flowTtl);
     timer.unref();
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     url.search = new URLSearchParams({ client_id: clientId!, redirect_uri: redirect!, response_type: 'code', scope: 'openid email profile',
@@ -75,8 +79,11 @@ export function createMemberAuth(options: { pool: Pool; env: NodeJS.ProcessEnv; 
   async function callback(state: string, code: string): Promise<string | undefined> {
     if (!/^member_[A-Za-z0-9_-]{43}$/.test(state)) return undefined;
     const flow = states.get(state); states.delete(state);
-    if (!configured || !flow || flow.expiresAt <= now() || typeof code !== 'string' || !code || code.length > 2048 || /[\x00-\x20\x7f]/.test(code)) return undefined;
-    inFlight++;
+    if (!configured || !flow || flow.expiresAt <= now() || typeof code !== 'string' || !code || code.length > 2048 || /[\x00-\x20\x7f]/.test(code)) {
+      if (flow) flows.delete(flow.completionHash.toString('hex'));
+      return undefined;
+    }
+    let completed = false;
     try {
       const response = await fetcher('https://oauth2.googleapis.com/token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: clientId!, client_secret: clientSecret!,
@@ -90,28 +97,63 @@ export function createMemberAuth(options: { pool: Pool; env: NodeJS.ProcessEnv; 
           !Number.isSafeInteger(payload.exp) || payload.exp * 1000 <= current || payload.nonce !== flow.nonce ||
           typeof payload.sub !== 'string' || !/^[\x21-\x7e]{1,255}$/.test(payload.sub) ||
           payload.email_verified !== true || typeof payload.email !== 'string' || !z.email().max(254).safeParse(payload.email).success ||
-          flow.expiresAt <= current) return undefined;
+          flow.expiresAt <= current || flow.cancelled) return undefined;
       const name = typeof payload.name === 'string' ? payload.name.trim() : '';
       const displayName = name && name.length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(name) && Buffer.from(name, 'utf8').toString('utf8') === name ? name : '회원';
       const confirmationCode = randomToken();
       flow.ticketHash = hash(confirmationCode).toString('hex');
       pending.set(flow.ticketHash, { flow, identity: { subject: payload.sub, email: payload.email, displayName } });
+      completed = true;
       return confirmationCode;
     } catch { return undefined; }
-    finally { inFlight--; }
+    finally { if (!completed) flows.delete(flow.completionHash.toString('hex')); }
   }
 
-  async function complete(completionSecret: string, confirmationCode: string): Promise<{ sessionToken: string; expiresAt: string; member: Member } | null> {
+  async function finish(key: string, item: Pending): Promise<LoginResult | null> {
+    const flow = item.flow;
+    if (flow.completing) return flow.completing;
+    if (pending.get(key) !== item || flow.cancelled || flow.expiresAt <= now()) return null;
+    pending.delete(key);
+    flow.completing = (async () => {
+      const sessionToken = randomToken(); const current = now(); const expiresAt = new Date(current + sessionTtl);
+      const member = await store.createSession(item.identity, hash(sessionToken).toString('hex'), new Date(current), expiresAt);
+      if (flow.cancelled || flow.expiresAt <= now()) {
+        await store.revokeSession(hash(sessionToken).toString('hex'), new Date(now()));
+        return null;
+      }
+      return flow.result = { sessionToken, expiresAt: expiresAt.toISOString(), member };
+    })();
+    try { return await flow.completing; }
+    catch (error) { flows.delete(flow.completionHash.toString('hex')); throw error; }
+    finally { delete flow.completing; }
+  }
+  async function complete(completionSecret: string, confirmationCode: string): Promise<LoginResult | null> {
     if (!secretPattern.test(completionSecret) || !secretPattern.test(confirmationCode)) return null;
     const key = hash(confirmationCode).toString('hex'), item = pending.get(key);
     if (!item) return null;
     const current = now();
     if (item.flow.expiresAt <= current) { pending.delete(key); return null; }
     if (!timingSafeEqual(item.flow.completionHash, hash(completionSecret))) return null;
-    pending.delete(key);
-    const sessionToken = randomToken(); const expiresAt = new Date(current + sessionTtl);
-    const member = await store.createSession(item.identity, hash(sessionToken).toString('hex'), new Date(current), expiresAt);
-    return { sessionToken, expiresAt: expiresAt.toISOString(), member };
+    return finish(key, item);
+  }
+  async function poll(completionSecret: string): Promise<{ status: 'pending' } | ({ status: 'completed' } & LoginResult) | null> {
+    if (!secretPattern.test(completionSecret)) return null;
+    const flow = flows.get(hash(completionSecret).toString('hex'));
+    if (!flow || flow.cancelled || flow.expiresAt <= now() || !timingSafeEqual(flow.completionHash, hash(completionSecret))) return null;
+    if (flow.result) return { status: 'completed', ...flow.result };
+    if (flow.completing) { const result = await flow.completing; return result ? { status: 'completed', ...result } : null; }
+    const item = flow.ticketHash && pending.get(flow.ticketHash);
+    if (!item || !flow.ticketHash) return { status: 'pending' };
+    const result = await finish(flow.ticketHash, item);
+    return result ? { status: 'completed', ...result } : null;
+  }
+  function cancel(completionSecret: string): boolean {
+    if (!secretPattern.test(completionSecret)) return false;
+    const key = hash(completionSecret).toString('hex'), flow = flows.get(key);
+    if (!flow || flow.cancelled || flow.result || flow.expiresAt <= now()) return false;
+    flow.cancelled = true; flows.delete(key); states.delete(flow.state);
+    if (flow.ticketHash) pending.delete(flow.ticketHash);
+    return true;
   }
 
   async function me(token: string): Promise<Member | null> {
@@ -121,7 +163,7 @@ export function createMemberAuth(options: { pool: Pool; env: NodeJS.ProcessEnv; 
     return typeof token === 'string' && secretPattern.test(token) ? store.revokeSession(hash(token).toString('hex'), new Date(now())) : false;
   }
   async function resolve(token: string) { const member = await me(token); return member ? { userId: member.id } : null; }
-  return { migrate: () => store.migrate(), start, ownsState, callback, complete, me, logout, resolve };
+  return { migrate: () => store.migrate(), start, ownsState, callback, complete, poll, cancel, me, logout, resolve };
 }
 
 export type MemberAuth = ReturnType<typeof createMemberAuth>;

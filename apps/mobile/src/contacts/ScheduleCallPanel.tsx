@@ -69,7 +69,7 @@ export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClo
       {call.status === 'completed' && <ActionButton label="장소 정정 검토" disabled={locked} onPress={() => submit({ kind: 'propose', call })} />}
       {call.transcript && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>통화 내용</Text>
         <Text style={styles.hint}>전사는 외부 발화이며, 실제 내용과 다를 수 있습니다. 직접 확인해 주세요.</Text>
-        {call.transcript.map((entry, index) => <Text key={index}>{entry.role === 'agent' ? 'AI 비서' : '상대방'}: {entry.text}</Text>)}</View>}
+        {call.transcript.map((entry, index) => <Text key={index}>{entry.role === 'agent' ? 'PIKKU' : '상대방'}: {entry.text}</Text>)}</View>}
       {call.status === 'review_pending' && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>장소 정정 검토</Text>
         {!!call.reviewNote && <Text>{call.reviewNote}</Text>}
         {call.correction ? <><Text>변경 전: {call.correction.beforeLocation ?? '장소 미설정'}</Text><Text>변경 제안: {call.correction.afterLocation}</Text>

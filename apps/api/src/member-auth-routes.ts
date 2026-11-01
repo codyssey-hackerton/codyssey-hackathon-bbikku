@@ -3,7 +3,9 @@ import { z } from 'zod';
 import type { MemberAuth } from './member-auth.ts';
 
 const empty = z.strictObject({});
-const completeBody = z.strictObject({ completionSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/), confirmationCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/) });
+const secret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const completeBody = z.union([z.strictObject({ completionSecret: secret }), z.strictObject({ completionSecret: secret, cancel: z.literal(true) }),
+  z.strictObject({ completionSecret: secret, confirmationCode: secret })]);
 const token = (request: FastifyRequest) => typeof request.headers.authorization === 'string'
   ? /^Bearer ([^\s]+)$/i.exec(request.headers.authorization)?.[1] : undefined;
 
@@ -48,6 +50,15 @@ export function registerMemberAuthRoutes(app: FastifyInstance, auth: MemberAuth,
     const body = completeBody.safeParse(request.body);
     if (!body.success) return error(request, reply, 400, 'invalid_request', '요청을 확인해 주세요.');
     try {
+      if ('cancel' in body.data) {
+        if (!auth.cancel(body.data.completionSecret)) return error(request, reply, 400, 'invalid_request', '로그인 요청을 확인할 수 없습니다.');
+        return { requestId: request.id, data: { status: 'cancelled' } };
+      }
+      if (!('confirmationCode' in body.data)) {
+        const result = await auth.poll(body.data.completionSecret);
+        if (!result) return error(request, reply, 400, 'invalid_request', '로그인 요청을 확인할 수 없습니다.');
+        return { requestId: request.id, data: result };
+      }
       const result = await auth.complete(body.data.completionSecret, body.data.confirmationCode);
       if (!result) return error(request, reply, 400, 'invalid_request', '로그인을 완료하지 못했습니다. 다시 시도해 주세요.');
       return { requestId: request.id, data: result };

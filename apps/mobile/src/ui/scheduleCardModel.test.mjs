@@ -36,3 +36,7 @@ test('시간대 자정 경계와 잘못된 설정을 구분한다', () => {
   assert.equal(scheduleTimeLabel(base, 'Not/AZone'), '시간 확인 필요');
   assert.equal(scheduleTimeLabel({ ...base, timeSlot: null }, 'Asia/Seoul'), '시간 미정');
 });
+
+test('종일 일정은 자정 시간을 노출하지 않는다', () => {
+  assert.equal(scheduleTimeLabel({ ...base, allDay: true }, 'Asia/Seoul'), '종일');
+});

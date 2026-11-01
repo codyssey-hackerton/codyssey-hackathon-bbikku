@@ -1,22 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
   StyleSheet, View,
 } from 'react-native';
 import type { ScrollViewInstance } from 'react-native';
-import type { ChatInput } from '@pikku/domain';
+import type { ChatInput, ChatSuggestion, DeviceContext, ReminderCandidate } from '@pikku/domain';
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
 import { Icon } from '../ui/Icon';
 import { ScreenBackground } from '../ui/ScreenBackground';
 import { ApiError } from '../api/http';
+import { operationGuard } from '../api/operationGuard';
 import { useMutation } from '../api/useMutation';
 import type { ScheduleClient } from '../schedule/client';
 import type { ChatClient, ChatContext, ChatEntryContext, ChatResponse, CoordinationTarget, FormDraft } from './client';
 export type { ChatEntryContext } from './client';
 import { ChatScheduleSummary } from './ChatScheduleSummary';
+import ChatDeviceContext from './ChatDeviceContext';
 
-type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; phoneTarget?: { itemId: string; expectedRevision: number } };
+type SuggestionSource = { client: ChatClient; conversationId: string; epoch: number; generation: number; mode: string | null;
+  entry?: ChatEntryContext; target?: CoordinationTarget & { title: string } };
+type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; proposalIds?: string[]; proposalMissing?: boolean;
+  reminder?: ReminderCandidate; phoneTarget?: { itemId: string; expectedRevision: number }; suggestions?: ChatSuggestion[]; suggestionSource?: SuggestionSource };
 type Input = Omit<ChatInput, 'requestId'> & { entryContext?: ChatContext };
 const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
 const weekdayLabels: Record<string, string> = { '1': '월', '2': '화', '3': '수', '4': '목', '5': '금', '6': '토', '7': '일' };
@@ -37,6 +43,7 @@ function errorMessage(error: unknown): string {
       case 'operation_in_progress': return '이전 요청을 처리 중이에요. 잠시 후 다시 확인해 주세요.';
       case 'rate_limited': return '요청이 많아요. 잠시 후 다시 확인해 주세요.';
       case 'invalid_request': return '입력 내용을 확인해 주세요.';
+      case 'location_expired': return '공유한 위치가 만료됐어요. 이전 요청의 결과를 먼저 확인해 주세요.';
       case 'stale_proposal': case 'conflict': return '기준 정보가 바뀌었어요. 최신 일정을 확인해 주세요.';
       default: return '서버 요청에 실패했습니다. 잠시 후 다시 시도해 주세요.';
     }
@@ -44,7 +51,7 @@ function errorMessage(error: unknown): string {
   return '요청 결과를 확인할 수 없습니다.';
 }
 
-export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft, onOpenScheduleCall }: {
+export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft, onOpenScheduleCall, renderProposal, renderReminder, reviewDigests }: {
   client: ChatClient;
   timezone: string;
   scheduleClient: ScheduleClient;
@@ -61,8 +68,12 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   onClearEntryContext?: () => void;
   onApplyDraft?: (draft: FormDraft) => void;
   onOpenScheduleCall?: (target: { itemId: string; expectedRevision: number }) => void;
+  renderProposal?: (id: string) => ReactNode;
+  renderReminder?: (reminder: ReminderCandidate) => ReactNode;
+  reviewDigests?: ReactNode;
 }) {
   const [draft, setDraft] = useState('');
+  const [deviceContext, setDeviceContext] = useState<DeviceContext>({ notificationSupport: Platform.OS === 'web' ? 'unsupported' : 'device' });
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryRequest[]>([]);
   const [revisionDrafts, setRevisionDrafts] = useState<RevisionRequest[]>([]);
   const [activeRecoveryKey, setActiveRecoveryKey] = useState<string | null>(null);
@@ -76,8 +87,10 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const [longWait, setLongWait] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkMessage, setCheckMessage] = useState('');
+  const [guardEpoch, setGuardEpoch] = useState(0);
   const counter = useRef(0);
   const scrollRef = useRef<ScrollViewInstance>(null);
+  const scrollRequested = useRef(false);
   const sentRecovery = useRef<string | null>(null);
   const sentRevision = useRef<string | null>(null);
   const sentTarget = useRef<(CoordinationTarget & { title: string }) | undefined>(undefined);
@@ -85,6 +98,14 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const previousTarget = useRef(coordinationTarget);
   const requestClient = useRef<ChatClient | null>(null);
   const currentClient = useRef(client); currentClient.current = client;
+  const sendLock = useRef(false), suggestionEpoch = useRef(0);
+  const sourceGeneration = useRef({ client, entryContext, coordinationTarget, activeRecoveryKey, activeEntry, value: 0 });
+  if (sourceGeneration.current.client !== client || sourceGeneration.current.entryContext !== entryContext ||
+      sourceGeneration.current.coordinationTarget !== coordinationTarget || sourceGeneration.current.activeRecoveryKey !== activeRecoveryKey ||
+      sourceGeneration.current.activeEntry !== activeEntry) {
+    sourceGeneration.current = { client, entryContext, coordinationTarget, activeRecoveryKey, activeEntry, value: sourceGeneration.current.value + 1 };
+  }
+  const sentSuggestionSource = useRef<Omit<SuggestionSource, 'conversationId'> | null>(null);
   const checkingRef = useRef(false), mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const action = useMutation<Input, ChatResponse>(
@@ -93,6 +114,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       setConversationId(response.conversationId);
       const result = response.result;
       if (result.kind === 'failure') {
+        scrollRequested.current = true;
         setAgentError(result.message);
         sentRecovery.current = null;
         sentRevision.current = null;
@@ -113,23 +135,42 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         sentRevision.current = null;
       }
       const replyId = `reply-${++counter.current}`;
-      setEntries((previous) => [
-        ...previous,
-        { id: replyId, role: 'assistant', text: result.message, ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) },
-        ...(result.kind === 'proposal'
-          ? [{ id: `${replyId}-status`, role: 'status' as const, text: '제안 목록에서 변경 전후와 이유를 검토하세요. 승인 전에는 적용되지 않습니다.' }]
-          : []),
-      ]);
+      const suggestions = (result.kind === 'reply' || result.kind === 'question') && 'suggestions' in result ? result.suggestions : undefined;
+      const suggestionSource = sentSuggestionSource.current && requestClient.current === sentSuggestionSource.current.client
+        ? { ...sentSuggestionSource.current, conversationId: response.conversationId } : undefined;
+      scrollRequested.current = true;
+      setEntries((previous) => {
+        const seen = new Set(previous.flatMap(entry => entry.proposalIds ?? []));
+        const ids = result.kind === 'proposal' ? [...new Set(result.proposalIds.filter(id => !!id.trim() && id.length <= 200))] : [];
+        const proposalIds = ids.filter(id => !seen.has(id));
+        return [...previous, { id: replyId, role: 'assistant', text: result.message,
+          ...(proposalIds.length ? { proposalIds } : {}),
+          ...(result.kind === 'proposal' && !ids.length ? { proposalMissing: true } : {}),
+          ...(suggestions && suggestionSource ? { suggestions, suggestionSource } : {}),
+          ...(result.kind === 'reminder_request' ? { reminder: result.reminder } : {}),
+          ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) }];
+      });
       if (result.kind === 'proposal') onProposalCreated();
     },
   );
   const busy = action.state.status !== 'idle';
+  const guardBlocked = operationGuard.hasUnresolved();
+  const guardObserved = useRef(guardBlocked); guardObserved.current = guardBlocked;
   const entryChanging = activeEntry !== entryContext;
   const activeRecovery = recoveryDrafts.find((item) => item.key === activeRecoveryKey);
   const activeRevision = revisionDrafts.find((item) => `revision:${item.key}` === activeRecoveryKey);
   const messageDraft = activeRecovery?.text ?? activeRevision?.text ?? draft;
   const displayedTarget = busy ? sentTarget.current : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
   useEffect(() => { if (action.state.status === 'success') action.reset(); }, [action.state.status]);
+  useEffect(() => { if (action.state.status !== 'pending') sendLock.current = false; }, [action.state.status]);
+  useEffect(() => {
+    if (!entries.some(entry => entry.suggestions?.length)) return;
+    const timer = setInterval(() => {
+      const blocked = operationGuard.hasUnresolved();
+      if (blocked !== guardObserved.current) { guardObserved.current = blocked; setGuardEpoch(value => value + 1); }
+    }, 500);
+    return () => clearInterval(timer);
+  }, [entries]);
   useEffect(() => {
     setLongWait(false);
     if (action.state.status !== 'pending') return;
@@ -137,7 +178,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     return () => clearTimeout(timer);
   }, [action.state.status]);
   useEffect(() => {
-    if (busy || activeEntry === entryContext) return;
+    if (busy || activeEntry === entryContext || operationGuard.hasUnresolved()) return;
     const changedKey = activeEntry?.key !== entryContext?.key;
     setActiveEntry(entryContext);
     if (!changedKey) return;
@@ -146,7 +187,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     setConversationId(null);
     setEntries([]);
     setAgentError(null);
-  }, [busy, entryContext, activeEntry]);
+  }, [busy, entryContext, activeEntry, guardEpoch]);
   useEffect(() => {
     if (!recoveryRequest) return;
     setRecoveryDrafts((previous) => previous.some((item) => item.key === recoveryRequest.key) ? previous : [...previous, recoveryRequest]);
@@ -164,10 +205,23 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     }
   }, [coordinationTarget]);
   useEffect(() => {
-    if (busy || requestedMode === undefined) return;
+    if (busy || requestedMode === undefined || operationGuard.hasUnresolved()) return;
     setActiveRecoveryKey(requestedMode);
     setRequestedMode(undefined);
-  }, [busy, requestedMode]);
+  }, [busy, requestedMode, guardEpoch]);
+  useEffect(() => {
+    if (busy || (!entryChanging && requestedMode === undefined) || !operationGuard.hasUnresolved()) return;
+    const timer = setInterval(() => {
+      if (!operationGuard.hasUnresolved()) setGuardEpoch(value => value + 1);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [busy, entryChanging, requestedMode, guardEpoch]);
+
+  function blockedByOtherWrite() {
+    if (!operationGuard.hasUnresolved()) return false;
+    setAgentError('처리 중이거나 결과를 확인하지 못한 변경 요청을 먼저 확인해 주세요.');
+    return true;
+  }
 
   function editMessage(value: string) {
     if (activeRecovery) {
@@ -177,20 +231,25 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     } else setDraft(value);
   }
 
-  function send() {
-    const message = messageDraft.trim();
-    if (!message || action.state.status !== 'idle' || entryChanging) return;
+  function send(suggestedMessage?: string) {
+    const message = suggestedMessage === undefined ? messageDraft.trim() : suggestedMessage;
+    if (!message.trim() || action.state.status !== 'idle' || entryChanging || sendLock.current) return;
+    if (blockedByOtherWrite()) return;
+    sendLock.current = true;
+    sentSuggestionSource.current = { client, epoch: ++suggestionEpoch.current, generation: sourceGeneration.current.value,
+      mode: activeRecoveryKey, entry: activeEntry, target: coordinationTarget };
     setAgentError(null);
     setLastSent(message);
-    sentRecovery.current = activeRecovery?.key ?? null;
-    sentRevision.current = activeRevision?.key ?? null;
-    if (!activeRecovery && !activeRevision) setDraft('');
+    sentRecovery.current = suggestedMessage === undefined ? activeRecovery?.key ?? null : null;
+    sentRevision.current = suggestedMessage === undefined ? activeRevision?.key ?? null : null;
+    if (suggestedMessage === undefined && !activeRecovery && !activeRevision) setDraft('');
     const userId = `user-${++counter.current}`;
     const selectedEntry = activeRevision || (activeRecovery && activeEntry?.key !== activeRecovery.key) ? undefined : activeEntry;
     const target = activeRecovery || selectedEntry ? undefined : activeRevision ? activeRevision.coordinationTarget : coordinationTarget;
     sentTarget.current = target;
     sentEntry.current = selectedEntry;
     setSuggestedDraft(null);
+    scrollRequested.current = true;
     setEntries((previous) => [
       ...previous,
       { id: userId, role: 'user', text: message },
@@ -201,7 +260,10 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       : selectedEntry?.kind === 'form' ? { kind: 'form', draft: selectedEntry.draft }
       : selectedEntry?.kind === 'create' ? { kind: 'create' } : undefined;
     requestClient.current = client; setCheckMessage('');
-    action.submit({ message, conversationId, timezone, ...(target ? { coordinationTarget: { id: target.id, expectedRevision: target.expectedRevision } } : {}), ...(context ? { entryContext: context } : {}) });
+    const location = deviceContext.currentLocation;
+    const currentLocation = location && Date.now() - Date.parse(location.capturedAt) <= 300_000 && Date.parse(location.capturedAt) <= Date.now() + 15_000 ? location : undefined;
+    action.submit({ message, conversationId, timezone, deviceContext: { ...deviceContext, currentLocation },
+      ...(target ? { coordinationTarget: { id: target.id, expectedRevision: target.expectedRevision } } : {}), ...(context ? { entryContext: context } : {}) });
   }
 
   async function checkResult() {
@@ -217,7 +279,8 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         ? { result: result.result.response } : { error: result.result.error });
       if (!mounted.current || !status) return;
       if (status.status === 'running') setCheckMessage('서버에서 요청을 처리 중입니다. 잠시 후 다시 확인해 주세요.');
-      else if (status.status === 'retryable') setCheckMessage('같은 요청을 다시 시도할 수 있습니다.');
+      else if (status.status === 'retryable') setCheckMessage(action.state.status === 'error' && action.state.error instanceof ApiError && action.state.error.code === 'location_expired'
+        ? '이전 요청은 재시도 가능한 상태지만 위치가 만료됐어요. 중복 방지를 위해 새 요청을 열지 않습니다.' : '같은 요청을 다시 시도할 수 있습니다.');
       else if (status.status === 'completed' && 'error' in status.result) setCheckMessage('서버에 저장된 요청 오류를 확인했습니다.');
     } catch {
       if (mounted.current) setCheckMessage('결과를 확인하지 못했습니다. 기존 요청은 계속 보존됩니다.');
@@ -231,23 +294,25 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     <ScreenBackground variant="ai">
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={styles.heading}>
-        <Text style={styles.title} accessibilityRole="header">AI 비서</Text>
+        <Text style={styles.title} accessibilityRole="header">PIKKU</Text>
         <View style={styles.links}>
-          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 검토</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 기록</Text></Pressable>
           <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.pill}><Icon name="clock" size={16} /><Text style={styles.pillText}>자동 검토 설정</Text></Pressable>
         </View>
         {activeEntry && !activeRecovery && !activeRevision && <View style={styles.target}>
           <Text style={styles.targetTitle}>{activeEntry.kind === 'item' ? `선택한 일정: ${activeEntry.title}` : activeEntry.kind === 'form' ? '작성 중인 입력 초안' : '새 일정 만들기'}</Text>
           <Text style={styles.targetHint}>{activeEntry.kind === 'form' ? '기존 입력을 보관하며 제안은 확인 후 선택해요. 일정은 자동 저장되지 않아요.' : '제안은 확인하고 승인하기 전까지 일정에 반영되지 않아요.'}</Text>
-          {onClearEntryContext && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={onClearEntryContext} style={styles.link}><Text style={styles.linkText}>맥락 닫기</Text></Pressable>}
+          {onClearEntryContext && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => { if (!blockedByOtherWrite()) onClearEntryContext(); }} style={styles.link}><Text style={styles.linkText}>맥락 닫기</Text></Pressable>}
         </View>}
         {displayedTarget && !activeEntry && !activeRecovery && <View style={styles.target}>
           <Text style={styles.targetTitle}>조정 검토 대상: {displayedTarget.title}</Text>
           <Text style={styles.targetHint}>대상 선택은 일정 변경이나 연락 승인이 아닙니다.</Text>
-          {!activeRevision && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClearCoordinationTarget} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>}
+          {!activeRevision && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={() => { if (!blockedByOtherWrite()) onClearCoordinationTarget(); }} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>}
         </View>}
       </View>
-      <ScrollView ref={scrollRef} style={styles.conversation} contentContainerStyle={styles.messages} keyboardShouldPersistTaps="handled" onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}>
+      <ScrollView ref={scrollRef} style={styles.conversation} contentContainerStyle={styles.messages} keyboardShouldPersistTaps="handled" onContentSizeChange={() => {
+        if (scrollRequested.current) { scrollRequested.current = false; scrollRef.current?.scrollToEnd({ animated: true }); }
+      }}>
         {(recoveryDrafts.length > 0 || revisionDrafts.length > 0) && <View style={styles.target}>
           <Text style={styles.targetTitle}>{activeRevision ? '제안 수정 요청 초안' : activeRecovery ? '복구 상담 초안' : '보관된 대화 초안'}</Text>
           <Text style={styles.targetHint}>기존 대화 초안은 보관됩니다. 복구 상담은 보내기 전 수정할 수 있고 공동 조정 대상은 포함되지 않습니다.</Text>
@@ -257,22 +322,24 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
             {recoveryDrafts.map((item) => <Pressable key={item.key} accessibilityRole="button"
               accessibilityLabel={`${item.title} ${item.dateLabel} 복구 상담 초안`}
               accessibilityState={{ disabled: busy, selected: item.key === activeRecoveryKey }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(item.key); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(item.key); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>{item.title} 복구 상담</Text>
             </Pressable>)}
             {revisionDrafts.map((item) => <Pressable key={`revision:${item.key}`} accessibilityRole="button"
               accessibilityLabel={`제안 ${item.proposalId} 수정 요청 초안`}
               accessibilityState={{ disabled: busy, selected: `revision:${item.key}` === activeRecoveryKey }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(`revision:${item.key}`); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(`revision:${item.key}`); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>제안 {item.proposalId} 수정 요청</Text>
             </Pressable>)}
             {(activeRecovery || activeRevision) && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(null); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(null); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>기존 대화 초안으로</Text>
             </Pressable>}
           </View>
         </View>}
         <ChatScheduleSummary client={scheduleClient} selectedDate={selectedDate} timezone={timezone} refreshVersion={refreshVersion} />
+        <ChatDeviceContext disabled={busy} onChange={setDeviceContext} />
+        {reviewDigests}
         {entries.length === 0 && <View style={styles.welcome}>
           <View style={styles.welcomeMark}><Icon name="sparkles" size={24} color={colors.primary} /></View>
           <Text style={styles.welcomeTitle}>어떤 하루를 보내고 싶으세요?</Text>
@@ -286,11 +353,33 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
               </Pressable>)}
           </View>}
         </View>}
-        {entries.map((entry) => <View key={entry.id} style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
-          <View style={styles.messageHeading}>{entry.role !== 'user' && <Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} />}<Text style={[styles.messageRole, entry.role === 'user' && styles.userMessageRole]}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>
-          <Text style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
+        {entries.map((entry) => <View key={entry.id} style={styles.messageGroup}>
+        <View style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
+          {entry.role !== 'user' && <View style={styles.messageHeading}><Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} /><Text style={styles.messageRole}>{entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>}
+          <Text accessibilityLabel={entry.role === 'user' ? `내 메시지: ${entry.text}` : undefined} style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
           {entry.phoneTarget && onOpenScheduleCall && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }}
             onPress={() => onOpenScheduleCall(entry.phoneTarget!)} style={styles.link}><Text style={styles.linkText}>전화 요청 확인</Text></Pressable>}
+          {!!entry.proposalIds?.length && <Text style={styles.targetHint}>{renderProposal ? '아래 제안을 확인해 주세요. 승인 전에는 적용되지 않습니다.' : '제안 기록에서 확인해 주세요. 승인 전에는 적용되지 않습니다.'}</Text>}
+          {entry.proposalMissing && <Text style={styles.targetHint}>제안 정보를 확인할 수 없어요. 제안 기록을 확인해 주세요.</Text>}
+        </View>
+        {renderProposal && entry.proposalIds?.map(id => <View key={id}>{renderProposal(id)}</View>)}
+        {entry.reminder && renderReminder?.(entry.reminder)}
+        {entry.suggestions?.map((suggestion, index) => {
+          const source = entry.suggestionSource;
+          const disabled = busy || checking || entryChanging || guardBlocked || requestedMode !== undefined || !source ||
+            source.client !== client || source.conversationId !== conversationId || source.epoch !== suggestionEpoch.current ||
+            source.generation !== sourceGeneration.current.value ||
+            source.mode !== activeRecoveryKey || source.entry !== activeEntry || source.target !== coordinationTarget;
+          return <Pressable key={index} accessibilityRole="button" accessibilityLabel={`${suggestion.label}. 보낼 메시지: ${suggestion.message}`}
+            accessibilityState={{ disabled }} disabled={disabled} onPress={() => {
+              if (disabled || !source || currentClient.current !== source.client || source.epoch !== suggestionEpoch.current ||
+                  source.generation !== sourceGeneration.current.value || operationGuard.hasUnresolved()) return;
+              send(suggestion.message);
+            }} style={[styles.suggestion, disabled && styles.disabled]}>
+            <Text style={styles.suggestionLabel}>{suggestion.label}</Text>
+            <Text style={styles.suggestionMessage}>{suggestion.message}</Text>
+          </Pressable>;
+        })}
         </View>)}
         {suggestedDraft && (activeEntry?.kind === 'form' || activeEntry?.kind === 'create') && suggestedDraft.key === activeEntry.key && activeEntry.key === entryContext?.key && !activeRecovery && !activeRevision && <View style={styles.draftCard}>
           <Text style={styles.targetTitle}>입력 제안 · 아직 반영되지 않음</Text>
@@ -302,12 +391,12 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         {agentError && <Text style={styles.error} accessibilityRole="alert">{agentError}</Text>}
         {action.state.status === 'error' && <View style={styles.errorBox}>
           <Text style={styles.error} accessibilityRole="alert">{errorMessage(action.state.error)}</Text>
-          {action.state.uncertain && <Text style={styles.error}>결과를 확인할 때까지 같은 요청만 다시 시도합니다.</Text>}
+          {action.state.uncertain && <Text style={styles.error}>결과를 확인할 때까지 새 요청을 보내지 않습니다.</Text>}
           {!!checkMessage && <Text accessibilityLiveRegion="polite" style={styles.error}>{checkMessage}</Text>}
           {action.state.uncertain && requestClient.current?.checkRequest && <Pressable accessibilityRole="button" accessibilityState={{ disabled: checking || requestClient.current !== client }}
             disabled={checking || requestClient.current !== client} onPress={checkResult} style={styles.link}><Text style={styles.linkText}>{checking ? '처리 결과 확인 중' : '처리 결과 확인'}</Text></Pressable>}
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: checking || requestClient.current !== client }}
-            disabled={checking || requestClient.current !== client} onPress={action.retry} style={styles.link}><Text style={styles.linkText}>같은 요청 다시 시도</Text></Pressable>
+          {!(action.state.error instanceof ApiError && action.state.error.code === 'location_expired') && <Pressable accessibilityRole="button" accessibilityState={{ disabled: checking || requestClient.current !== client }}
+            disabled={checking || requestClient.current !== client} onPress={action.retry} style={styles.link}><Text style={styles.linkText}>같은 요청 다시 시도</Text></Pressable>}
           {!action.state.uncertain && <Pressable accessibilityRole="button" onPress={() => {
             action.reset(); if (sentRecovery.current === null && sentRevision.current === null) setDraft(lastSent); sentRecovery.current = null; sentRevision.current = null;
           }} style={styles.link}><Text style={styles.linkText}>메시지 수정</Text></Pressable>}
@@ -315,7 +404,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       </ScrollView>
       <View style={styles.composer}>
         <TextInput accessibilityLabel="채팅 메시지" multiline placeholder="메시지 입력" placeholderTextColor="#58667E" selectionColor="#3563E9" value={messageDraft} onChangeText={editMessage} editable={!busy} style={styles.input} />
-        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || entryChanging || !messageDraft.trim() }} disabled={busy || entryChanging || !messageDraft.trim()} onPress={send} style={({ pressed }) => [styles.send, (busy || entryChanging || !messageDraft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="메시지 보내기" accessibilityState={{ disabled: busy || entryChanging || !messageDraft.trim() }} disabled={busy || entryChanging || !messageDraft.trim()} onPress={() => send()} style={({ pressed }) => [styles.send, (busy || entryChanging || !messageDraft.trim()) && styles.disabled, pressed && styles.pressed]}><Icon name="arrowUp" size={20} color={colors.surface} /><Text style={styles.sendText}>보내기</Text></Pressable>
       </View>
     </KeyboardAvoidingView>
     </ScreenBackground>
@@ -344,11 +433,14 @@ const styles = StyleSheet.create({
   messages: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 18, gap: 12 },
   welcome: { paddingHorizontal: 4, paddingVertical: 8 },
   empty: { color: colors.muted, fontSize: 14, lineHeight: 22 },
+  messageGroup: { alignSelf: 'stretch', gap: 8 },
+  suggestion: { minHeight: 44, padding: 14, gap: 5, borderRadius: 16, backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: '#D9E3FF' },
+  suggestionLabel: { color: colors.primary, fontWeight: '700', fontSize: 14 },
+  suggestionMessage: { color: colors.text, fontSize: 13, lineHeight: 20 },
   message: { alignSelf: 'stretch', padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#EDF0F7', borderRadius: 20 },
   userMessage: { alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: '#17191D', borderColor: '#17191D', borderBottomRightRadius: 7 },
   statusMessage: { backgroundColor: '#EEF3FF', borderColor: '#E5ECFF' },
   messageRole: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  userMessageRole: { color: '#F2F5FF' },
   messageText: { color: colors.text, fontSize: 15, lineHeight: 23 },
   userMessageText: { color: colors.surface },
   loading: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 14, backgroundColor: colors.surface, borderRadius: 18 },

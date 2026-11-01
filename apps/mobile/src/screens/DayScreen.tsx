@@ -151,8 +151,8 @@ export default function DayScreen(props: DayScreenProps) {
     if (presentation === 'home' || !item.timeSlot) return <View key={item.id} style={styles.rowGap}>{content}</View>;
     const itemLayout = layout.layout.get(item.id);
     return <View key={item.id} style={[styles.timelineRow, { marginTop: itemLayout?.gap ?? 8 }]}>
-      <View style={styles.axis}><Text style={styles.axisText}>{axisTime(item.timeSlot.startsAt, selectedDate, timezone)}</Text>
-        <Text style={styles.axisText}>{axisTime(item.timeSlot.endsAt, selectedDate, timezone)}</Text></View>
+      <View style={styles.axis}>{item.allDay ? <Text style={styles.axisText}>종일</Text> : <><Text style={styles.axisText}>{axisTime(item.timeSlot.startsAt, selectedDate, timezone)}</Text>
+        <Text style={styles.axisText}>{axisTime(item.timeSlot.endsAt, selectedDate, timezone)}</Text></>}</View>
       <View style={[styles.timelineCard, { minHeight: itemLayout?.height ?? 72 }, scheduleCardModel(item, now).active &&
         !scheduleCardModel(item, now).recorded && styles.timelineActive]}>{content}
         {itemLayout?.overlap && <Text style={styles.overlap}>시간 겹침</Text>}</View>
@@ -226,8 +226,9 @@ export default function DayScreen(props: DayScreenProps) {
     </ScrollView>
     <BottomSheet visible={activeSheet !== null} title={item?.title ?? ''} onClose={() => { if (!blocked) setSheet(null); }}>
       {item && activeSheet?.kind === 'detail' && <View style={styles.sheetContent}>
-        <Text style={styles.muted}>{item.timeSlot ? `${axisTime(item.timeSlot.startsAt, selectedDate, timezone)} – ${axisTime(item.timeSlot.endsAt, selectedDate, timezone)}` : '시간 미정'}</Text>
+        <Text style={styles.muted}>{item.allDay ? '종일' : item.timeSlot ? `${axisTime(item.timeSlot.startsAt, selectedDate, timezone)} – ${axisTime(item.timeSlot.endsAt, selectedDate, timezone)}` : '시간 미정'}</Text>
         <Text style={styles.muted}>{item.kind === 'event' ? '약속' : item.sourceRefs.some(ref => ref.provider === 'routine') ? '루틴' : '할 일'} · {item.involvement === 'shared' ? '공동' : '개인'}</Text>
+        {!!item.notes && <Text style={styles.muted} numberOfLines={4}>메모: {item.notes}</Text>}
         {button('상태 변경', () => setSheet({ kind: 'status', item }), actionDisabled)}{button('더보기', () => setSheet({ kind: 'more', item }), actionDisabled)}
       </View>}
       {item && activeSheet?.kind === 'status' && <View style={styles.sheetContent}>

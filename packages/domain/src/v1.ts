@@ -141,6 +141,9 @@ function parseFields(
   if (value.attendance != null && !["attended", "absent", "unknown"].includes(value.attendance as string)) invalid("attendance");
   if (value.kind === "task" && value.attendance != null) invalid("attendance");
   if (value.location != null && (typeof value.location !== "string" || !value.location.trim() || Array.from(value.location).length > 2000)) invalid("location");
+  if (value.allDay !== undefined && typeof value.allDay !== "boolean") invalid("allDay");
+  if (value.blocksTime !== undefined && typeof value.blocksTime !== "boolean") invalid("blocksTime");
+  if (value.notes != null && (typeof value.notes !== "string" || value.notes.length > 20_000)) invalid("notes");
 
   let interval: Interval | null = null;
   if (value.timeSlot === null && value.kind === "event") {
@@ -157,6 +160,16 @@ function parseFields(
         if (compareInstant(start, end) >= 0) invalid("timeSlot");
         else interval = { start, end };
       }
+    }
+  }
+
+  if (value.allDay === true) {
+    if (!interval || !isRecord(value.timeSlot) || !isTimezone(value.timeSlot.timezone)) invalid("allDay");
+    else {
+      const formatter = new Intl.DateTimeFormat('en', { timeZone: value.timeSlot.timezone as string,
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+      if (![interval.start, interval.end].every(point => point.milliseconds % 1000 === 0 && !point.remainder &&
+        formatter.formatToParts(new Date(point.milliseconds)).filter(part => ['hour', 'minute', 'second'].includes(part.type)).every(part => Number(part.value) === 0))) invalid("allDay");
     }
   }
 
@@ -195,7 +208,10 @@ function sameFields(before: ScheduleFields, beforeInterval: Interval | null, aft
     before.involvement === after.fields.involvement && before.completion === after.fields.completion &&
     (before.category ?? null) === (after.fields.category === undefined ? before.category ?? null : after.fields.category) &&
     (before.attendance ?? null) === (after.fields.attendance === undefined ? before.attendance ?? null : after.fields.attendance) &&
-    (before.location ?? null) === (after.fields.location === undefined ? before.location ?? null : after.fields.location);
+    (before.location ?? null) === (after.fields.location === undefined ? before.location ?? null : after.fields.location) &&
+    (before.allDay ?? false) === (after.fields.allDay === undefined ? before.allDay ?? false : after.fields.allDay) &&
+    (before.blocksTime ?? true) === (after.fields.blocksTime === undefined ? before.blocksTime ?? true : after.fields.blocksTime) &&
+    (before.notes ?? null) === (after.fields.notes === undefined ? before.notes ?? null : after.fields.notes);
 }
 
 function coordinationChange(before: ScheduleItem, beforeInterval: Interval | null, change: Change, after: ParsedFields | null): boolean {
@@ -215,7 +231,10 @@ function coordinationAlternativeKeepsOtherFields(before: ScheduleItem, change: C
     next.involvement === before.involvement && next.completion === before.completion &&
     (next.category === undefined || (next.category ?? null) === (before.category ?? null)) &&
     (next.attendance === undefined || (next.attendance ?? null) === (before.attendance ?? null)) &&
-    (next.location === undefined || (next.location ?? null) === (before.location ?? null));
+    (next.location === undefined || (next.location ?? null) === (before.location ?? null)) &&
+    (next.allDay === undefined || next.allDay === (before.allDay ?? false)) &&
+    (next.blocksTime === undefined || next.blocksTime === (before.blocksTime ?? true)) &&
+    (next.notes === undefined || (next.notes ?? null) === (before.notes ?? null));
 }
 
 // Explicit relationships only: the server must never infer a link from a task title.
@@ -375,7 +394,14 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
     const change = value as unknown as Change;
     if (change.operation === "create" || change.operation === "delete") effectiveChange = true;
     const targetIds = change.operation === "create" ? [] : isId(change.targetId) ? [change.targetId] : [];
-    const after = change.operation === "delete" ? null : parseFields(change.after, `${path}.after`, targetIds, validation);
+    const previous = change.operation === "update" ? current.get(change.targetId)?.item : undefined;
+    const after = change.operation === "delete" ? null : parseFields(isRecord(change.after)
+      ? { ...change.after, ...(change.after.allDay === undefined && previous?.allDay !== undefined ? { allDay: previous.allDay } : {}) }
+      : change.after, `${path}.after`, targetIds, validation);
+    if (input.purpose === 'ai_proposal' && after && after.fields.blocksTime !== undefined &&
+        after.fields.blocksTime !== (previous?.blocksTime ?? true)) {
+      validation.conflicts.push({ targetIds, reason: `invalid_field:${path}.after.blocksTime` });
+    }
     let placementChanged = change.operation === "create";
     if (change.operation !== "create") {
       if (!isId(change.targetId) || !isRevision(change.expectedRevision, 1)) {
@@ -424,7 +450,7 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
     if (input.purpose === "ai_proposal" && placementChanged && after?.interval && compareInstant(after.interval.start, checkedAt) < 0) {
       validation.conflicts.push({ targetIds, reason: "past_placement" });
     }
-    if (after?.interval) afterIntervals.push({ itemId: change.operation === "create" ? null : change.targetId, changeId: change.changeId, interval: after.interval });
+    if (after?.interval && (after.fields.blocksTime ?? previous?.blocksTime ?? true)) afterIntervals.push({ itemId: change.operation === "create" ? null : change.targetId, changeId: change.changeId, interval: after.interval });
   }
 
   if (coordinationTargets.size > 1) {
@@ -442,7 +468,7 @@ export function assessChanges(input: ChangeValidationContext): ChangeAssessment 
   }
 
   const remaining: FinalInterval[] = [...current.values()]
-    .filter(({ item, interval }) => !changedTargets.has(item.id) && interval !== null)
+    .filter(({ item, interval }) => !changedTargets.has(item.id) && interval !== null && item.blocksTime !== false)
     .map(({ item, interval }) => ({ itemId: item.id, changeId: null, interval: interval! }));
   const finalIntervals = [...remaining, ...afterIntervals];
   for (let i = 0; i < finalIntervals.length; i++) {

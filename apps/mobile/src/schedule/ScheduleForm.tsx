@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
@@ -9,6 +9,25 @@ import { DraftReview } from '../add/DraftReview';
 import type { FormDraft } from '../chat/client';
 import { localInstant, localParts } from '../add/local-time';
 import { operationGuard } from '../api/operationGuard';
+import { DateTimeFields } from '../ui/DateTimeFields';
+import { addDays } from './dates';
+import { compareTimestamps, isTimestamp } from './client';
+
+const regions = [
+  { value: 'Asia/Seoul', label: '한국' }, { value: 'Asia/Tokyo', label: '일본' },
+  { value: 'America/New_York', label: '미국 동부' }, { value: 'America/Chicago', label: '미국 중부' },
+  { value: 'America/Denver', label: '미국 산악' }, { value: 'America/Los_Angeles', label: '미국 서부' },
+  { value: 'Europe/London', label: '영국 런던' },
+];
+function shiftDate(value: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return '';
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const check = new Date(0); check.setUTCFullYear(year, month - 1, day);
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return '';
+  const next = addDays({ year, month, day }, days);
+  return `${String(next.year).padStart(4, '0')}-${String(next.month).padStart(2, '0')}-${String(next.day).padStart(2, '0')}`;
+}
 
 type Props = {
   item: ScheduleItem | null;
@@ -61,7 +80,8 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
   const [local, setLocal] = useState(() => ({
     startDate: localParts(item?.timeSlot?.startsAt ?? '', item?.timeSlot?.timezone ?? timezone)?.date ?? defaultDate,
     startTime: localParts(item?.timeSlot?.startsAt ?? '', item?.timeSlot?.timezone ?? timezone)?.time ?? '',
-    endDate: localParts(item?.timeSlot?.endsAt ?? '', item?.timeSlot?.timezone ?? timezone)?.date ?? defaultDate,
+    endDate: (() => { const date = localParts(item?.timeSlot?.endsAt ?? '', item?.timeSlot?.timezone ?? timezone)?.date ?? defaultDate;
+      return item?.allDay ? shiftDate(date, -1) : date; })(),
     endTime: localParts(item?.timeSlot?.endsAt ?? '', item?.timeSlot?.timezone ?? timezone)?.time ?? '',
   }));
 
@@ -70,30 +90,37 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
     setError('');
   }
 
-  function field(label: string, key: 'title' | 'startsAt' | 'endsAt' | 'timezone' | 'durationMinutes' | 'deadline', placeholder?: string) {
+  function field(label: string, key: 'title' | 'notes') {
     return (
       <View style={styles.field}>
         <Text style={styles.label}>{label}</Text>
         <TextInput accessibilityLabel={label} value={draft[key]} editable={!disabled}
           accessibilityState={{ disabled }} onChangeText={(value) => update(key, value)}
-          placeholder={placeholder} autoCapitalize="none" autoCorrect={false}
-          keyboardType={key === 'durationMinutes' ? 'decimal-pad' : 'default'} style={styles.input} />
+          multiline={key === 'notes'} maxLength={key === 'notes' ? 20_000 : undefined} style={styles.input} />
       </View>
     );
   }
 
-  function localField(label: string, key: keyof typeof local, placeholder: string) {
-    return <View style={styles.field}><Text style={styles.label}>{label}</Text>
-      <TextInput accessibilityLabel={label} value={local[key]} editable={!disabled} accessibilityState={{ disabled }}
-        placeholder={placeholder} autoCapitalize="none" autoCorrect={false} style={styles.input}
-        onChangeText={value => {
-          const next = { ...local, [key]: value };
-          setLocal(next);
-          const start = key === 'startDate' || key === 'startTime';
-          const date = start ? next.startDate : next.endDate;
-          const time = start ? next.startTime : next.endTime;
-          update(start ? 'startsAt' : 'endsAt', time ? localInstant(date, time, draft.timezone) ?? `${date} ${time}` : '');
-        }} /></View>;
+  function updateLocal(next: typeof local, allDay = draft.allDay, zone = draft.timezone, side: 'start' | 'end' | 'both' = 'both') {
+    setLocal(next);
+    const endDate = allDay ? shiftDate(next.endDate, 1) : next.endDate;
+    const startTime = allDay ? '00:00' : next.startTime, endTime = allDay ? '00:00' : next.endTime;
+    setDraft(previous => ({ ...previous, allDay, timezone: zone,
+      startsAt: side === 'end' ? previous.startsAt : startTime ? localInstant(next.startDate, startTime, zone) ?? 'invalid' : '',
+      endsAt: side === 'start' ? previous.endsAt : endTime ? localInstant(endDate, endTime, zone) ?? 'invalid' : '' }));
+    setError('');
+  }
+
+  function changeZone(zone: string) {
+    if (draft.allDay) { updateLocal(local, true, zone); return; }
+    setDraft(previous => ({ ...previous, timezone: zone,
+      startsAt: !isTimestamp(previous.startsAt) && local.startTime ? localInstant(local.startDate, local.startTime, zone) ?? 'invalid' : previous.startsAt,
+      endsAt: !isTimestamp(previous.endsAt) && local.endTime ? localInstant(local.endDate, local.endTime, zone) ?? 'invalid' : previous.endsAt }));
+    setLocal(previous => {
+      const start = localParts(draft.startsAt, zone), end = localParts(draft.endsAt, zone);
+      return { ...previous, ...(start ? { startDate: start.date, startTime: start.time } : {}), ...(end ? { endDate: end.date, endTime: end.time } : {}) };
+    });
+    setError('');
   }
 
   function save() {
@@ -101,9 +128,18 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
       setError('처리 중이거나 결과를 확인하지 못한 요청을 시작한 화면에서 확인한 뒤 저장해 주세요.');
       return;
     }
-    const result = scheduleFields(draft, item);
+    if (draft.kind === 'task' && !item && draft.startsAt === '' && draft.endsAt === '') {
+      setError('할 일의 시작과 종료를 선택해 주세요.');
+      return;
+    }
+    let next = draft;
+    if (draft.kind === 'task' && isTimestamp(draft.startsAt) && isTimestamp(draft.endsAt) &&
+        (item?.kind !== 'task' || !item.timeSlot || item.durationMinutes === null || compareTimestamps(draft.startsAt, item.timeSlot.startsAt) !== 0 || compareTimestamps(draft.endsAt, item.timeSlot.endsAt) !== 0)) {
+      next = { ...draft, durationMinutes: String((Date.parse(draft.endsAt) - Date.parse(draft.startsAt)) / 60_000) };
+    }
+    const result = scheduleFields(next, item);
     if (!result.fields) {
-      setError(initialKind && result.error.includes('ISO 8601') ? '시작과 종료 날짜·시간을 확인해 주세요. 해당 시간대에서 존재하지 않거나 중복된 시각은 사용할 수 없습니다.' : result.error);
+      setError(result.error);
       return;
     }
     setError('');
@@ -121,8 +157,15 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
     setDraft(previous => {
       const next = { ...previous };
       for (const key of ['title', 'startsAt', 'endsAt', 'timezone', 'durationMinutes', 'deadline'] as const) if (typeof fields[key] === 'string') next[key] = fields[key];
-      if (typeof fields.startDate === 'string' || typeof fields.startTime === 'string') next.startsAt = nextLocal.startTime ? localInstant(nextLocal.startDate, nextLocal.startTime, previous.timezone) ?? `${nextLocal.startDate} ${nextLocal.startTime}` : '';
-      if (typeof fields.endDate === 'string' || typeof fields.endTime === 'string') next.endsAt = nextLocal.endTime ? localInstant(nextLocal.endDate, nextLocal.endTime, previous.timezone) ?? `${nextLocal.endDate} ${nextLocal.endTime}` : '';
+      if (typeof fields.startDate === 'string' || typeof fields.startTime === 'string') {
+        const time = previous.allDay ? '00:00' : nextLocal.startTime;
+        next.startsAt = time ? localInstant(nextLocal.startDate, time, previous.timezone) ?? 'invalid' : '';
+      }
+      if (typeof fields.endDate === 'string' || typeof fields.endTime === 'string') {
+        const time = previous.allDay ? '00:00' : nextLocal.endTime;
+        const date = previous.allDay ? shiftDate(nextLocal.endDate, 1) : nextLocal.endDate;
+        next.endsAt = time ? localInstant(date, time, previous.timezone) ?? 'invalid' : '';
+      }
       if (!initialKind && (fields.kind === 'event' || fields.kind === 'task')) next.kind = fields.kind;
       if (fields.flexibility === 'fixed' || fields.flexibility === 'flexible') next.flexibility = fields.flexibility;
       if (fields.involvement === 'personal' || fields.involvement === 'shared') next.involvement = fields.involvement;
@@ -133,36 +176,43 @@ export function ScheduleForm({ item, timezone, disabled, cancelDisabled, onCance
     setError('');
   }
 
+  const visibleDraft = { title: draft.title, category: draft.category, startDate: local.startDate, endDate: local.endDate,
+    ...(!draft.allDay ? { startTime: local.startTime, endTime: local.endTime } : {}) };
+  const visibleProposal = useMemo(() => {
+    if (!pendingDraft) return undefined;
+    const fields = { ...pendingDraft.fields };
+    const start = typeof fields.startsAt === 'string' ? localParts(fields.startsAt, draft.timezone) : null;
+    const end = typeof fields.endsAt === 'string' ? localParts(fields.endsAt, draft.timezone) : null;
+    if (start) { fields.startDate ??= start.date; if (!draft.allDay) fields.startTime ??= start.time; }
+    if (end) { fields.endDate ??= end.date; if (!draft.allDay) fields.endTime ??= end.time; }
+    return { ...pendingDraft, fields };
+  }, [pendingDraft, draft.timezone, draft.allDay]);
+  const zoneOptions = [...regions];
+  if (!zoneOptions.some(option => option.value === timezone)) zoneOptions.unshift({ value: timezone, label: '기기 설정' });
+  if (!zoneOptions.some(option => option.value === draft.timezone)) zoneOptions.unshift({ value: draft.timezone, label: '현재 지역' });
+
   return (
     <View style={styles.form}>
       <Text accessibilityRole="header" style={styles.heading}>{draft.kind === 'task' ? (item ? '할 일 수정' : '할 일 추가') : (item ? '일정 수정' : '일정 추가')}</Text>
-      <Text style={styles.hint}>아래의 모든 필드가 저장됩니다. 비워 둔 선택 항목은 미설정으로 저장됩니다.</Text>
-      <DraftReview pending={pendingDraft} kind={item?.kind ?? initialKind ?? 'event'} current={{ ...Object.fromEntries(Object.entries(draft).filter(([key]) =>
-        !(initialKind && (key === 'kind' || key === 'timezone')) && !(draft.kind === 'event' && key === 'completion'))), ...(initialKind ? local : {}) }} disabled={disabled} onApply={applyDraft} onHandled={onDraftHandled} />
-      {onAskDraft && <Pressable accessibilityRole="button" accessibilityLabel="AI로 작성하기" disabled={disabled} onPress={() => onAskDraft({ ...Object.fromEntries(Object.entries(draft).filter(([key]) => draft.kind !== 'event' || key !== 'completion')), ...(initialKind ? local : {}) })} style={[styles.secondary, disabled && styles.disabled]}><Text style={styles.secondaryText}>AI로 작성하기</Text></Pressable>}
+      <DraftReview pending={visibleProposal} identity={pendingDraft} kind={item?.kind ?? initialKind ?? 'event'} current={visibleDraft} disabled={disabled} onApply={applyDraft} onHandled={onDraftHandled} />
+      {onAskDraft && <Pressable accessibilityRole="button" accessibilityLabel="AI로 작성하기" disabled={disabled} onPress={() => onAskDraft(visibleDraft)} style={[styles.secondary, disabled && styles.disabled]}><Text style={styles.secondaryText}>AI로 작성하기</Text></Pressable>}
       {!initialKind && <Choices label="종류" value={draft.kind} disabled={disabled} onChange={(value) => update('kind', value)}
         options={[{ value: 'event', label: '일정' }, { value: 'task', label: '할 일' }]} />}
       <Choices label="분류" value={draft.category} disabled={disabled} onChange={(value) => update('category', value)}
         options={[{ value: '', label: '미분류' }, { value: 'personal', label: '개인' }, { value: 'work', label: '업무' }]} />
       {field('제목', 'title')}
-      {initialKind ? <>
-        {localField('시작 날짜', 'startDate', 'YYYY-MM-DD')}
-        {localField('시작 시간', 'startTime', 'HH:mm')}
-        {localField('종료 날짜', 'endDate', 'YYYY-MM-DD')}
-        {localField('종료 시간', 'endTime', 'HH:mm')}
-        <Text style={styles.hint}>시간대: {draft.timezone}. 시간대 변경으로 존재하지 않거나 두 번 나타나는 시각은 사용할 수 없습니다.</Text>
-      </> : <>
-      {field('시작 시각', 'startsAt', '2026-10-31T09:00:00+09:00')}
-      {field('종료 시각', 'endsAt', '2026-10-31T10:00:00+09:00')}
-      {field('시간대 (IANA)', 'timezone', 'Asia/Seoul')}
-      <Text style={styles.hint}>시각에는 Z 또는 +09:00 같은 오프셋이 필요합니다. 할 일의 시작과 종료를 모두 비우면 미배치이며 시간대도 저장되지 않습니다.</Text>
-      </>}
-      {field('소요시간 (분)', 'durationMinutes', '예: 30')}
-      {field('마감 시각', 'deadline', '2026-10-31T18:00:00+09:00')}
-      <Choices label="시간 유연성" value={draft.flexibility} disabled={disabled} onChange={(value) => update('flexibility', value)}
-        options={[{ value: 'fixed', label: '고정' }, { value: 'flexible', label: '유동' }]} />
-      <Choices label="참여" value={draft.involvement} disabled={disabled} onChange={(value) => update('involvement', value)}
-        options={[{ value: 'personal', label: '개인', disabled: item?.involvement === 'shared' }, { value: 'shared', label: '공동' }]} />
+      <Pressable accessibilityRole="switch" accessibilityLabel="종일" accessibilityState={{ checked: draft.allDay, disabled }} disabled={disabled}
+        onPress={() => updateLocal(local, !draft.allDay)} style={styles.secondary}><Text style={styles.secondaryText}>{draft.allDay ? '종일 선택됨' : '종일'}</Text></Pressable>
+      <DateTimeFields label="시작 날짜" mode="date" value={local.startDate} disabled={disabled} onChange={value => updateLocal({ ...local, startDate: value }, draft.allDay, draft.timezone, 'start')} />
+      {!draft.allDay && <DateTimeFields label="시작 시간" mode="time" value={local.startTime} disabled={disabled} onChange={value => updateLocal({ ...local, startTime: value }, false, draft.timezone, 'start')} />}
+      <DateTimeFields label="종료 날짜" mode="date" value={local.endDate} disabled={disabled} onChange={value => updateLocal({ ...local, endDate: value }, draft.allDay, draft.timezone, 'end')} />
+      {!draft.allDay && <DateTimeFields label="종료 시간" mode="time" value={local.endTime} disabled={disabled} onChange={value => updateLocal({ ...local, endTime: value }, false, draft.timezone, 'end')} />}
+      {draft.kind === 'task' && item && <Pressable accessibilityRole="button" accessibilityLabel="시간 미정으로 변경" disabled={disabled} onPress={() => {
+        setLocal(previous => ({ ...previous, startTime: '', endTime: '' }));
+        setDraft(previous => ({ ...previous, allDay: false, startsAt: '', endsAt: '' })); setError('');
+      }} style={styles.secondary}><Text style={styles.secondaryText}>시간 미정으로 변경</Text></Pressable>}
+      <Choices label="국가·지역" value={draft.timezone} disabled={disabled} onChange={changeZone} options={zoneOptions} />
+      {field('메모', 'notes')}
       {item?.involvement === 'shared' && <Text style={styles.hint}>기존 공동 일정은 개인으로 바꿀 수 없습니다. 시간 변경은 상대방과의 조정이 필요할 수 있습니다.</Text>}
       {draft.kind === 'task' && <Choices label="완료 상태" value={draft.completion} disabled={disabled} onChange={(value) => update('completion', value)}
         options={[{ value: 'pending', label: '대기' }, { value: 'completed', label: '완료' },

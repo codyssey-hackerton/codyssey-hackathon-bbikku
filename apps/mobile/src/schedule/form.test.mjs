@@ -15,7 +15,7 @@ test('editing shows and preserves every field until the user changes it', () => 
   assert.deepEqual(draft, {
     kind: 'event', title: '회의', startsAt: event.timeSlot.startsAt, endsAt: event.timeSlot.endsAt,
     timezone: 'Asia/Seoul', durationMinutes: '60', deadline: event.deadline,
-    flexibility: 'flexible', involvement: 'shared', completion: 'unknown', category: '',
+    flexibility: 'flexible', involvement: 'shared', completion: 'unknown', category: '', allDay: false, notes: '',
   });
   const { id, revision, sourceRefs, ...fields } = event;
   assert.deepEqual(scheduleFields(draft, event), { fields });
@@ -51,8 +51,8 @@ test('event and task fields require valid times, positive task duration and dead
     kind: 'task', title: '계획', timeSlot: null, durationMinutes: 30, deadline: null,
     flexibility: 'fixed', involvement: 'personal', completion: 'incomplete',
   });
-  assert.match(scheduleFields({ ...task, startsAt: '2026-10-31T09:00:00' }, null).error, /오프셋/);
-  assert.match(scheduleFields({ ...task, startsAt: event.timeSlot.startsAt, endsAt: event.timeSlot.endsAt, timezone: 'invalid/timezone' }, null).error, /IANA/);
+  assert.match(scheduleFields({ ...task, startsAt: '2026-10-31T09:00:00' }, null).error, /날짜·시간/);
+  assert.match(scheduleFields({ ...task, startsAt: event.timeSlot.startsAt, endsAt: event.timeSlot.endsAt, timezone: 'invalid/timezone' }, null).error, /지역/);
   assert.match(scheduleFields({ ...task, startsAt: event.timeSlot.startsAt, endsAt: event.timeSlot.startsAt }, null).error, /종료/);
   assert.match(scheduleFields({ ...task, ...event.timeSlot, deadline: '2026-10-31T09:30:00+09:00' }, null).error, /마감/);
   assert.match(scheduleFields({ ...task, durationMinutes: 'Infinity' }, null).error, /숫자/);
@@ -85,4 +85,12 @@ test('an existing shared event cannot be moved or converted by the direct edit f
   assert.match(scheduleFields({ ...draft, kind: 'task' }, event).error, /공동 약속.*조정/);
   assert.ok(scheduleFields({ ...draft, title: '회의 메모 수정' }, event).fields);
   assert.ok(scheduleFields({ ...draft, startsAt: '2026-10-31T00:00:00Z', endsAt: '2026-10-31T01:00:00Z' }, event).fields);
+});
+
+test('notes preserve the existing value, clear explicitly, and enforce the maximum length', () => {
+  const item = { ...event, notes: '기존 메모', allDay: false };
+  const draft = scheduleDraft(item, 'Asia/Seoul');
+  assert.equal(scheduleFields(draft, item).fields.notes, '기존 메모');
+  assert.equal(scheduleFields({ ...draft, notes: '' }, item).fields.notes, null);
+  assert.match(scheduleFields({ ...draft, notes: '가'.repeat(20_001) }, item).error, /20,000/);
 });

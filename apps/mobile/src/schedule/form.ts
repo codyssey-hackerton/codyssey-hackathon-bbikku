@@ -13,6 +13,8 @@ export interface ScheduleDraft {
   involvement: ScheduleFields['involvement'];
   completion: ScheduleFields['completion'];
   category: '' | 'personal' | 'work';
+  allDay: boolean;
+  notes: string;
 }
 
 export function canCoordinate(item: ScheduleItem): boolean {
@@ -32,6 +34,8 @@ export function scheduleDraft(item: ScheduleItem | null, timezone: string): Sche
     involvement: item?.involvement ?? 'personal',
     completion: item?.completion ?? 'pending',
     category: item?.category ?? '',
+    allDay: item?.allDay === true,
+    notes: item?.notes ?? '',
   };
 }
 
@@ -50,6 +54,7 @@ export function scheduleFields(
   original: ScheduleItem | null,
 ): { fields: ScheduleFields; error?: never } | { fields?: never; error: string } {
   if (!draft.title.trim()) return { error: '제목을 입력해 주세요.' };
+  if (draft.notes.length > 20_000) return { error: '메모는 20,000자까지 입력할 수 있습니다.' };
   if (original?.involvement === 'shared' && draft.involvement !== 'shared') {
     return { error: '기존 공동 일정은 개인 일정으로 바꿀 수 없습니다.' };
   }
@@ -60,9 +65,9 @@ export function scheduleFields(
   const hasTime = draft.startsAt !== '' || draft.endsAt !== '';
   if (draft.kind === 'event' && !hasTime) return { error: '일정에는 시작과 종료 시각이 필요합니다.' };
   if (hasTime && (!isTimestamp(draft.startsAt) || !isTimestamp(draft.endsAt))) {
-    return { error: '시작과 종료를 오프셋이 포함된 ISO 8601 시각으로 입력해 주세요. 예: 2026-10-31T09:00:00+09:00' };
+    return { error: '시작과 종료 날짜·시간을 확인해 주세요. 해당 지역에서 존재하지 않거나 중복된 시각은 사용할 수 없습니다.' };
   }
-  if (hasTime && !isTimezone(draft.timezone)) return { error: '유효한 IANA 시간대를 입력해 주세요. 예: Asia/Seoul' };
+  if (hasTime && !isTimezone(draft.timezone)) return { error: '시간대 지역을 확인해 주세요.' };
   if (hasTime && compareTimestamps(draft.endsAt, draft.startsAt) <= 0) {
     return { error: '종료 시각은 시작 시각보다 뒤여야 합니다.' };
   }
@@ -73,7 +78,7 @@ export function scheduleFields(
     return { error: '공동 약속의 시간 변경은 조정 검토와 별도 연락이 필요합니다. 기존 일정은 유지됩니다.' };
   }
   if (draft.deadline !== '' && !isTimestamp(draft.deadline)) {
-    return { error: '마감도 오프셋이 포함된 ISO 8601 시각으로 입력해 주세요.' };
+    return { error: '저장된 마감 시각을 확인해 주세요.' };
   }
   if (hasTime && draft.deadline !== '' && compareTimestamps(draft.endsAt, draft.deadline) > 0) {
     return { error: '종료 시각은 마감보다 늦을 수 없습니다.' };
@@ -98,6 +103,8 @@ export function scheduleFields(
       completion: draft.kind === 'event' ? original?.completion ?? 'pending' : draft.completion,
       ...(draft.category ? { category: draft.category } : original?.category !== undefined ? { category: null } : {}),
       ...(draft.kind === 'event' && original && 'attendance' in original ? { attendance: original.attendance } : {}),
+      ...(draft.allDay || original?.allDay !== undefined ? { allDay: draft.allDay } : {}),
+      ...(draft.notes !== '' || original?.notes !== undefined ? { notes: draft.notes || null } : {}),
     },
   };
 }

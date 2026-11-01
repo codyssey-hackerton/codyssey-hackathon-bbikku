@@ -14,7 +14,7 @@ export function scheduleLayout(items: ScheduleItem[], now: number, selectedDate:
   let latestEnd = -Infinity;
   for (const item of scheduled) {
     const start = Date.parse(item.timeSlot!.startsAt), end = Date.parse(item.timeSlot!.endsAt);
-    const overlap = scheduled.some(other => other.id !== item.id && start < Date.parse(other.timeSlot!.endsAt) && Date.parse(other.timeSlot!.startsAt) < end);
+    const overlap = item.blocksTime !== false && scheduled.some(other => other.id !== item.id && other.blocksTime !== false && start < Date.parse(other.timeSlot!.endsAt) && Date.parse(other.timeSlot!.startsAt) < end);
     const free = Number.isFinite(latestEnd) ? Math.max(0, (start - latestEnd) / 60_000) : 0;
     const gap = free ? Math.min(32, Math.round(8 + Math.log2(1 + free / 15) * 5)) : 8;
     const height = Math.min(112, Math.max(72, Math.round(72 + Math.max(0, (end - start) / 60_000 - 30) / 30 * 4)));

@@ -623,3 +623,31 @@ test('a successful external write followed by a local commit failure is not repl
   assert.equal(f.inserts, 1); assert.equal(f.events.size, 1);
   await assert.rejects(f.service.run('alice', connection.id, { requestId: 'run2', expectedRevision: 2 }));
 });
+
+test('all-day, nonblocking and notes fields fail closed before Google insert or update', async () => {
+  for (const extra of [{ allDay: true }, { blocksTime: false }, { notes: '기록' }, { notes: '' }] as const) {
+    const pending = fixture();
+    await pending.planning.transaction('alice', state => { state.items.set('local', item('local', 12)); });
+    const connected = await pending.service.connect('alice', { calendarId: 'cal', exportItemIds: ['local'] });
+    await pending.planning.transaction('alice', state => { state.items.set('local', { ...state.items.get('local')!, ...extra, revision: 2 }); });
+    const skipped = await pending.service.run('alice', connected.connection.id, { requestId: 'pending', expectedRevision: 1 }) as any;
+    assert.equal(pending.inserts, 0); assert.equal(pending.updates, 0);
+    assert.ok(skipped.conflicts.some((entry: any) => entry.reason === 'unsupported_item'));
+
+    const mapped = fixture();
+    await mapped.planning.transaction('alice', state => { state.items.set('local', item('local', 12)); });
+    const first = await mapped.service.connect('alice', { calendarId: 'cal', exportItemIds: ['local'] });
+    await mapped.service.run('alice', first.connection.id, { requestId: 'first', expectedRevision: 1 });
+    assert.equal(mapped.inserts, 1);
+    await mapped.planning.transaction('alice', state => { state.items.set('local', { ...state.items.get('local')!, ...extra, revision: 2 }); });
+    const blocked = await mapped.service.run('alice', first.connection.id, { requestId: 'second', expectedRevision: 2 }) as any;
+    assert.equal(mapped.updates, 0); assert.equal(mapped.deletes, 0);
+    assert.ok(blocked.conflicts.some((entry: any) => entry.reason === 'unsupported_item'));
+
+    const enqueue = fixture();
+    await enqueue.planning.transaction('alice', state => { state.items.set('local', { ...item('local', 12), ...extra }); });
+    const empty = await enqueue.service.connect('alice', { calendarId: 'cal' });
+    await assert.rejects(enqueue.service.enqueueExports('alice', empty.connection.id, { expectedRevision: 1, exportItemIds: ['local'] }), (e: any) => e.code === 'invalid_request');
+    assert.equal(enqueue.inserts, 0);
+  }
+});

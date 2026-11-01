@@ -27,13 +27,14 @@ const component = build({
   stdin: { contents: "export { default } from './ChatScreen'; export { ApiError } from '../api/http'; export { operationGuard } from '../api/operationGuard';", resolveDir: resolve(__dirname), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'native-test', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\.\/ui\/(typography|Icon)|\.\/ChatScheduleSummary)$/ }, args => ({ path: args.path, namespace: 'mock' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\.\/ui\/(typography|Icon)|\.\/ChatScheduleSummary|\.\/ChatDeviceContext)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents:
       path === 'react' ? 'module.exports=globalThis.__chatHarness.react' :
       path === 'react-native' ? 'module.exports=globalThis.__chatHarness.native' :
       path.endsWith('/typography') ? 'exports.Text="Text";exports.TextInput="TextInput"' :
       path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
       path === './ChatScheduleSummary' ? 'exports.ChatScheduleSummary=()=>null' :
+      path === './ChatDeviceContext' ? 'module.exports=()=>null' :
       'exports.jsx=exports.jsxs=globalThis.__chatHarness.jsx;exports.Fragment=globalThis.__chatHarness.fragment' }));
   } }],
 }).then(result => { const module: any = { exports: {} }; new Function('module', 'exports', result.outputFiles[0].text)(module, module.exports); module.exports.default.ApiError = module.exports.ApiError; module.exports.default.operationGuard = module.exports.operationGuard; return module.exports.default; });
@@ -73,6 +74,74 @@ function type(view: any, value: string) {
 const base = { timezone: 'Asia/Seoul', scheduleClient: {}, selectedDate: new Date('2026-11-01'), refreshVersion: 0,
   onOpenProposals() {}, onProposalCreated() {}, onOpenReviewSchedule() {}, onClearCoordinationTarget() {} };
 
+test('선택지에 실제 본문을 표시하고 같은 대화에 사용자 메시지로 한 번만 보낸다', async t => {
+  const Screen = await component, calls: any[] = []; let finish!: (value: unknown) => void;
+  let phone = 0, reminder = 0, proposals = 0;
+  const choice = { label: '간단히 조정', message: '저녁 7시로 미루는 제안을 만들어줘' };
+  const client = { sendMessage(input: any) {
+    calls.push(input);
+    if (calls.length === 1) return Promise.resolve({ conversationId: 'conversation', result: { kind: 'reply', message: '어떤 방법이 좋을까요?', suggestions: [choice] } });
+    return new Promise(resolve => { finish = resolve; });
+  } };
+  const view = render(Screen, { ...base, client, onOpenScheduleCall() { phone++; }, renderReminder() { reminder++; return null; },
+    onProposalCreated() { proposals++; }, renderProposal(id: string) { return jsx('ProposalCard', { id }); } });
+  t.after(view.unmount);
+  type(view, '계획을 검토해줘'); press(view, '메시지 보내기'); await view.settle();
+  assert.match(text(view.tree), /간단히 조정/); assert.match(text(view.tree), /저녁 7시로 미루는 제안을 만들어줘/);
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const card = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.ok(card); assert.equal(card.props.disabled, false);
+  card.props.onPress(); card.props.onPress(); view.flush();
+  assert.equal(calls.length, 2); assert.equal(calls[1].message, choice.message); assert.equal(calls[1].conversationId, 'conversation');
+  const busyCard = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.equal(busyCard.props.disabled, true); assert.equal(phone, 0); assert.equal(reminder, 0);
+  finish({ conversationId: 'conversation', result: { kind: 'proposal', message: '검토해 주세요', proposalIds: ['pending-proposal'] } });
+  await view.settle(); assert.equal(proposals, 1); assert.equal(phone, 0); assert.equal(reminder, 0);
+  assert.ok(nodes(view.tree).some(node => node.type === 'ProposalCard' && node.props.id === 'pending-proposal'));
+});
+
+test('연결이나 입력 맥락 세대가 바뀐 오래된 선택지는 보낼 수 없다', async t => {
+  const Screen = await component, calls: any[] = [];
+  const choice = { label: '제안', message: '가능한 시간으로 제안해줘' };
+  const client = { async sendMessage(input: any) { calls.push(input); return { conversationId: 'c', result: { kind: 'question',
+    message: '고르세요', missingFields: [], suggestions: [choice] } }; } };
+  const view = render(Screen, { ...base, client }); t.after(view.unmount);
+  type(view, '계획'); press(view, '메시지 보내기'); await view.settle();
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const oldCard = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.equal(oldCard.props.disabled, false);
+  view.props = { ...view.props, client: { async sendMessage() { throw new Error('unexpected'); } } }; view.dirty = true; view.flush();
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label).props.disabled, true);
+  view.props = { ...view.props, client }; view.dirty = true; view.flush();
+  oldCard.props.onPress(); view.flush(); assert.equal(calls.length, 1);
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label).props.disabled, true);
+  view.props = { ...view.props, entryContext: { kind: 'item', key: 'new-context', id: 'item', expectedRevision: 1, title: '새 일정' } };
+  view.dirty = true; view.flush(); oldCard.props.onPress(); view.flush();
+  assert.equal(calls.length, 1);
+});
+
+test('다른 작업 또는 미확정 요청이 있으면 선택지를 사용할 수 없다', async t => {
+  const Screen = await component, calls: any[] = [];
+  const choice = { label: '제안', message: '새 제안을 만들어줘' };
+  const client = { async sendMessage(input: any) {
+    calls.push(input);
+    if (calls.length === 1) return { conversationId: 'c', result: { kind: 'reply', message: '선택', suggestions: [choice] } };
+    throw new Screen.ApiError('timeout', 'synthetic', true);
+  } };
+  const view = render(Screen, { ...base, client }); t.after(view.unmount);
+  type(view, '계획'); press(view, '메시지 보내기'); await view.settle();
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const card = () => nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  const beforeGuard = card();
+  const owner = {}; Screen.operationGuard.update(owner, { status: 'pending' });
+  beforeGuard.props.onPress(); assert.equal(calls.length, 1);
+  view.dirty = true; view.flush(); assert.equal(card().props.disabled, true);
+  card().props.onPress(); view.flush(); assert.equal(calls.length, 1);
+  Screen.operationGuard.clear(owner); view.dirty = true; view.flush(); assert.equal(card().props.disabled, false);
+  press(view, label); await view.settle(); assert.equal(calls.length, 2); assert.equal(card().props.disabled, true);
+  card().props.onPress(); view.flush(); assert.equal(calls.length, 2);
+});
+
 function fakeWaitTimer(t: any) {
   const timers = new Map<number, () => void>(); let next = 0;
   t.mock.method(globalThis, 'setTimeout', ((callback: () => void, delay: number) => {
@@ -94,7 +163,7 @@ test('대기 시간 안내는 실제 진행률을 주장하지 않고 완료·�
   clock.fire(); view.flush();
   assert.match(text(view.tree), /답변이 오래 걸리고 있어요/);
   assert.match(text(view.tree), /다른 화면을 확인해도 요청은 취소되지 않아요/);
-  press(view, '제안 검토'); assert.equal(navigations, 1);
+  press(view, '제안 기록'); assert.equal(navigations, 1);
   assert.equal(calls.length, 1);
   complete({ conversationId: 'c', result: { kind: 'reply', message: '답변' } }); await view.settle();
   assert.doesNotMatch(text(view.tree), /답변이 오래 걸리고 있어요/); assert.equal(clock.timers.size, 0);
@@ -119,12 +188,12 @@ test('불확정 오류는 같은 요청만 재시도하고 중복 재시도를 �
   } } });
   t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
   assert.equal(clock.timers.size, 0); assert.match(text(view.tree), /AI 연결을 사용할 수 없어요/);
-  assert.match(text(view.tree), /같은 요청만 다시 시도/); assert.doesNotMatch(text(view.tree), /메시지 수정/);
+  assert.match(text(view.tree), /결과를 확인할 때까지/); assert.doesNotMatch(text(view.tree), /메시지 수정/);
   const retry = nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === '같은 요청 다시 시도');
   assert.ok(retry); retry.props.onPress(); retry.props.onPress(); view.flush();
   assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(clock.timers.size, 1);
   retryFinish({ conversationId: 'c', result: { kind: 'reply', message: '완료' } }); await view.settle();
-  assert.equal(clock.timers.size, 0); assert.doesNotMatch(text(view.tree), /같은 요청만 다시 시도/);
+  assert.equal(clock.timers.size, 0); assert.doesNotMatch(text(view.tree), /결과를 확인할 때까지/);
 });
 
 test('확정 입력 오류는 메시지 수정 경로를 유지한다', async t => {
@@ -223,7 +292,7 @@ test('폼 재요청 중 결과 불명 재시도는 원래 맥락과 키를 유�
   type(view, '처음 요청'); press(view, '메시지 보내기');
   view.props = { ...view.props, entryContext: nextContext }; view.dirty = true; view.flush();
   reject(new Error('network')); await view.settle();
-  assert.match(text(view.tree), /같은 요청만 다시 시도/); press(view, '같은 요청 다시 시도'); await view.settle();
+  assert.match(text(view.tree), /결과를 확인할 때까지/); press(view, '같은 요청 다시 시도'); await view.settle();
   assert.deepEqual(calls[1], calls[0]); assert.doesNotMatch(text(view.tree), /이전 제안/);
   assert.doesNotMatch(text(view.tree), /입력 화면에서 검토/);
   type(view, '두 번째 요청'); press(view, '메시지 보내기'); await view.settle();
@@ -252,7 +321,7 @@ test('결과 확인 중 재시도는 잠기고 저장된 제안 응답은 원래
   const Screen = await component; const calls: any[] = [], checks: any[] = []; let finish!: (value: unknown) => void; let refreshed = 0;
   const client = { async sendMessage(input: any) { calls.push(input); throw new Screen.ApiError('timeout', 'timeout', true); },
     checkRequest(input: any) { checks.push(input); return new Promise(resolve => { finish = resolve; }); } };
-  const view = render(Screen, { ...base, client, onProposalCreated() { refreshed++; } }); t.after(view.unmount);
+  const view = render(Screen, { ...base, client, onProposalCreated() { refreshed++; }, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); } }); t.after(view.unmount);
   type(view, '원래 요청'); press(view, '메시지 보내기'); await view.settle();
   assert.equal(Screen.operationGuard.hasUnresolved(), true);
   const retry = nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === '같은 요청 다시 시도');
@@ -262,6 +331,7 @@ test('결과 확인 중 재시도는 잠기고 저장된 제안 응답은 원래
   assert.deepEqual(checks[0], { requestId: calls[0].requestId, idempotencyKey: calls[0].idempotencyKey, conversationId: null });
   finish({ status: 'completed', result: { response: { conversationId: 'c', result: { kind: 'proposal', message: '복구된 제안', proposalIds: ['p'] } } } });
   await view.settle(); assert.equal(refreshed, 1); assert.match(text(view.tree), /복구된 제안/);
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'ProposalCard').map(node => node.props.proposalId), ['p']);
   assert.equal(Screen.operationGuard.hasUnresolved(), false); assert.equal(calls.length, 1);
 });
 
@@ -370,4 +440,104 @@ test('복구한 전화 요청도 버튼을 직접 누르기 전에는 전화 단
   t.after(view.unmount); type(view, '전화해줘'); press(view, '메시지 보내기'); await view.settle();
   press(view, '처리 결과 확인'); await view.settle(); assert.deepEqual(targets, []);
   press(view, '전화 요청 확인'); assert.deepEqual(targets, [{ itemId: 'i1', expectedRevision: 2 }]);
+});
+
+test('서버가 반환한 제안만 해당 답변 아래에 표시하며 같은 ID는 중복하지 않는다', async t => {
+  const Screen = await component; let sends = 0;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { sends++; return { conversationId: 'c', result: { kind: 'proposal', message: `제안 답변 ${sends}`,
+      proposalIds: sends === 1 ? ['server-a', 'server-b', 'server-a'] : ['server-a'] } }; } } });
+  t.after(view.unmount);
+  type(view, '제안해줘'); press(view, '메시지 보내기'); await view.settle();
+  const tree = nodes(view.tree);
+  const cards = tree.filter(node => node.type === 'ProposalCard');
+  assert.deepEqual(cards.map(card => card.props.proposalId), ['server-a', 'server-b']);
+  assert.ok(tree.findIndex(node => node.type === 'Text' && text(node.children) === '제안 답변 1') < tree.indexOf(cards[0]));
+  assert.match(text(view.tree), /아래 제안을 확인해 주세요/);
+  assert.doesNotMatch(text(view.tree), /제안 목록에서/);
+  type(view, '다시'); press(view, '메시지 보내기'); await view.settle();
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'ProposalCard').map(node => node.props.proposalId), ['server-a', 'server-b']);
+});
+
+test('일반·질문·실패·전화 요청에는 제안 카드를 만들지 않는다', async t => {
+  const Screen = await component;
+  for (const result of [
+    { kind: 'reply', message: '일반 답변' }, { kind: 'question', message: '언제인가요?', missingFields: ['time'] },
+    { kind: 'failure', message: '실패', code: 'not_ready', retryable: false },
+    { kind: 'phone_request', message: '전화할까요?', itemId: 'event', expectedRevision: 1 },
+  ]) {
+    const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+      onOpenScheduleCall() {}, client: { async sendMessage() { return { conversationId: 'c', result }; } } });
+    t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
+    assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0, result.kind);
+    if (result.kind === 'phone_request') assert.match(text(view.tree), /전화 요청 확인/);
+  }
+});
+
+test('비어 있는 제안 ID는 카드로 추측하지 않고 기록 확인을 안내한다', async t => {
+  const Screen = await component;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { return { conversationId: 'c', result: { kind: 'proposal', message: '제안', proposalIds: ['', '  '] } }; } } });
+  t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0);
+  assert.match(text(view.tree), /제안 정보를 확인할 수 없어요/);
+});
+
+test('새 메시지만 자동 스크롤하고 제안 카드 크기 변경은 검토 위치를 유지한다', async t => {
+  const Screen = await component; let finish!: (value: unknown) => void; let scrolls = 0;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { sendMessage() { return new Promise(resolve => { finish = resolve; }); } } });
+  t.after(view.unmount);
+  const scroll = () => nodes(view.tree).find(node => node.type === 'ScrollView');
+  scroll().props.ref.current = { scrollToEnd() { scrolls++; } };
+  type(view, '일정 제안'); press(view, '메시지 보내기');
+  scroll().props.onContentSizeChange(); assert.equal(scrolls, 1);
+  finish({ conversationId: 'c', result: { kind: 'proposal', message: '제안을 확인해 주세요', proposalIds: ['p'] } });
+  await view.settle(); scroll().props.onContentSizeChange(); assert.equal(scrolls, 2);
+  scroll().props.onContentSizeChange(); scroll().props.onContentSizeChange(); assert.equal(scrolls, 2);
+});
+
+test('다른 제안의 미해결 승인 중 전송과 맥락 전환을 막고 카드와 초안을 보존한다', async t => {
+  const Screen = await component; const owner = {}; let interval: (() => void) | undefined; let calls = 0; let cleared = 0;
+  t.mock.method(globalThis, 'setInterval', ((callback: () => void) => { interval = callback; return 1; }) as typeof setInterval);
+  t.mock.method(globalThis, 'clearInterval', (() => {}) as typeof clearInterval);
+  const oldEntry = { key: 'old', kind: 'item', id: 'item-1', expectedRevision: 1, title: '기존 일정' };
+  const nextEntry = { key: 'next', kind: 'item', id: 'item-2', expectedRevision: 1, title: '새 일정' };
+  const props = { ...base, entryContext: oldEntry, onClearEntryContext() { cleared++; },
+    renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { calls++; return { conversationId: 'c', result: { kind: 'proposal', message: '승인할 제안', proposalIds: ['p'] } }; } } };
+  const view = render(Screen, props);
+  t.after(() => { Screen.operationGuard.clear(owner); view.unmount(); });
+  type(view, '첫 요청'); press(view, '메시지 보내기'); await view.settle();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  Screen.operationGuard.update(owner, { status: 'pending' });
+  type(view, '보존할 초안'); press(view, '메시지 보내기');
+  assert.equal(calls, 1); assert.match(text(view.tree), /변경 요청을 먼저 확인/);
+  press(view, '맥락 닫기'); assert.equal(cleared, 0);
+  view.props = { ...props, entryContext: nextEntry, revisionRequest: { key: 'revision', proposalId: 'p', text: '수정 초안' } };
+  view.dirty = true; view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  assert.match(text(view.tree), /기존 일정/); assert.doesNotMatch(text(view.tree), /선택한 일정: 새 일정/);
+  assert.equal(nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === '채팅 메시지').props.value, '보존할 초안');
+  Screen.operationGuard.update(owner, { status: 'error', error: new Error('timeout'), uncertain: true });
+  interval?.(); view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  assert.equal(calls, 1);
+  Screen.operationGuard.clear(owner); assert.ok(interval); interval!(); view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0);
+  assert.match(text(view.tree), /선택한 일정: 새 일정|제안 수정 요청 초안/);
+});
+
+test('사용자 말풍선은 헤더 없이 본문만 표시하고 AI 응답은 레이블을 유지한다', async t => {
+  const Screen = await component;
+  const view = render(Screen, { ...base, client: { async sendMessage() { return { conversationId: 'c', result: { kind: 'reply', message: 'AI의 답변' } }; } } });
+  t.after(view.unmount); type(view, '사용자의 메시지'); press(view, '메시지 보내기'); await view.settle();
+  const userBubble = nodes(view.tree).find(node => node.type === 'View' && Array.isArray(node.children) &&
+    node.children.some((child: any) => child?.type === 'Text' && text(child.children) === '사용자의 메시지'));
+  assert.ok(userBubble);
+  assert.deepEqual(userBubble.children.filter(Boolean).map((child: any) => child.type), ['Text']);
+  assert.equal(userBubble.children.find((child: any) => child?.type === 'Text').props.accessibilityLabel, '내 메시지: 사용자의 메시지');
+  assert.match(text(view.tree), /AI 응답/);
+  assert.match(text(view.tree), /AI의 답변/);
+  assert.equal(nodes(view.tree).some(node => node.type === 'Text' && text(node.children) === '나'), false);
 });
