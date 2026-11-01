@@ -36,6 +36,22 @@
         {
           "contactsPermission": "이름으로 연락할 상대를 찾고 선택한 전화번호를 확인하기 위해 연락처 읽기 권한이 필요합니다."
         }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "현재 위치에서 약속 장소까지 이동시간을 계산하기 위해 앱 사용 중 위치 권한이 필요합니다.",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "enableRemoteNotifications": false,
+          "enableBackgroundRemoteNotifications": false
+        }
       ]
     ]
   }

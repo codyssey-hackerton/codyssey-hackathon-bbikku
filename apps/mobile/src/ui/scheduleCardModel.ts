@@ -21,6 +21,7 @@ export function scheduleCardModel(item: ScheduleItem, now: number) {
 
 export function scheduleTimeLabel(item: ScheduleItem, timezone: string): string {
   if (!item.timeSlot) return '시간 미정';
+  if (item.allDay) return '종일';
   try {
     const start = new Date(item.timeSlot.startsAt), end = new Date(item.timeSlot.endsAt);
     if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end) return '시간 확인 필요';

@@ -59,5 +59,20 @@ export function createGoogleClient(api: ApiClient) {
         throw new ApiError('invalid_response', 'Google 연결 결과를 확인할 수 없습니다.');
       }
     },
+    async poll(completionSecret: string): Promise<'pending' | 'completed'> {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(completionSecret)) throw new ApiError('invalid_request', 'Google 연결 요청을 확인할 수 없습니다.');
+      const data = await api.post<unknown>('/v1/google/oauth/complete', { completionSecret }, { idempotencyKey: '' });
+      if (!data || typeof data !== 'object' || Array.isArray(data) || !('status' in data) || (data.status !== 'pending' && data.status !== 'completed')) {
+        throw new ApiError('invalid_response', 'Google 연결 결과를 확인할 수 없습니다.');
+      }
+      return data.status;
+    },
+    async cancel(completionSecret: string): Promise<void> {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(completionSecret)) return;
+      const data = await api.post<unknown>('/v1/google/oauth/complete', { completionSecret, cancel: true }, { idempotencyKey: '' });
+      if (!data || typeof data !== 'object' || Array.isArray(data) || !('status' in data) || data.status !== 'cancelled') {
+        throw new ApiError('invalid_response', 'Google 연결 요청을 취소할 수 없습니다.');
+      }
+    },
   };
 }

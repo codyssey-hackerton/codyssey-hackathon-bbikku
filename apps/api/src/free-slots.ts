@@ -25,6 +25,7 @@ export function findFreeSlots(snapshot: ContextSnapshot, input: z.infer<typeof f
   const intervals: { start: string; end: string }[] = [];
   for (const item of snapshot.items) {
     if (!item || !('timeSlot' in item)) throw new Error('Invalid snapshot item');
+    if (item.blocksTime === false) continue;
     if (item.timeSlot === null && item.kind === 'task') continue;
     const slot = item.timeSlot;
     if (!slot || !timestamp.safeParse(slot.startsAt).success || !timestamp.safeParse(slot.endsAt).success ||

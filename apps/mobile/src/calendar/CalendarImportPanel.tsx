@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Text, TextInput } from '../ui/typography';
+import { Text } from '../ui/typography';
+import { DateTimeFields } from '../ui/DateTimeFields';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import { operationGuard } from '../api/operationGuard';
 import { createScheduleClient, type ScheduleClient } from '../schedule/client';
-import { addDays, civilDate, startOfDay } from '../schedule/dates';
-import { createCalendarClient, selectedEventRefs, validPeriod } from './client';
+import { addDays, addMonths, civilDate, type CivilDate } from '../schedule/dates';
+import { calendarDateRange, createCalendarClient, selectedEventRefs } from './client';
 import type { Calendar, CalendarConnection, CalendarEvents, CalendarImportInput, CalendarImportResult } from './client';
 
 export interface CalendarImportPanelProps {
@@ -37,17 +38,31 @@ function Button({ label, onPress, disabled = false }: { label: string; onPress: 
     style={[styles.button, disabled && styles.disabled]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
 }
 
+function eventTime(event: CalendarEvents['events'][number], timezone: string): string {
+  try {
+    if (!event.allDay) {
+      const format = new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      return `${format.format(new Date(event.startsAt))} ~ ${format.format(new Date(event.endsAt))}`;
+    }
+    const format = new Intl.DateTimeFormat('ko-KR', { timeZone: event.timezone, year: 'numeric', month: 'long', day: 'numeric' });
+    const start = format.format(new Date(event.startsAt)); const end = format.format(new Date(Date.parse(event.endsAt) - 1));
+    return `종일 · ${start}${start === end ? '' : ` ~ ${end}`}`;
+  } catch { return '일정 시각을 표시할 수 없습니다.'; }
+}
+
 export default function CalendarImportPanel({ api, timezone, onBack, onScheduleChanged, onOpenGoogle, scheduleClient }: CalendarImportPanelProps) {
   const client = useMemo(() => createCalendarClient(api), [api]);
   const schedule = useMemo(() => scheduleClient ?? createScheduleClient(api), [api, scheduleClient]);
   const initialPeriod = useMemo(() => {
     try {
-      const today = civilDate(new Date(), timezone);
-      return { from: startOfDay(today, timezone).toISOString(), to: startOfDay(addDays(today, 7), timezone).toISOString() };
-    } catch { return { from: '', to: '' }; }
+      const today = civilDate(new Date(), timezone), first = { ...today, day: 1 };
+      const date = (value: CivilDate) => `${value.year}-${String(value.month).padStart(2, '0')}-${String(value.day).padStart(2, '0')}`;
+      return { first: date(first), last: date(addDays(addMonths(first, 1), -1)) };
+    } catch { return { first: '', last: '' }; }
   }, []);
-  const [from, setFrom] = useState(initialPeriod.from);
-  const [to, setTo] = useState(initialPeriod.to);
+  const [firstDate, setFirstDate] = useState(initialPeriod.first);
+  const [lastDate, setLastDate] = useState(initialPeriod.last);
+  const range = calendarDateRange(firstDate, lastDate, timezone);
   const [connection, setConnection] = useState<CalendarConnection | null>(null);
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [calendarId, setCalendarId] = useState<string | null>(null);
@@ -105,23 +120,24 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
     return () => { generation.current += 1; };
   }, [client]);
   async function readEvents() {
-    if (!calendarId || !validPeriod(from, to)) { setError('시간대가 포함된 ISO 시각으로 시작과 종료를 입력해 주세요. 조회 기간은 최대 366일입니다.'); return; }
+    if (!calendarId || !range) { setError('조회 시작일과 마지막 날을 확인해 주세요. 조회 기간은 최대 366일입니다.'); return; }
     const current = ++generation.current;
     setLoading(true); clearEvents();
     try {
-      const result = await client.events(calendarId, from, to);
+      const result = await client.events(calendarId, range.from, range.to);
       if (alive.current && generation.current === current) setEvents(result);
     } catch (err) { if (alive.current && generation.current === current) setError(message(err)); }
     finally { if (alive.current && generation.current === current) setLoading(false); }
   }
   async function importSelected() {
-    if (prepareLock.current || locked || !calendarId || !events || !validPeriod(from, to)) return;
+    if (prepareLock.current || locked || !calendarId || !events || !range) return;
     const refs = selectedEventRefs(events.events, selected);
     if (!refs.length) return;
     prepareLock.current = true; setPreparing(true); setError(null);
     try {
-      const result = await schedule.list({ from, to, timezone, includeUnscheduled: false });
-      if (alive.current) mutation.submit({ calendarId, from, to, selectedEvents: refs, expectedScheduleRevision: result.scheduleRevision });
+      const result = await schedule.list({ ...range, timezone, includeUnscheduled: false });
+      if (alive.current) mutation.submit({ calendarId, ...range, selectedEvents: refs, expectedScheduleRevision: result.scheduleRevision,
+        ...(connection?.accountRef ? { expectedAccountRef: connection.accountRef } : {}) });
     } catch (err) { if (alive.current) setError(message(err)); }
     finally { prepareLock.current = false; if (alive.current) setPreparing(false); }
   }
@@ -147,24 +163,21 @@ export default function CalendarImportPanel({ api, timezone, onBack, onScheduleC
       <Text>{calendar.summary || '(제목 없는 캘린더)'}{calendar.timeZone ? ` · ${calendar.timeZone}` : ''}</Text>
     </Pressable>)}
     {calendarId && <>
-      <Text style={styles.label}>조회 시작 (시간대 포함 ISO 8601)</Text>
-      <TextInput accessibilityLabel="조회 시작" value={from} editable={!locked} autoCapitalize="none" onChangeText={value => { setFrom(value); clearEvents(); }} style={styles.input} />
-      <Text style={styles.label}>조회 종료 (미포함, 시간대 포함 ISO 8601)</Text>
-      <TextInput accessibilityLabel="조회 종료" value={to} editable={!locked} autoCapitalize="none" onChangeText={value => { setTo(value); clearEvents(); }} style={styles.input} />
-      <Text style={styles.body}>앱 시간대: {timezone}</Text>
+      <DateTimeFields label="조회 시작일" mode="date" value={firstDate} disabled={locked} onChange={value => { setFirstDate(value); clearEvents(); }} />
+      <DateTimeFields label="조회 마지막 날" mode="date" value={lastDate} disabled={locked} onChange={value => { setLastDate(value); clearEvents(); }} />
       <Button label="이 기간 일정 조회" onPress={() => { void readEvents(); }} disabled={locked} />
     </>}
     {loading && <ActivityIndicator accessibilityLabel="조회 중" />}
     {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
     {events && <>
-      {events.unsupportedCount > 0 && <Text accessibilityRole="alert" style={styles.error}>지원하지 않는 일정 {events.unsupportedCount}개는 목록에 포함되지 않았습니다. 반복·종일·투명 일정 등이 포함될 수 있습니다.</Text>}
+      {events.unsupportedCount > 0 && <Text accessibilityRole="alert" style={styles.error}>지원하지 않는 일정 {events.unsupportedCount}개는 목록에 포함되지 않았습니다.</Text>}
       {events.events.length === 0 && <Text style={styles.body}>이 기간에 가져올 수 있는 일정이 없습니다.</Text>}
       <Text style={styles.body}>한 번에 최대 100개를 선택할 수 있습니다.</Text>
       {events.events.map(event => <Pressable key={event.id} accessibilityRole="checkbox" aria-checked={selected.has(event.id)} accessibilityState={{ checked: selected.has(event.id), disabled: locked || (selected.size >= 100 && !selected.has(event.id)) }} disabled={locked || (selected.size >= 100 && !selected.has(event.id))}
         onPress={() => setSelected(previous => { const next = new Set(previous); if (next.has(event.id)) next.delete(event.id); else next.add(event.id); return next; })}
         style={[styles.choice, selected.has(event.id) && styles.chosen, locked && styles.disabled]}>
         <Text style={styles.label}>{selected.has(event.id) ? '☑' : '☐'} {event.title || '(제목 없는 일정)'}</Text>
-        <Text>{event.startsAt} ~ {event.endsAt} · {event.timezone}</Text>
+        <Text>{eventTime(event, timezone)}{event.blocksTime === false ? ' · 시간 비차단' : ''}</Text>
       </Pressable>)}
       <Button label={`선택한 ${selected.size}개 가져오기`} onPress={() => { void importSelected(); }} disabled={locked || selected.size === 0} />
     </>}
@@ -191,7 +204,6 @@ const styles = StyleSheet.create({
   title: { fontSize: 22, fontWeight: '700', color: '#202A3A' },
   body: { color: '#34435D' },
   label: { fontWeight: '600', color: '#202A3A' },
-  input: { borderWidth: 1, borderColor: '#AAB5C5', backgroundColor: '#FFF', borderRadius: 8, padding: 10, color: '#202A3A' },
   button: { backgroundColor: '#344F82', borderRadius: 8, padding: 12, alignItems: 'center' },
   buttonText: { color: '#FFF', fontWeight: '600' },
   choice: { padding: 12, borderWidth: 1, borderColor: '#C7D0DE', backgroundColor: '#FFF', borderRadius: 8, gap: 4 },

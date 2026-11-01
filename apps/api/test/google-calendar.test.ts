@@ -74,13 +74,13 @@ test('another user cannot import the local developer calendar', async t => {
   await assert.rejects(service.importSelected({ userId: 'other-user', ...query, selectedEvents: [{ id: event.id, etag: event.etag }], expectedScheduleRevision: 0 }), (error: any) => error.code === 'permission_denied');
 });
 
-test('overlapping selections fail together without saving either event', async t => {
+test('overlapping source events are imported without changing their source', async t => {
   const other = { ...event, id: 'event-2', etag: 'etag-2', start: { dateTime: '2026-11-01T09:30:00Z' }, end: { dateTime: '2026-11-01T10:30:00Z' } };
   const connection = await setup(t, () => Response.json({ timeZone: 'UTC', items: [event, other] }));
   const store = new MemoryPlanningStore(); const service = new CalendarImportService(store, connection);
-  await assert.rejects(service.importSelected({ userId: 'local-developer', ...query,
-    selectedEvents: [{ id: event.id, etag: event.etag }, { id: other.id, etag: other.etag }], expectedScheduleRevision: 0 }), (error: any) => error.code === 'conflict');
-  const state = await store.read('local-developer'); assert.equal(state.items.size, 0); assert.equal(state.scheduleRevision, 0);
+  const result = await service.importSelected({ userId: 'local-developer', ...query,
+    selectedEvents: [{ id: event.id, etag: event.etag }, { id: other.id, etag: other.etag }], expectedScheduleRevision: 0 });
+  const state = await store.read('local-developer'); assert.equal(result.items.length, 2); assert.equal(state.items.size, 2); assert.equal(state.scheduleRevision, 1);
 });
 
 test('recurring and partial-attendee events are reported as unsupported', async t => {
@@ -103,6 +103,50 @@ test('HTTP explicit selection imports once and rejects another user', async t =>
   assert.equal((await store.read('local-developer')).items.size, 1);
 });
 
+test('automatic import skips a moved recurring occurrence, imports only new events and replays unchanged', async t => {
+  let instanceId = 'instance-1';
+  const other = { ...event, id: 'new-event', etag: 'new-etag' };
+  const connection = await setup(t, () => Response.json({ timeZone: 'UTC', items: [
+    { ...event, id: instanceId, recurringEventId: 'series', originalStartTime: { dateTime: event.start.dateTime } }, other,
+  ] }));
+  const store = new MemoryPlanningStore(); const service = new CalendarImportService(store, connection);
+  const first = await service.importSelected({ userId: 'local-developer', ...query, selectedEvents: [{ id: instanceId, etag: event.etag }], expectedScheduleRevision: 0 });
+  await store.transaction('local-developer', state => {
+    const item = state.items.get(first.items[0].id)!;
+    item.timeSlot = { startsAt: '2026-12-01T09:00:00Z', endsAt: '2026-12-01T10:00:00Z', timezone: 'UTC' };
+    state.scheduleRevision++;
+  });
+  instanceId = 'changed-instance-id';
+  const app = buildApp({ store, calendarConnection: connection, sessions: { async resolve() { return { userId: 'local-developer' }; } } });
+  t.after(() => app.close());
+  const payload = { requestId: 'auto-partial', ...query, expectedAccountRef: connection.accountRef, skipExisting: true, expectedScheduleRevision: 2,
+    selectedEvents: [{ id: instanceId, etag: event.etag }, { id: other.id, etag: other.etag }] };
+  const send = () => app.inject({ method: 'POST', url: '/v1/calendar/import', headers: { authorization: 'Bearer local', 'idempotency-key': 'auto-partial' }, payload });
+  const result = await send(); assert.equal(result.statusCode, 200, result.body);
+  assert.equal(result.json().data.scheduleRevision, 3); assert.equal(result.json().data.items.length, 1);
+  assert.equal(result.json().data.items[0].sourceRefs[0].externalEventId, other.id);
+  const replay = await send(); assert.deepEqual(replay.json().data, result.json().data);
+  const state = await store.read('local-developer'); assert.equal(state.items.size, 2);
+  assert.equal(state.items.get(first.items[0].id)!.timeSlot!.startsAt, '2026-12-01T09:00:00Z');
+});
+
+test('automatic import of only duplicates leaves revision unchanged and replays the empty result', async t => {
+  const connection = await setup(t); const store = new MemoryPlanningStore();
+  const service = new CalendarImportService(store, connection);
+  await service.importSelected({ userId: 'local-developer', ...query, selectedEvents: [{ id: event.id, etag: event.etag }], expectedScheduleRevision: 0 });
+  const app = buildApp({ store, calendarConnection: connection, sessions: { async resolve() { return { userId: 'local-developer' }; } } });
+  t.after(() => app.close());
+  const payload = { requestId: 'auto-existing', ...query, expectedAccountRef: connection.accountRef, skipExisting: true,
+    expectedScheduleRevision: 1, selectedEvents: [{ id: event.id, etag: event.etag }] };
+  const send = () => app.inject({ method: 'POST', url: '/v1/calendar/import', headers: { authorization: 'Bearer local', 'idempotency-key': 'auto-existing' }, payload });
+  const result = await send(); assert.equal(result.statusCode, 200, result.body);
+  assert.deepEqual(result.json().data, { items: [], scheduleRevision: 1 });
+  const replay = await send(); assert.deepEqual(replay.json().data, result.json().data);
+  const state = await store.read('local-developer'); assert.equal(state.items.size, 1); assert.equal(state.scheduleRevision, 1);
+  await assert.rejects(service.importSelected({ userId: 'local-developer', ...payload, expectedScheduleRevision: 0 }), (error: any) => error.code === 'conflict');
+  await assert.rejects(service.importSelected({ userId: 'local-developer', ...payload, skipExisting: false }), (error: any) => error.code === 'conflict');
+});
+
 test('prepared import cannot be forged and commits without another provider lookup', async t => {
   let allowLookup = true;
   const connection = await setup(t, () => { if (!allowLookup) throw new Error('unexpected provider lookup'); return Response.json({ timeZone: 'UTC', items: [event] }); });
@@ -123,4 +167,92 @@ test('prepared import rechecks schedule revision at commit', async t => {
   await store.transaction('local-developer', state => { state.scheduleRevision++; });
   await assert.rejects(service.commitPrepared(prepared), (error: any) => error.code === 'conflict');
   assert.equal((await store.read('local-developer')).items.size, 0);
+});
+
+test('expanded recurrence and all-day transparent events import with exclusive local-day boundaries', async t => {
+  const allDay = { ...event, id: 'holiday', summary: '종일 일정', description: '일정 메모', transparency: 'transparent',
+    start: { date: '2026-03-08' }, end: { date: '2026-03-09' } };
+  const occurrence = { ...event, id: 'occurrence-1', recurringEventId: 'series-1', originalStartTime: { dateTime: '2026-03-09T09:00:00-04:00' },
+    start: { dateTime: '2026-03-09T10:00:00-04:00', timeZone: 'America/New_York' }, end: { dateTime: '2026-03-09T11:00:00-04:00' } };
+  const connection = await setup(t, () => Response.json({ timeZone: 'America/New_York', items: [allDay, occurrence, { id: 'cancelled', status: 'cancelled' }] }));
+  const period = { calendarId: query.calendarId, from: '2026-03-01T00:00:00Z', to: '2026-04-01T00:00:00Z' };
+  const listed = await connection.resolveEvents(period);
+  assert.equal(listed.unsupportedCount, 0); assert.equal(listed.events.length, 2);
+  const day = listed.events[0]!;
+  assert.equal(day.startsAt, '2026-03-08T05:00:00.000Z'); assert.equal(day.endsAt, '2026-03-09T04:00:00.000Z');
+  assert.equal(Date.parse(day.endsAt) - Date.parse(day.startsAt), 23 * 60 * 60 * 1000);
+  assert.equal(day.allDay, true); assert.equal(day.blocksTime, false); assert.equal(day.notes, '일정 메모');
+  assert.equal(listed.events[1]!.occurrenceKey, JSON.stringify(['series-1', occurrence.originalStartTime.dateTime]));
+  const store = new MemoryPlanningStore(); const service = new CalendarImportService(store, connection);
+  const result = await service.importSelected({ userId: 'local-developer', ...period, expectedScheduleRevision: 0,
+    selectedEvents: listed.events.map(({ id, etag }) => ({ id, etag })) });
+  assert.equal(result.items[0]!.allDay, true); assert.equal(result.items[0]!.blocksTime, false); assert.equal(result.items[0]!.notes, '일정 메모');
+  assert.equal(result.items[1]!.sourceRefs[0]!.externalEventId, 'occurrence-1');
+  assert.equal(result.items[1]!.sourceRefs[0]!.occurrenceKey, listed.events[1]!.occurrenceKey);
+});
+
+test('a changed recurrence instance ID cannot create a duplicate original occurrence', async t => {
+  let instanceId = 'instance-1';
+  const connection = await setup(t, () => Response.json({ timeZone: 'UTC', items: [{ ...event, id: instanceId, recurringEventId: 'series',
+    originalStartTime: { dateTime: '2026-11-01T09:00:00Z' } }] }));
+  const store = new MemoryPlanningStore(); const service = new CalendarImportService(store, connection);
+  await service.importSelected({ userId: 'local-developer', ...query, selectedEvents: [{ id: instanceId, etag: event.etag }], expectedScheduleRevision: 0 });
+  instanceId = 'instance-2';
+  await assert.rejects(service.importSelected({ userId: 'local-developer', ...query, selectedEvents: [{ id: instanceId, etag: event.etag }], expectedScheduleRevision: 1 }), (error: any) => error.code === 'conflict');
+  assert.equal((await store.read('local-developer')).items.size, 1);
+});
+
+test('all-day dates follow calendar timezone across fall DST and skipped midnight', async t => {
+  const values = [
+    { zone: 'America/New_York', start: '2026-11-01', end: '2026-11-02', expectedStart: '2026-11-01T04:00:00.000Z', expectedEnd: '2026-11-02T05:00:00.000Z' },
+    { zone: 'America/Sao_Paulo', start: '2018-11-04', end: '2018-11-05', expectedStart: '2018-11-04T03:00:00.000Z', expectedEnd: '2018-11-05T02:00:00.000Z' },
+  ];
+  for (const value of values) {
+    const connection = await setup(t, () => Response.json({ timeZone: value.zone, items: [{ ...event,
+      start: { date: value.start }, end: { date: value.end } }] }));
+    const result = await connection.listEvents(query); assert.equal(result.events.length, 1);
+    assert.equal(result.events[0]!.startsAt, value.expectedStart); assert.equal(result.events[0]!.endsAt, value.expectedEnd);
+  }
+});
+
+test('an expected Google account mismatch fails before reading or importing events', async t => {
+  let reads = 0;
+  const connection = await setup(t, () => { reads++; return Response.json({ timeZone: 'UTC', items: [event] }); });
+  const store = new MemoryPlanningStore(); const service = new CalendarImportService(store, connection);
+  await assert.rejects(service.importSelected({ userId: 'local-developer', ...query, expectedAccountRef: 'different-account',
+    selectedEvents: [{ id: event.id, etag: event.etag }], expectedScheduleRevision: 0 }), (error: any) => error.code === 'conflict');
+  assert.equal(reads, 0); assert.equal((await store.read('local-developer')).items.size, 0);
+});
+
+test('HTTP import rechecks the selected account and schedule snapshot after provider preparation', async t => {
+  const store = new MemoryPlanningStore();
+  let enter!: () => void, release!: () => void;
+  let entered: Promise<void>, gate: Promise<void>;
+  const resetGate = () => { entered = new Promise(resolve => { enter = resolve; }); gate = new Promise(resolve => { release = resolve; }); };
+  const source = { id: event.id, etag: event.etag, title: event.summary, startsAt: event.start.dateTime, endsAt: event.end.dateTime,
+    timezone: 'UTC', involvement: 'personal' as const };
+  const first = { userId: 'alice', accountRef: 'google:account-a', accountLabel: 'account-a@example.test',
+    async resolveEvents() { enter(); await gate; return { events: [source], unsupportedCount: 0 }; } };
+  const second = { ...first, accountRef: 'google:account-b' };
+  let selected = first;
+  const oauth: any = { async connections(userId: string) { return userId === 'alice' ? { calendarConnection: selected } : {}; } };
+  const app = buildApp({ store, googleOAuth: oauth, sessions: { async resolve(token) { return token === 'alice' ? { userId: 'alice' } : null; } } });
+  t.after(() => app.close());
+  const send = (key: string, expectedScheduleRevision: number) => app.inject({ method: 'POST', url: '/v1/calendar/import',
+    headers: { authorization: 'Bearer alice', 'idempotency-key': key }, payload: { requestId: key, ...query, expectedAccountRef: 'google:account-a',
+      selectedEvents: [{ id: event.id, etag: event.etag }], expectedScheduleRevision } });
+
+  resetGate(); const accountChange = send('account-change', 0); await entered!; selected = second; release();
+  const switched = await accountChange; assert.equal(switched.statusCode, 409, switched.body);
+  assert.equal((await store.read('alice')).items.size, 0);
+
+  selected = first; resetGate(); const scheduleChange = send('schedule-change', 0); await entered!;
+  await store.transaction('alice', state => { state.scheduleRevision++; }); release();
+  const stale = await scheduleChange; assert.equal(stale.statusCode, 409, stale.body);
+  assert.equal((await store.read('alice')).items.size, 0);
+
+  resetGate(); const unchanged = send('unchanged-account', 1); await entered!; release();
+  const success = await unchanged; assert.equal(success.statusCode, 200, success.body);
+  const state = await store.read('alice'); assert.equal(state.items.size, 1); assert.equal(state.scheduleRevision, 2);
+  assert.equal([...state.items.values()][0]!.sourceRefs[0]!.accountRef, 'google:account-a');
 });

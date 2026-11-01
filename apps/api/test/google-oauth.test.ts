@@ -91,6 +91,27 @@ test('authenticated OAuth state is one-use, time-limited and isolates Google acc
     const r = await fallbackApp.inject({ method: 'GET', url: route, headers: { authorization: 'Bearer alice' } });
     assert.equal(r.json().data.status, 'not_configured');
   }
+  const automatic = await start('alice', 'calendar');
+  const poll = (user: string, completionSecret: string, cancel = false) => app.inject({ method: 'POST',
+    url: '/v1/google/oauth/complete', headers: { authorization: `Bearer ${user}` },
+    payload: { completionSecret, ...(cancel ? { cancel: true } : {}) } });
+  const waiting = await poll('alice', automatic.completionSecret);
+  assert.deepEqual(waiting.json().data, { status: 'pending' }); assert.equal(waiting.headers['cache-control'], 'no-store');
+  assert.equal((await poll('bob', automatic.completionSecret)).statusCode, 400);
+  assert.equal((await poll('alice', 'z'.repeat(43))).statusCode, 400);
+  assert.equal((await callback(automatic.state, 'alice-calendar')).statusCode, 200);
+  const concurrent = await Promise.all(Array.from({ length: 5 }, () => poll('alice', automatic.completionSecret)));
+  assert.ok(concurrent.every(response => response.statusCode === 200));
+  assert.deepEqual(concurrent.map(response => response.json().data), Array(5).fill({ status: 'completed' }));
+  assert.deepEqual((await poll('alice', automatic.completionSecret)).json().data, { status: 'completed' });
+  const cancelled = await start('alice', 'calendar');
+  assert.equal((await poll('bob', cancelled.completionSecret, true)).statusCode, 400);
+  assert.equal((await poll('alice', cancelled.completionSecret, true)).json().data.status, 'cancelled');
+  assert.equal((await poll('alice', cancelled.completionSecret)).statusCode, 400);
+  assert.equal((await callback(cancelled.state, 'alice-calendar')).statusCode, 400);
+  const autoExpired = await start('alice', 'calendar');
+  now += 10 * 60_000;
+  assert.equal((await poll('alice', autoExpired.completionSecret)).statusCode, 400);
 });
 
 test('unconfigured OAuth cannot start and the callback never exposes provider data', async t => {

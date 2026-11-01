@@ -30,10 +30,15 @@ function ProfileContent({ profile, member, onBack, onOpenGoogle, onOpenReview, o
   const [draft, setDraft] = useState(() => toDraft(profile.load.status === 'success' ? profile.load.value : null));
   const [times, setTimes] = useState(() => timeDraft(draft.timing));
   const [timeExpanded, setTimeExpanded] = useState(false);
+  const [preferencesExpanded, setPreferencesExpanded] = useState(false);
   const [error, setError] = useState('');
   const baseline = useRef<number | null>(null), submitted = useRef(false);
   const locked = profileLocked(profile);
   const navigationLocked = profile.mutation.state.status === 'pending' || (profile.mutation.state.status === 'error' && profile.mutation.state.uncertain);
+  const preferences = profile.load.status === 'success' ? profile.load.value : null;
+  const goalLabels = { work: '업무·공부', health: '운동·건강', life: '일상·약속' };
+  const periodLabels = { morning: '오전', afternoon: '오후', unknown: '아직 잘 모르겠어요' };
+  const preferenceSummary = preferences ? `목표: ${preferences.goals.map(goal => goalLabels[goal]).join(', ') || '미설정'} · 편한 시간대: ${preferences.preferredPeriod === null ? '미설정' : periodLabels[preferences.preferredPeriod]}` : '설정한 내용 확인·수정';
   useEffect(() => { if (submitted.current && profile.mutation.state.status === 'success' && profile.mutation.canRetry) { submitted.current = false; setEdit(null); } }, [profile.mutation.state, profile.mutation.canRetry]);
   function open(section: 'goals') {
     if (locked || profile.load.status !== 'success') return;
@@ -78,7 +83,16 @@ function ProfileContent({ profile, member, onBack, onOpenGoogle, onOpenReview, o
       <View style={styles.identity}><ProfileAvatar size={46} /><View style={styles.grow}>
         <Text style={styles.cardTitle}>{member?.displayName || '내 프로필'}</Text>{member?.email && <Text style={styles.hint}>{member.email}</Text>}</View></View>
       <Text style={styles.section}>개인화와 일정</Text>
-      {row('목표·활동 및 선호', '설정한 내용 확인·수정', () => open('goals'), locked)}
+      <View style={styles.preferenceCard}>
+        <Pressable accessibilityRole="button" accessibilityLabel="목표·활동 및 선호" accessibilityState={{ expanded: preferencesExpanded }}
+          onPress={() => setPreferencesExpanded(value => !value)} style={styles.preferenceSummary}>
+          <View style={styles.grow}><Text style={styles.cardTitle} numberOfLines={1}>생활 선호</Text>
+            <Text style={styles.hint} numberOfLines={2}>{preferenceSummary}</Text></View>
+          <Icon name="chevronRight" size={20} color={colors.primaryPressed} />
+        </Pressable>
+        {preferencesExpanded && <><Text style={styles.badge}>선호</Text>
+          <ActionButton label="생활 선호 수정" disabled={locked} onPress={() => open('goals')} secondary /></>}
+      </View>
       {row('Google 연결', '캘린더와 Google 계정', onOpenGoogle, locked)}
       {row('자동 검토', '자동 검토 설정 확인', onOpenReview, locked)}
       {row('내 선호와 상황', '나에게 맞는 일정 선호와 상황 알려주기', onOpenMemory, locked)}
@@ -92,5 +106,8 @@ const styles = StyleSheet.create({ content: { padding: 24, paddingBottom: 40, ga
   title: { fontSize: 27, lineHeight: 36, fontWeight: '700' }, hint: { color: colors.muted, fontSize: 13, lineHeight: 20 }, section: { fontWeight: '700', color: colors.muted, marginTop: 12 },
   identity: { backgroundColor: colors.surface, borderRadius: 20, padding: 18, flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 20 },
   card: { backgroundColor: colors.surface, borderRadius: 17, padding: 16, minHeight: 68, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  preferenceCard: { backgroundColor: colors.surface, borderRadius: 17, padding: 12, gap: 8 },
+  preferenceSummary: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  badge: { alignSelf: 'flex-start', color: colors.muted, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2, fontSize: 12 },
   cardTitle: { fontWeight: '700', fontSize: 15 }, grow: { flex: 1 }, error: { color: colors.error },
   timeFields: { gap: 10 }, timeField: { gap: 5 }, input: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 10, minHeight: 44, paddingHorizontal: 12 } });

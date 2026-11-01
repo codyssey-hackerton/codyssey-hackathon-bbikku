@@ -9,7 +9,7 @@ import { MemoryPlanningStore } from '../src/planning-store.ts';
 import { createExternalTools } from '../src/external-tools.ts';
 import { createExternalAccountTools } from '../src/external-account-tools.ts';
 
-const names = ['search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
+const names = ['get_current_location', 'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
   'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies'];
 const input = { userId: 'alice', requestId: 'request', conversationId: null, message: '날씨를 알려줘', timezone: 'UTC', history: [] };
 const success = (expiresAt = '2026-10-31T00:05:00.000Z') => ({ ok: true, provider: 'test', fetchedAt: '2026-10-31T00:00:00.000Z', expiresAt, data: { value: 12 } });

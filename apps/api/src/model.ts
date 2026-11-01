@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { callReviewDecision, phoneRequestDecision, type ModelPort } from './agent.ts';
+import { callReviewDecision, chatSuggestions, phoneRequestDecision, reminderRequestDecision, type ModelPort } from './agent.ts';
 import { PLANNING_PROMPT } from './planning-prompt.ts';
 import { changeSet } from './planning-schemas.ts';
 import { formDraft } from './chat-context.ts';
@@ -10,16 +10,16 @@ export const MODEL_ID = 'gpt-6.1-terra';
 export const REASONING_EFFORT = 'high';
 
 const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing', 'validate_changes', 'find_free_slots',
-  'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
+  'search_places', 'estimate_travel', 'get_current_location', 'get_weather', 'get_subway_arrivals',
   'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
 const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authorization', 'permissions', 'coordinationTarget']);
 
 const FinalDecision = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('answer'), text: z.string().min(1) }),
-  z.strictObject({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
+  z.strictObject({ kind: z.literal('answer'), text: z.string().min(1), suggestions: chatSuggestions.optional() }),
+  z.strictObject({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]), suggestions: chatSuggestions.optional() }),
   z.strictObject({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }),
   z.strictObject({ kind: z.literal('proposal'), reason: z.string(), changeSet, evidenceRefs: z.array(z.string()) }),
-  phoneRequestDecision, callReviewDecision,
+  phoneRequestDecision, callReviewDecision, reminderRequestDecision,
 ]);
 const Response = z.object({
   status: z.literal('completed'),

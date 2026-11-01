@@ -8,6 +8,11 @@ export type ReviewDraft = {
   morning: { enabled: boolean; localTime: string };
 };
 
+export function timezoneName(timezone: string): string {
+  try { return new Intl.DateTimeFormat('ko-KR', { timeZone: timezone, timeZoneName: 'long' }).formatToParts(new Date()).find(part => part.type === 'timeZoneName')?.value ?? '시간대 확인 불가'; }
+  catch { return '시간대 확인 불가'; }
+}
+
 export function draftFrom(schedule: ReviewSchedule): ReviewDraft {
   return {
     timezone: schedule.timezone,

@@ -104,7 +104,7 @@ function isSourceRef(value: unknown): value is SourceRef {
     (value.sourceVersion === undefined || typeof value.sourceVersion === 'string');
 }
 
-function isScheduleItem(value: unknown): value is ScheduleItem {
+export function isScheduleItem(value: unknown): value is ScheduleItem {
   if (!isRecord(value)) return false;
   if (typeof value.id !== 'string' || !Number.isSafeInteger(value.revision) ||
       (value.revision as number) < 1 || (value.kind !== 'event' && value.kind !== 'task') ||
@@ -119,6 +119,10 @@ function isScheduleItem(value: unknown): value is ScheduleItem {
         value.completion !== 'incomplete' && value.completion !== 'unknown') ||
       (value.category != null && value.category !== 'personal' && value.category !== 'work') ||
       (value.attendance != null && (value.kind !== 'event' || !['attended', 'absent', 'unknown'].includes(value.attendance as string))) ||
+      (value.location != null && (typeof value.location !== 'string' || !value.location.trim() || value.location.length > 2000)) ||
+      (value.allDay !== undefined && typeof value.allDay !== 'boolean') ||
+      (value.blocksTime !== undefined && typeof value.blocksTime !== 'boolean') ||
+      (value.notes != null && (typeof value.notes !== 'string' || value.notes.length > 20_000)) ||
       !Array.isArray(value.sourceRefs) || !value.sourceRefs.every(isSourceRef)) return false;
 
   if (value.kind === 'event' && value.timeSlot === null) return false;

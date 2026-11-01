@@ -1,4 +1,5 @@
 import { ApiClient, ApiError } from '../api/http';
+import { parseOffsetDateTime } from '@pikku/domain';
 
 import type { AgentResult, ChatContext, ChatInput, FormDraft } from '@pikku/domain';
 export type { AgentResult, CoordinationTarget } from '@pikku/domain';
@@ -30,6 +31,14 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isSuggestions(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.length >= 1 && value.length <= 2 && value.every(item =>
+    typeof item === 'object' && item !== null && !Array.isArray(item) &&
+    Object.keys(item).length === 2 && Object.keys(item).every(key => key === 'label' || key === 'message') &&
+    typeof item.label === 'string' && !!item.label.trim() && item.label.length <= 60 &&
+    typeof item.message === 'string' && !!item.message.trim() && item.message.length <= 500));
+}
+
 function isFormDraft(value: unknown): value is FormDraft {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const draft = value as Record<string, unknown>;
@@ -41,18 +50,53 @@ function isFormDraft(value: unknown): value is FormDraft {
     (key !== 'kind' || field === draft.kind));
 }
 
+function isReminder(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const reminder = value as Record<string, unknown>;
+  const keys = ['itemId', 'expectedRevision', 'title', 'appointmentAt', 'appointmentEndsAt', 'timezone',
+    'basis', 'minutesBefore', 'reminderAt', 'expiresAt', 'appointmentLocation', 'departureAt', 'travel'];
+  if (Object.keys(reminder).some(key => !keys.includes(key))) return false;
+  const date = (value: unknown) => typeof value === 'string' && value.length <= 100 &&
+    parseOffsetDateTime(value.replace(/(\.\d{3})\d+(?=Z|[+-]\d{2}:\d{2}$)/, '$1')) !== null;
+  if (typeof reminder.itemId !== 'string' || !reminder.itemId.trim() || reminder.itemId.length > 200 ||
+      typeof reminder.title !== 'string' || !reminder.title.trim() || reminder.title.length > 2000 ||
+      typeof reminder.expectedRevision !== 'number' || !Number.isSafeInteger(reminder.expectedRevision) || reminder.expectedRevision < 1 ||
+      typeof reminder.minutesBefore !== 'number' || !Number.isInteger(reminder.minutesBefore) || reminder.minutesBefore < 0 || reminder.minutesBefore > 1440 ||
+      typeof reminder.timezone !== 'string' || !reminder.timezone || reminder.timezone.length > 200 ||
+      (reminder.appointmentLocation !== undefined && (typeof reminder.appointmentLocation !== 'string' ||
+        !reminder.appointmentLocation.trim() || reminder.appointmentLocation.length > 2000)) ||
+      !date(reminder.appointmentAt) || !date(reminder.appointmentEndsAt) || !date(reminder.reminderAt) || !date(reminder.expiresAt)) return false;
+  try { new Intl.DateTimeFormat('en', { timeZone: reminder.timezone }); } catch { return false; }
+  const appointment = Date.parse(reminder.appointmentAt as string), end = Date.parse(reminder.appointmentEndsAt as string);
+  let basis = appointment;
+  if (reminder.basis === 'departure') {
+    if (!date(reminder.departureAt) || typeof reminder.travel !== 'object' || reminder.travel === null || Array.isArray(reminder.travel)) return false;
+    const travel = reminder.travel as Record<string, unknown>;
+    if (Object.keys(travel).some(key => !['mode', 'durationMinutes', 'provider', 'basis', 'destinationName', 'destinationAddress'].includes(key)) ||
+        !['walk', 'transit', 'car'].includes(String(travel.mode)) || travel.provider !== 'kakao' || travel.basis !== 'current_time' ||
+        typeof travel.destinationName !== 'string' || !travel.destinationName.trim() || travel.destinationName.length > 200 ||
+        typeof travel.destinationAddress !== 'string' || !travel.destinationAddress.trim() || travel.destinationAddress.length > 300 ||
+        typeof travel.durationMinutes !== 'number' || !Number.isSafeInteger(travel.durationMinutes) || travel.durationMinutes < 0) return false;
+    basis = Date.parse(reminder.departureAt as string);
+    if (basis !== appointment - travel.durationMinutes * 60_000) return false;
+  } else if (reminder.basis !== 'event_start' || reminder.departureAt !== undefined || reminder.travel !== undefined) return false;
+  return appointment < end && Date.parse(reminder.reminderAt as string) === basis - reminder.minutesBefore * 60_000;
+}
+
 function isChatResponse(value: unknown): value is ChatResponse {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.conversationId !== 'string' || !candidate.conversationId || typeof candidate.result !== 'object' || candidate.result === null) return false;
   const result = candidate.result as Record<string, unknown>;
   if (typeof result.message !== 'string' || !result.message.trim()) return false;
+  if (result.kind !== 'reply' && result.kind !== 'question' && result.suggestions !== undefined) return false;
   switch (result.kind) {
-    case 'reply': return result.draft === undefined || isFormDraft(result.draft);
-    case 'question': return isStringArray(result.missingFields);
+    case 'reply': return isSuggestions(result.suggestions) && (result.draft === undefined || (result.suggestions === undefined && isFormDraft(result.draft)));
+    case 'question': return isSuggestions(result.suggestions) && isStringArray(result.missingFields);
     case 'proposal': return isStringArray(result.proposalIds);
     case 'phone_request': return typeof result.itemId === 'string' && !!result.itemId.trim() && result.itemId.length <= 200 &&
       typeof result.expectedRevision === 'number' && Number.isSafeInteger(result.expectedRevision) && result.expectedRevision >= 1;
+    case 'reminder_request': return isReminder(result.reminder);
     case 'failure': return typeof result.code === 'string' && typeof result.retryable === 'boolean';
     default: return false;
   }
@@ -61,10 +105,19 @@ function isChatResponse(value: unknown): value is ChatResponse {
 export function createChatClient(api: ApiClient, options: { timeoutMs?: number } = {}): ChatClient {
   const timeoutMs = options.timeoutMs ?? CHAT_TIMEOUT_MS;
   return {
-    async sendMessage({ requestId, idempotencyKey, conversationId, message, timezone, coordinationTarget, entryContext }) {
+    async sendMessage({ requestId, idempotencyKey, conversationId, message, timezone, coordinationTarget, entryContext, deviceContext }) {
+      if (deviceContext?.currentLocation) {
+        const capturedAt = deviceContext.currentLocation.capturedAt;
+        const captured = typeof capturedAt === 'string'
+          ? parseOffsetDateTime(capturedAt.replace(/(\.\d{3})\d+(?=Z|[+-]\d{2}:\d{2}$)/, '$1')) : null;
+        if (captured === null || Date.now() - captured >= 300_000) {
+          throw new ApiError('location_expired', '현재 위치가 만료되어 이 요청을 전송할 수 없습니다.');
+        }
+      }
       const data = await api.post<unknown>(
         '/v1/chat',
-        { requestId, conversationId, message, timezone, ...(coordinationTarget ? { coordinationTarget } : {}), ...(entryContext ? { entryContext } : {}) },
+        { requestId, conversationId, message, timezone, ...(coordinationTarget ? { coordinationTarget } : {}), ...(entryContext ? { entryContext } : {}),
+          ...(deviceContext ? { deviceContext } : {}) },
         { idempotencyKey, timeoutMs },
       );
       if (!isChatResponse(data)) throw new ApiError('invalid_response', '대화 응답 형식이 올바르지 않습니다.');

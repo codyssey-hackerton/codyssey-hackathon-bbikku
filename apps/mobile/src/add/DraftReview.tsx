@@ -6,18 +6,19 @@ import { reviewDraft } from './draft';
 
 const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
 
-export function DraftReview({ pending, kind, current, disabled, onApply, onHandled }: {
+export function DraftReview({ pending, identity, kind, current, disabled, onApply, onHandled }: {
   pending?: FormDraft; kind: FormDraft['kind']; current: Record<string, string | string[]>;
+  identity?: FormDraft;
   disabled: boolean; onApply: (fields: Record<string, string | string[]>) => void; onHandled?: () => void;
 }) {
   const [handled, setHandled] = useState<FormDraft[]>([]);
   const reviewed = reviewDraft(pending, kind, current);
-  if (!pending || !reviewed || handled.includes(pending)) return null;
+  if (!pending || !reviewed || handled.includes(identity ?? pending)) return null;
   const entries = Object.entries(reviewed);
   function finish(apply: boolean) {
     if (disabled || !pending) return;
     if (apply) onApply(Object.fromEntries(entries));
-    setHandled(previous => [...previous, pending]);
+    setHandled(previous => [...previous, identity ?? pending]);
     onHandled?.();
   }
   return <View style={styles.box}>

@@ -24,6 +24,7 @@ function signed(payload: object, corrupt = false, algorithm = 'RS256') {
 function memoryPool() {
   const members = new Map<string, { id: string; email: string; display_name: string }>();
   const sessions = new Map<string, { memberId: string; expires: number; revoked: boolean }>();
+  let beforeSession: (() => Promise<void>) | undefined;
   const query = async (sql: string, values: unknown[] = []) => {
     if (sql.includes('INSERT INTO pikku_members_v1')) {
       const [id, subject, email, display] = values as string[];
@@ -31,6 +32,7 @@ function memoryPool() {
       members.set(subject!, member); return { rows: [member], rowCount: 1 };
     }
     if (sql.includes('INSERT INTO pikku_member_sessions_v1')) {
+      if (beforeSession) await beforeSession();
       const [key, memberId, , expiry] = values as [string, string, Date, Date];
       sessions.set(key, { memberId, expires: expiry.getTime(), revoked: false }); return { rows: [], rowCount: 1 };
     }
@@ -48,7 +50,7 @@ function memoryPool() {
     return { rows: [], rowCount: 0 };
   };
   const pool = { query, async connect() { return { query, release() {} }; } } as unknown as Pool;
-  return { pool, members, sessions };
+  return { pool, members, sessions, pauseSessions(value?: () => Promise<void>) { beforeSession = value; } };
 }
 
 test('Google login verifies actual signed ID tokens, binds both secrets, and issues separate revocable sessions', async t => {
@@ -121,7 +123,49 @@ test('Google login verifies actual signed ID tokens, binds both secrets, and iss
   assert.equal(completed.statusCode, 200, completed.body); assert.equal(completed.json().data.member.id, result.member.id);
   const memberSession = completed.json().data.sessionToken;
   assert.equal((await app.inject({ method: 'GET', url: '/v1/capabilities', headers: { authorization: `Bearer ${memberSession}` } })).statusCode, 200);
+  const serviceSecret = 's'.repeat(43); let serviceUser = '';
+  t.mock.method(legacy, 'start', async (userId: string) => { serviceUser = userId; return { authorizationUrl: 'https://example.test', completionSecret: serviceSecret }; });
+  t.mock.method(legacy, 'poll', async (userId: string, secret: string) => userId === result.member.id && secret === serviceSecret ? { status: 'pending' as const } : null);
+  t.mock.method(legacy, 'cancel', async (userId: string, secret: string) => userId === result.member.id && secret === serviceSecret);
+  const memberOnly = buildApp({ memberAuth: auth, memberAllowLocalInsecure: true, googleOAuth: legacy });
+  t.after(() => memberOnly.close());
+  const memberHeaders = { authorization: `Bearer ${memberSession}` };
+  const serviceStart = await memberOnly.inject({ method: 'POST', url: '/v1/google/oauth/start', headers: memberHeaders, payload: { kind: 'calendar' } });
+  assert.equal(serviceStart.statusCode, 200); assert.equal(serviceUser, result.member.id);
+  const servicePoll = await memberOnly.inject({ method: 'POST', url: '/v1/google/oauth/complete', headers: memberHeaders, payload: { completionSecret: serviceSecret } });
+  assert.deepEqual(servicePoll.json().data, { status: 'pending' });
+  const serviceCancel = await memberOnly.inject({ method: 'POST', url: '/v1/google/oauth/complete', headers: memberHeaders, payload: { completionSecret: serviceSecret, cancel: true } });
+  assert.equal(serviceCancel.json().data.status, 'cancelled');
+  assert.equal((await memberOnly.inject({ method: 'POST', url: '/v1/google/oauth/start', payload: { kind: 'calendar' } })).statusCode, 401);
   assert.equal((await app.inject({ method: 'POST', url: '/v1/auth/google/complete', payload: { completionSecret: startedData.completionSecret, confirmationCode: browserCode } })).statusCode, 400);
+  const automatic = start();
+  assert.deepEqual(await auth.poll(automatic.completionSecret), { status: 'pending' });
+  const waiting = await app.inject({ method: 'POST', url: '/v1/auth/google/complete', payload: { completionSecret: automatic.completionSecret } });
+  assert.deepEqual(waiting.json().data, { status: 'pending' }); assert.equal(waiting.headers['cache-control'], 'no-store');
+  assert.equal(await auth.poll('z'.repeat(43)), null);
+  assert.ok(await auth.callback(automatic.state, 'synthetic-code'));
+  const beforeAuto = db.sessions.size;
+  const simultaneous = await Promise.all(Array.from({ length: 5 }, () => auth.poll(automatic.completionSecret)));
+  assert.ok(simultaneous.every(value => value?.status === 'completed'));
+  assert.deepEqual(simultaneous, Array(5).fill(simultaneous[0]));
+  assert.equal(db.sessions.size, beforeAuto + 1);
+  assert.deepEqual(await auth.poll(automatic.completionSecret), simultaneous[0]);
+  const replayAuto = await app.inject({ method: 'POST', url: '/v1/auth/google/complete', payload: { completionSecret: automatic.completionSecret } });
+  assert.deepEqual(replayAuto.json().data, simultaneous[0]);
+  const cancelled = start();
+  const cancelledResponse = await app.inject({ method: 'POST', url: '/v1/auth/google/complete',
+    payload: { completionSecret: cancelled.completionSecret, cancel: true } });
+  assert.equal(cancelledResponse.json().data.status, 'cancelled');
+  assert.equal(await auth.poll(cancelled.completionSecret), null);
+  assert.equal(await auth.callback(cancelled.state, 'synthetic-code'), undefined);
+  const racing = start(); assert.ok(await auth.callback(racing.state, 'synthetic-code'));
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  db.pauseSessions(() => { entered(); return new Promise<void>(resolve => { release = resolve; }); });
+  const running = auth.poll(racing.completionSecret); await ready;
+  assert.equal(auth.cancel(racing.completionSecret), true);
+  release(); assert.equal(await running, null); db.pauseSessions();
+  assert.equal([...db.sessions.values()].at(-1)?.revoked, true);
   assert.equal((await app.inject({ method: 'GET', url: `/v1/google/oauth/callback?state=${'z'.repeat(43)}&code=synthetic-code` })).statusCode, 200);
   assert.equal(legacyCalls, 1);
   const firstFlow = start(); const firstTicket = await auth.callback(firstFlow.state, 'synthetic-code'); assert.ok(firstTicket);

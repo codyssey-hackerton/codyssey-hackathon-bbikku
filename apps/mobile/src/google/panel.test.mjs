@@ -53,6 +53,7 @@ function harness() {
       assert.equal(view.dirty, false, 'render should settle');
     };
     view.settle = async () => { for (let i = 0; i < 4; i++) { await new Promise(resolve => setImmediate(resolve)); view.flush(); } };
+    view.unmount = () => { for (const instance of instances.values()) for (const hook of instance.hooks) hook?.cleanup?.(); };
     view.flush(); return view;
   }
   return { render };
@@ -70,6 +71,83 @@ const bundled = await build({
       path === 'react-native' ? 'module.exports=globalThis.__googlePanelHarness.native' :
       'exports.jsx=exports.jsxs=globalThis.__googlePanelHarness.jsx;exports.Fragment=globalThis.__googlePanelHarness.fragment' }));
   } }],
+});
+
+test('consent completion is polled automatically without exposing the manual code form', async () => {
+  const state = 's'.repeat(43), challenge = 'c'.repeat(43), secret = 't'.repeat(43);
+  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  url.search = new URLSearchParams({ client_id: 'synthetic', response_type: 'code', state, code_challenge: challenge,
+    code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback',
+    scope: 'openid email https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly' }).toString();
+  const calls = [];
+  const api = {
+    async get(path) { return { status: 'not_configured', ...(path.includes('email') ? { senderAddress: null } : { accountLabel: null }) }; },
+    async post(path, body) {
+      calls.push({ path, body });
+      if (path.endsWith('/start')) return { authorizationUrl: url.toString(), completionSecret: secret };
+      if (path.endsWith('/complete') && !body.cancel && !body.confirmationCode) return { status: 'completed' };
+      if (body.cancel) return { status: 'cancelled' };
+      throw new Error('unexpected');
+    },
+  };
+  const original = globalThis.__googlePanelHarness.native.Linking.openURL;
+  globalThis.__googlePanelHarness.native.Linking.openURL = async () => {};
+  const view = host.render(compiled.exports.Panel, { api, onBack() {} });
+  try {
+    await view.settle();
+    const press = label => {
+      const button = nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === label);
+      assert.ok(button, label); button.props.onPress(); view.flush();
+    };
+    press('Google 캘린더 읽기 연결 시작'); await view.settle();
+    assert.equal(nodes(view.tree).some(node => node.props?.accessibilityLabel === 'Google 연결 확인 코드'), false);
+    press('Google 동의 화면 열기'); await view.settle();
+    await new Promise(resolve => setTimeout(resolve, 5)); await view.settle();
+    assert.match(text(view.tree), /연결을 확인했습니다/);
+    assert.deepEqual(calls.filter(value => value.path.endsWith('/complete')).map(value => value.body), [{ completionSecret: secret }]);
+  } finally { view.unmount(); globalThis.__googlePanelHarness.native.Linking.openURL = original; }
+});
+
+test('lost service completion keeps the owner and retries with the same secret', async () => {
+  const secret = 't'.repeat(43), url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  url.search = new URLSearchParams({ client_id: 'synthetic', response_type: 'code', state: 's'.repeat(43),
+    code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', redirect_uri: 'https://example.test/v1/google/oauth/callback',
+    scope: 'openid email https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly' }).toString();
+  const secrets = []; let resolvePoll;
+  const second = new Promise(resolve => { resolvePoll = resolve; });
+  const api = {
+    async get(path) { return { status: 'not_configured', ...(path.includes('email') ? { senderAddress: null } : { accountLabel: null }) }; },
+    async post(path, body) {
+      if (path.endsWith('/start')) return { authorizationUrl: url.toString(), completionSecret: secret };
+      if (body.cancel) return { status: 'cancelled' };
+      secrets.push(body.completionSecret);
+      if (secrets.length === 1) throw new Error('lost response');
+      return second;
+    },
+  };
+  const originalOpen = globalThis.__googlePanelHarness.native.Linking.openURL;
+  const originalTimeout = globalThis.setTimeout; let retry;
+  globalThis.__googlePanelHarness.native.Linking.openURL = async () => {};
+  globalThis.setTimeout = (fn, delay, ...args) => {
+    if (delay === 6_000) { retry = () => fn(...args); return -1; }
+    return originalTimeout(fn, delay, ...args);
+  };
+  const view = host.render(compiled.exports.Panel, { api, onBack() {} });
+  try {
+    await view.settle();
+    const button = label => nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === label);
+    const press = label => { const target = button(label); assert.ok(target, label); target.props.onPress(); view.flush(); };
+    press('Google 캘린더 읽기 연결 시작'); await view.settle();
+    press('Google 동의 화면 열기'); await view.settle();
+    await new Promise(resolve => originalTimeout(resolve, 5)); await view.settle();
+    assert.equal(button('뒤로').props.disabled, true);
+    assert.equal(typeof retry, 'function'); retry(); await view.settle();
+    assert.deepEqual(secrets, [secret, secret]);
+    assert.equal(button('뒤로').props.disabled, true);
+    resolvePoll({ status: 'completed' }); await view.settle();
+    assert.match(text(view.tree), /연결을 확인했습니다/);
+    assert.equal(button('뒤로').props.disabled, false);
+  } finally { view.unmount(); globalThis.setTimeout = originalTimeout; globalThis.__googlePanelHarness.native.Linking.openURL = originalOpen; }
 });
 const compiled = { exports: {} };
 new Function('module', 'exports', bundled.outputFiles[0].text)(compiled, compiled.exports);

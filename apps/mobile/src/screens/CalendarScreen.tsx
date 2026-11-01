@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import type { ScheduleClient, ScheduleItem } from '../schedule/client';
 import { addDays, addMonths, civilDate, civilOrdinal, formatCivilDate, monthRange, startOfDay, weekday } from '../schedule/dates';
@@ -8,15 +8,18 @@ import { useSchedule } from '../schedule/useSchedule';
 import { ActionButton } from '../ui/ActionButton';
 import { Text } from '../ui/typography';
 
-export type CalendarScreenProps = { selectedDate: Date; onSelectDate: (date: Date) => void; client: ScheduleClient; timezone: string; refreshVersion: number; onImport?: () => void };
+export type CalendarScreenProps = { selectedDate: Date; onSelectDate: (date: Date) => void; client: ScheduleClient; timezone: string; refreshVersion: number; onImport?: () => void; onVisibleMonthChange?: (date: Date) => void };
 const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
 
-export default function CalendarScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onImport }: CalendarScreenProps) {
+export default function CalendarScreen({ selectedDate, onSelectDate, client, timezone, refreshVersion, onImport, onVisibleMonthChange }: CalendarScreenProps) {
   const selected = useMemo(() => { try { return civilDate(selectedDate, timezone); } catch { return null; } }, [selectedDate.getTime(), timezone]);
   const key = selected ? `${timezone}:${selected.year}-${selected.month}-${selected.day}` : '';
   const [monthState, setMonthState] = useState<{ key: string; month: CivilDate } | null>(null);
   const [selectionError, setSelectionError] = useState('');
   const displayed = selected && monthState?.key === key ? monthState.month : selected && { ...selected, day: 1 };
+  useEffect(() => {
+    if (displayed) { try { onVisibleMonthChange?.(startOfDay({ ...displayed, day: 1 }, timezone)); } catch { /* invalid local date is shown below */ } }
+  }, [displayed?.year, displayed?.month, timezone, onVisibleMonthChange]);
   const range = useMemo(() => { try { return displayed ? monthRange(displayed, timezone) : null; } catch { return null; } }, [displayed?.year, displayed?.month, timezone]);
   const result = useSchedule(client, range && { ...range, timezone, includeUnscheduled: false }, refreshVersion);
   const itemsByDay = useMemo(() => {

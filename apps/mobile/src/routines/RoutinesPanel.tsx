@@ -11,6 +11,8 @@ import type { FormDraft } from '../chat/client';
 import type { ScheduleItem } from '../schedule/client';
 import { RoutineOccurrences } from './RoutineOccurrences';
 import { startWrite } from '../add/startWrite';
+import { DateTimeFields } from '../ui/DateTimeFields';
+import { durationBetween, endTime } from './form';
 
 type Load = { status: 'loading' } | { status: 'error' } | { status: 'success'; routines: Routine[] };
 type Intent = { kind: 'create'; input: RoutineInput } | { kind: 'update'; input: RoutineUpdate } | { kind: 'materialize'; input: MaterializeInput };
@@ -61,6 +63,9 @@ export default function RoutinesPanel({ api, timezone, selectedDate, visible, on
     if (!toTouched) setToDate(selectedDate);
   }, [visible, blocked, editing, startTouched, fromTouched, toTouched, selectedDate]);
   const duration = Number(form.duration);
+  const end = endTime(form.localTime, form.duration);
+  const zone = editing?.timezone ?? timezone;
+  const zoneLabel = ({ 'Asia/Seoul': '한국', 'Asia/Tokyo': '일본', 'America/New_York': '미국 동부', 'America/Chicago': '미국 중부', 'America/Denver': '미국 산악', 'America/Los_Angeles': '미국 서부', 'Europe/London': '영국 런던' } as Record<string, string>)[zone] ?? (editing ? '저장된 지역' : '기기 설정');
   const valid = !!form.title.trim() && form.weekdays.length > 0 && validDate(form.startDate) && /^([01]\d|2[0-3]):[0-5]\d$/.test(form.localTime) &&
     /^\d+$/.test(form.duration) && Number.isInteger(duration) && duration >= 1 && duration <= 1440;
   function beginEdit(item: Routine) {
@@ -102,6 +107,11 @@ export default function RoutinesPanel({ api, timezone, selectedDate, visible, on
     <Text style={styles.text}>요일과 시간을 정하고 날짜를 선택해 할 일 회차를 만듭니다. 수정하거나 비활성화해도 이미 생성한 회차는 미래 일정까지 그대로 유지됩니다.</Text>
     {!formOnly && <>
     <View style={styles.row} accessibilityRole="tablist">{([{ id: 'today', label: '날짜별 루틴' }, { id: 'all', label: '전체 루틴' }] as const).map(option => <Pressable key={option.id} accessibilityRole="tab" accessibilityState={{ selected: view === option.id, disabled: blocked }} disabled={blocked} onPress={() => setView(option.id)} style={[styles.tab, view === option.id && styles.selected]}><Text>{option.label}</Text></Pressable>)}</View>
+    {load.status === 'success' && load.routines.length === 0 && <View style={styles.card}>
+      <Text accessibilityRole="header" style={styles.section}>목요일 루틴 미리보기</Text>
+      <Text style={styles.text}>예시이며 등록된 루틴이나 완료 기록이 아닙니다.</Text>
+      {['아침 스트레칭', '독서', '가벼운 걷기'].map(title => <Text key={title} style={styles.text}>목 · {title}</Text>)}
+    </View>}
     {view === 'today' && <RoutineOccurrences api={api} timezone={timezone} selectedDate={selectedDate} visible={visible}
       blocked={action.state.status === 'pending' || action.state.status === 'error'} onBusyChange={setOccurrenceBusy}
       onScheduleChanged={onScheduleChanged} onSelectDate={onSelectDate} onRecovery={onRecovery} onDay={onDay} />}
@@ -129,17 +139,18 @@ export default function RoutinesPanel({ api, timezone, selectedDate, visible, on
     {onAskDraft && <ActionButton label="AI로 작성하기" disabled={blocked} onPress={() => onAskDraft({ ...form, weekdays: form.weekdays.map(String) })} secondary />}
     <TextInput accessibilityLabel="루틴 이름" placeholder="루틴 이름" maxLength={2000} value={form.title} onChangeText={title => setForm(value => ({ ...value, title }))} editable={!blocked} style={styles.input} />
     <Text>요일</Text><View style={styles.row}>{weekdays.map((day, index) => <Pressable key={day} accessibilityRole="checkbox" accessibilityLabel={`${day}요일`} accessibilityState={{ checked: form.weekdays.includes(index + 1), disabled: blocked }} disabled={blocked} onPress={() => setForm(value => ({ ...value, weekdays: value.weekdays.includes(index + 1) ? value.weekdays.filter(d => d !== index + 1) : [...value.weekdays, index + 1] }))} style={styles.day}><Text>{form.weekdays.includes(index + 1) ? '☑' : '☐'}{day}</Text></Pressable>)}</View>
-    <Text>시작일 (YYYY-MM-DD)</Text><TextInput accessibilityLabel="루틴 시작일" value={form.startDate} onChangeText={startDate => { setStartTouched(true); setForm(value => ({ ...value, startDate })); }} editable={!blocked} style={styles.input} />
-    <Text>시작 시각 (HH:mm)</Text><TextInput accessibilityLabel="루틴 시작 시각" value={form.localTime} onChangeText={localTime => setForm(value => ({ ...value, localTime }))} editable={!blocked} style={styles.input} />
-    <Text>소요 시간 (분)</Text><TextInput accessibilityLabel="루틴 소요 시간" value={form.duration} onChangeText={duration => setForm(value => ({ ...value, duration }))} keyboardType="number-pad" editable={!blocked} style={styles.input} />
+    <DateTimeFields label="루틴 시작일" mode="date" value={form.startDate} onChange={startDate => { setStartTouched(true); setForm(value => ({ ...value, startDate })); }} disabled={blocked} />
+    <DateTimeFields label="루틴 시작 시각" mode="time" value={form.localTime} onChange={localTime => setForm(value => ({ ...value, localTime, duration: durationBetween(localTime, endTime(value.localTime, value.duration)) }))} disabled={blocked} />
+    <DateTimeFields label="루틴 종료 시각" mode="time" value={end} onChange={finish => setForm(value => ({ ...value, duration: durationBetween(value.localTime, finish) }))} disabled={blocked} />
+    {!!end && <Text style={styles.text}>{end <= form.localTime ? '다음 날 종료 · ' : ''}소요 시간 {duration}분</Text>}
     <Text>분류</Text><View accessibilityRole="radiogroup" accessibilityLabel="루틴 분류" style={styles.row}>{([{ value: '', label: '미분류' }, { value: 'personal', label: '개인' }, { value: 'work', label: '업무' }] as const).map(option => <Pressable key={option.value} accessibilityRole="radio" accessibilityLabel={option.label} accessibilityState={{ checked: form.category === option.value, disabled: blocked }} disabled={blocked} onPress={() => setForm(value => ({ ...value, category: option.value }))} style={[styles.day, form.category === option.value && styles.selected]}><Text>{option.label}</Text></Pressable>)}</View>
-    <Text style={styles.text}>시간대: {editing?.timezone ?? timezone} · 소요 시간은 1~1440분</Text>
+    <Text style={styles.text}>국가·지역: {zoneLabel}</Text>
     <ActionButton label={editing ? '루틴 변경 저장' : '루틴 등록'} disabled={blocked || !valid} onPress={submitForm} />
     {editing && <ActionButton label="편집 취소" disabled={blocked} onPress={() => { setEditing(null); setForm(empty(selectedDate)); setStartTouched(false); }} secondary />}
     {!formOnly && <><Text accessibilityRole="header" style={styles.section}>회차 생성</Text>
     <Text style={styles.text}>양 끝 날짜를 포함해 최대 31일을 생성합니다. 삭제한 회차는 다시 생성하지 않습니다. 생성된 할 일은 하루 일정에서 확인하고 체크인할 수 있습니다.</Text>
-    <TextInput accessibilityLabel="회차 시작일" value={fromDate} onChangeText={value => { setFromTouched(true); setFromDate(value); }} editable={!blocked} style={styles.input} />
-    <TextInput accessibilityLabel="회차 종료일" value={toDate} onChangeText={value => { setToTouched(true); setToDate(value); }} editable={!blocked} style={styles.input} />
+    <DateTimeFields label="회차 시작일" mode="date" value={fromDate} onChange={value => { setFromTouched(true); setFromDate(value); }} disabled={blocked} />
+    <DateTimeFields label="회차 종료일" mode="date" value={toDate} onChange={value => { setToTouched(true); setToDate(value); }} disabled={blocked} />
     <ActionButton label="회차 생성" disabled={blocked || !validPeriod(fromDate, toDate)} onPress={materialize} /></>}
     </>}
     {!!guardMessage && <Text accessibilityRole="alert">{guardMessage}</Text>}

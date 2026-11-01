@@ -1,9 +1,11 @@
-import type { AgentResult, ChatContext, CoordinationTarget, FormDraft } from '@pikku/domain';
+import type { AgentResult, ChatContext, CoordinationTarget, DeviceContext, FormDraft, ReminderCandidate } from '@pikku/domain';
 import { AgentExecutionFailure, createPlanningAgent, type AgentDecision, type AgentMetrics, type ModelPort, type ReadTool } from './agent.ts';
 import { createPlanningTools } from './planning-tools.ts';
 import { PlanningError, type PlanningService } from './planning-service.ts';
 import type { TriggerEvent } from './scheduler.ts';
-import { compareInstants, timestamp } from './planning-schemas.ts';
+import { changeSet, compareInstants, timestamp } from './planning-schemas.ts';
+import type { Conversation } from './planning-store.ts';
+import { locationAvailable } from './device-context.ts';
 import { findFreeSlots, freeSlotsInput } from './free-slots.ts';
 import { z } from 'zod';
 
@@ -22,9 +24,10 @@ const unavailableCapabilities = (): AgentCapabilities => ({
     modes: ['walk', 'transit', 'car'], scheduledDeparture: 'unsupported' }, scheduler: { status: 'not_configured', access: 'app' },
 });
 type RunInput = { userId: string; requestId: string; conversationId: string | null; message: string; timezone: string;
-  history: { role: 'user' | 'assistant'; content: string; externalExpiresAt?: string }[]; coordinationTarget?: CoordinationTarget; entryContext?: ChatContext; triggerEvent?: TriggerEvent };
+  history: Conversation['turns']; coordinationTarget?: CoordinationTarget; entryContext?: ChatContext; triggerEvent?: TriggerEvent; deviceContext?: DeviceContext };
 type FreeSlotRead = { input: z.infer<typeof freeSlotsInput>; slots: { startsAt: string; endsAt: string }[] };
-type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; freeSlotReads: FreeSlotRead[]; entryContext?: ChatContext; phoneEvidence: boolean; phoneConfigured: boolean };
+type Prepared = { baseline: Awaited<ReturnType<PlanningService['capture']>>; decision: AgentDecision; inspected: boolean; failure: AgentResult | null; usedSnapshot: boolean; freeSlotReads: FreeSlotRead[]; entryContext?: ChatContext; phoneEvidence: boolean; phoneConfigured: boolean;
+  reminder?: { itemId: string; expectedRevision: number; travel?: NonNullable<ReminderCandidate['travel']> } };
 
 function explicitPhoneRequest(message: string): boolean {
   // shortcut: 보수적인 한국어 표현만 허용하며 구조화된 전화 요청 입력이 생기면 교체한다.
@@ -33,14 +36,66 @@ function explicitPhoneRequest(message: string): boolean {
     /(?:해\s*줘|해\s*주|해주세요|해줘|걸어\s*줘|걸어\s*주|걸어주세요|걸어봐|해봐|부탁|물어봐|확인해\s*줘|확인해\s*주|확인해주세요)/.test(message);
 }
 
+function explicitReminderRequest(message: string): boolean {
+  // shortcut: 일부 한국어 표현은 인식하지 못하며 구조화된 알림 요청이 생기면 교체한다.
+  return /알람|알림|알려/.test(message) && !/["'“”‘’「」『』]/.test(message) &&
+    !/(?:안|못)\s*(?:알람|알림|알려)|(?:알람|알림|알려)[\s\S]{0,60}(?:지\s*(?:마|말)|(?:안|못)\s*(?:해|오|울|알려|주)|않|끄|꺼|취소|없|아니|원치|싫|금지)|(?:알람|알림)(?:을|은|도|이|\s)*\s*(?:안|말고)/.test(message);
+}
+
+function subtractMinutes(value: string, minutes: number): string | null {
+  if (!timestamp.safeParse(value).success || !Number.isSafeInteger(minutes)) return null;
+  const shifted = new Date(Date.parse(value) - minutes * 60_000);
+  if (!Number.isFinite(shifted.getTime()) || shifted.getUTCFullYear() < 0 || shifted.getUTCFullYear() > 9999) return null;
+  const extra = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1]?.slice(3) ?? '';
+  return shifted.toISOString().replace(/Z$/, extra + 'Z');
+}
+
 // The graph is read-only. A caller must finish inside its own atomic result/ledger transaction.
 export class PlanningAgentRunner {
   constructor(private readonly planning: PlanningService, private readonly model: ModelPort,
     private readonly capabilities: (userId: string) => Promise<AgentCapabilities> = async () => unavailableCapabilities(),
-    private readonly toolFactory: (userId: string) => Promise<ReadTool[]> = async () => []) {}
+    private readonly toolFactory: (userId: string, deviceContext?: DeviceContext) => Promise<ReadTool[]> = async () => []) {}
   async prepare(input: RunInput, options: { signal?: AbortSignal; metrics?: AgentMetrics } = {}): Promise<Prepared> {
     options.signal?.throwIfAborted();
     const baseline = await this.planning.capture(input.userId, input.timezone, input.coordinationTarget);
+    options.signal?.throwIfAborted();
+    let previousProposals: { status: 'unavailable'; reason: string } | { status: 'available'; proposals: unknown[] } =
+      { status: 'unavailable', reason: 'no_reference' };
+    if (input.conversationId) {
+      const stored = await this.planning.store.read(input.userId);
+      const turn = stored.conversations.get(input.conversationId)?.turns.slice(-20).reverse()
+        .find(value => value.role === 'assistant' && value.proposalIds !== undefined);
+      if (turn) {
+        const ids = turn.proposalIds;
+        if (turn.externalExpiresAt !== undefined && (!timestamp.safeParse(turn.externalExpiresAt).success ||
+            compareInstants(turn.externalExpiresAt, baseline.snapshot.now) <= 0)) {
+          previousProposals = { status: 'unavailable', reason: 'external_data_expired' };
+        } else if (!Array.isArray(ids) || !ids.length || ids.length > 3 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string')) {
+          previousProposals = { status: 'unavailable', reason: 'invalid_reference' };
+        } else {
+          if (turn.externalExpiresAt && (!baseline.externalExpiresAt || compareInstants(turn.externalExpiresAt, baseline.externalExpiresAt) < 0)) {
+            baseline.externalExpiresAt = turn.externalExpiresAt;
+          }
+          const proposals = ids.map(id => stored.proposals.get(id));
+          if (proposals.some(proposal => !proposal || !changeSet.safeParse(proposal.changeSet).success)) {
+            previousProposals = { status: 'unavailable', reason: 'not_found' };
+          } else if (proposals.some(proposal => proposal!.expiresAt !== null &&
+              (!timestamp.safeParse(proposal!.expiresAt).success || compareInstants(proposal!.expiresAt, baseline.snapshot.now) <= 0))) {
+            previousProposals = { status: 'unavailable', reason: 'expired' };
+          } else {
+            const safe = proposals.map(proposal => ({ id: proposal!.id, mode: proposal!.mode, status: proposal!.status,
+              expiresAt: proposal!.expiresAt, changeSet: changeSet.parse(proposal!.changeSet),
+              beforeItems: proposal!.beforeItems.map(({ id, revision, kind, title, timeSlot, durationMinutes, deadline, flexibility,
+                involvement, completion, category, attendance, location, allDay, blocksTime, notes }) => ({ id, revision, kind, title,
+                timeSlot: timeSlot && { startsAt: timeSlot.startsAt, endsAt: timeSlot.endsAt, timezone: timeSlot.timezone }, durationMinutes,
+                deadline, flexibility, involvement, completion, category, attendance, location, allDay, blocksTime, notes })) }));
+            if (Buffer.byteLength(JSON.stringify({ status: 'available', proposals: safe }), 'utf8') > 16_000) {
+              previousProposals = { status: 'unavailable', reason: 'too_large' };
+            } else previousProposals = { status: 'available', proposals: safe };
+          }
+        }
+      }
+    }
     options.signal?.throwIfAborted();
     let selectedItem;
     if (input.entryContext?.kind === 'item') {
@@ -64,7 +119,7 @@ export class PlanningAgentRunner {
     });
     const capabilities = await this.capabilities(input.userId);
     options.signal?.throwIfAborted();
-    const externalTools = (await this.toolFactory(input.userId)).map(tool => ({ ...tool,
+    const externalTools = (await this.toolFactory(input.userId, input.deviceContext)).map(tool => ({ ...tool,
       run: async (value: unknown, userId: string) => {
         const result = await tool.run(value, userId);
         options.signal?.throwIfAborted();
@@ -97,7 +152,10 @@ export class PlanningAgentRunner {
     });
     const state = await agent.invoke({ userId: input.userId, message: input.message,
       context: { requestId: input.requestId, conversationId: input.conversationId, now: baseline.snapshot.now, timezone: input.timezone,
-        history, capabilities, ...(baseline.coordinationTarget ? { coordinationTarget: baseline.coordinationTarget } : {}),
+        history, previousProposals, memoryIndex: baseline.memoryIndex, ...(!input.triggerEvent && baseline.recentReviews?.length ? { recentReviews: baseline.recentReviews } : {}), capabilities, device: { location: locationAvailable(input.deviceContext?.currentLocation, baseline.snapshot.now) ? 'available' : 'not_shared',
+          ...(input.deviceContext?.travelMode ? { travelMode: input.deviceContext.travelMode } : {}),
+          notificationSupport: input.deviceContext?.notificationSupport ?? 'unknown' },
+        ...(baseline.coordinationTarget ? { coordinationTarget: baseline.coordinationTarget } : {}),
         ...(input.entryContext ? { entryContext: input.entryContext.kind === 'item' ? { kind: 'item', item: selectedItem } : input.entryContext } : {}),
         ...(input.triggerEvent ? { triggerEvent: { reason: input.triggerEvent.reason, scheduledFor: input.triggerEvent.scheduledFor,
           timezone: input.triggerEvent.timezone, targetDate: input.triggerEvent.targetDate, sourceRevision: input.triggerEvent.sourceRevision } } : {}) } });
@@ -114,9 +172,40 @@ export class PlanningAgentRunner {
     const item = phone && baseline.snapshot.items.find(value => value.id === phone.itemId && value.revision === phone.expectedRevision);
     const selected = phone && input.entryContext?.kind === 'item' && input.entryContext.id === phone.itemId && input.entryContext.expectedRevision === phone.expectedRevision;
     const phoneEvidence = Boolean(phone && !input.triggerEvent && explicitPhoneRequest(input.message) && item && (selected || observed));
+    const request = state.decision.kind === 'reminder_request' ? state.decision : null;
+    const reminderItem = request && baseline.snapshot.items.find(value => value.id === request.itemId && value.revision === request.expectedRevision && value.timeSlot);
+    const reminderObserved = request && state.observations.some(observation => observation.name === 'read_schedule' &&
+      z.object({ items: z.array(z.object({ id: z.string(), revision: z.number() })) }).safeParse(observation.result).data?.items
+        .some(value => value.id === request.itemId && value.revision === request.expectedRevision));
+    const reminderSelected = request && input.entryContext?.kind === 'item' && input.entryContext.id === request.itemId && input.entryContext.expectedRevision === request.expectedRevision;
+    let reminder: Prepared['reminder'];
+    if (request && reminderItem && !input.triggerEvent && input.entryContext?.kind !== 'form' &&
+        explicitReminderRequest(input.message) && (reminderSelected || reminderObserved)) {
+      if (request.basis === 'event_start') reminder = { itemId: request.itemId, expectedRevision: request.expectedRevision };
+      else if (request.destinationPlaceId && input.deviceContext?.travelMode && locationAvailable(input.deviceContext.currentLocation, baseline.snapshot.now)) {
+        const gps = state.observations.filter(observation => observation.name === 'get_current_location').map(observation =>
+          z.object({ ok: z.literal(true), expiresAt: timestamp, data: z.object({ placeId: z.string().min(1) }) }).safeParse(observation.result))
+          .filter(result => result.success).map(result => result.data.data.placeId);
+        const travel = state.observations.filter(observation => observation.name === 'estimate_travel').map(observation => {
+          const args = z.object({ originPlaceId: z.string(), destinationPlaceId: z.string(), mode: z.enum(['walk', 'transit', 'car']) }).safeParse(observation.input);
+          const result = z.object({ ok: z.literal(true), provider: z.literal('kakao'), fetchedAt: timestamp, expiresAt: timestamp,
+            data: z.object({ originPlaceId: z.string(), destinationPlaceId: z.string(), mode: z.enum(['walk', 'transit', 'car']),
+              durationMinutes: z.number().int().nonnegative().safe(), basis: z.literal('current_time'),
+              destinationName: z.string().max(200).refine(value => !!value.trim()),
+              destinationAddress: z.string().max(300).refine(value => !!value.trim()) }) }).safeParse(observation.result);
+          return args.success && result.success && gps.includes(args.data.originPlaceId) &&
+            args.data.originPlaceId === result.data.data.originPlaceId && args.data.destinationPlaceId === request.destinationPlaceId &&
+            args.data.destinationPlaceId === result.data.data.destinationPlaceId && args.data.mode === input.deviceContext?.travelMode &&
+            args.data.mode === result.data.data.mode ? result.data : null;
+        }).filter(value => value !== null).at(-1);
+        if (travel) reminder = { itemId: request.itemId, expectedRevision: request.expectedRevision,
+          travel: { mode: travel.data.mode, durationMinutes: travel.data.durationMinutes, provider: 'kakao', basis: 'current_time',
+            destinationName: travel.data.destinationName, destinationAddress: travel.data.destinationAddress } };
+      }
+    }
     return { baseline, decision: state.decision, inspected: validation.inspected, failure: validation.failure,
-      entryContext: input.entryContext, freeSlotReads, phoneEvidence, phoneConfigured: capabilities.phone.status === 'configured',
-      usedSnapshot: input.entryContext?.kind === 'item' || state.observations.some(observation => ['read_schedule', 'read_memory', 'validate_changes', 'find_free_slots'].includes(observation.name)) };
+      entryContext: input.entryContext, freeSlotReads, phoneEvidence, phoneConfigured: capabilities.phone.status === 'configured', reminder,
+      usedSnapshot: !!request || input.entryContext?.kind === 'item' || state.observations.some(observation => ['read_schedule', 'read_memory', 'validate_changes', 'find_free_slots'].includes(observation.name)) };
   }
   async finish(prepared: Prepared): Promise<AgentResult | { kind: 'reply'; message: string; draft: FormDraft }> {
     const decision = prepared.decision;
@@ -148,8 +237,31 @@ export class PlanningAgentRunner {
       }
       return { kind: 'reply', message: decision.text, draft: decision.draft };
     }
-    if (decision.kind === 'answer') return { kind: 'reply', message: decision.text };
-    if (decision.kind === 'question') return { kind: 'question', message: decision.text, missingFields: decision.missingFields };
+    if (decision.kind === 'answer') return { kind: 'reply', message: decision.text, ...(decision.suggestions ? { suggestions: decision.suggestions } : {}) };
+    if (decision.kind === 'question') return { kind: 'question', message: decision.text, missingFields: decision.missingFields,
+      ...(decision.suggestions ? { suggestions: decision.suggestions } : {}) };
+    if (decision.kind === 'reminder_request') {
+      const evidence = prepared.reminder;
+      const item = evidence && current?.items.find(value => value.id === evidence.itemId && value.revision === evidence.expectedRevision);
+      if (!evidence || !item?.timeSlot || !current || (decision.basis === 'departure' && !evidence.travel)) {
+        return { kind: 'failure', message: '알림할 일정과 이동 정보를 확인해 주세요.', code: 'invalid_request', retryable: false };
+      }
+      const departureAt = evidence.travel ? subtractMinutes(item.timeSlot.startsAt, evidence.travel.durationMinutes) : undefined;
+      const reminderAt = subtractMinutes(departureAt ?? item.timeSlot.startsAt, decision.minutesBefore);
+      const expiresAt = new Date(Date.parse(current.now) + 300_000).toISOString();
+      const expiry = prepared.baseline.externalExpiresAt && compareInstants(prepared.baseline.externalExpiresAt, expiresAt) < 0
+        ? prepared.baseline.externalExpiresAt : expiresAt;
+      if (departureAt === null || !reminderAt || compareInstants(reminderAt, current.now) <= 0 || compareInstants(expiry, current.now) <= 0) {
+        return { kind: 'failure', message: '알림 시각이 지났거나 확인한 정보가 만료되었습니다.', code: 'invalid_request', retryable: false };
+      }
+      return { kind: 'reminder_request', message: '알림 내용을 확인해 주세요.', reminder: {
+        itemId: item.id, expectedRevision: item.revision, title: item.title, appointmentAt: item.timeSlot.startsAt,
+        appointmentEndsAt: item.timeSlot.endsAt, timezone: item.timeSlot.timezone, basis: decision.basis,
+        minutesBefore: decision.minutesBefore, reminderAt, expiresAt: expiry,
+        ...(item.location ? { appointmentLocation: item.location } : {}),
+        ...(departureAt && evidence.travel ? { departureAt, travel: evidence.travel } : {}),
+      } };
+    }
     if (decision.kind === 'phone_request') {
       if (!prepared.phoneEvidence) return { kind: 'failure', message: '전화할 일정과 요청을 확인해 주세요.', code: 'invalid_request', retryable: false };
       return { kind: 'phone_request', message: prepared.phoneConfigured ? '전화 요청을 확인해 주세요. 승인 전에는 전화하지 않습니다.' : '전화 연결이 설정되지 않았습니다. 연결과 요청을 확인해 주세요.',

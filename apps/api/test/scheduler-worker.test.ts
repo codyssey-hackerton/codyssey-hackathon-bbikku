@@ -210,7 +210,7 @@ test('redelivery invokes the real review runtime once with an in-memory ledger',
   let modelCalls = 0;
   const store = new MemoryPlanningStore();
   const service = new PlanningService(store, () => now);
-  const app = buildApp({ store, clock: () => now, model: { async decide() {
+  const app = buildApp({ store, clock: () => now, sessions: { async resolve(token) { return token === 'user-1' ? { userId: token } : null; } }, model: { async decide() {
     modelCalls++; return { kind: 'answer', text: '일정을 확인했습니다.' };
   } } });
   const boss = new FakeBoss();
@@ -224,6 +224,10 @@ test('redelivery invokes the real review runtime once with an in-memory ledger',
     assert.deepEqual(await boss.deliver(event), { status: 'completed' });
     assert.equal(modelCalls, 1);
     assert.equal((await store.read('user-1')).reviewLedger.size, 1);
+    const digest = await app.inject({ method: 'GET', url: '/v1/review-digests', headers: { authorization: 'Bearer user-1' } });
+    assert.equal(digest.statusCode, 200);
+    assert.equal(digest.json().data.digests[0].message, '일정을 확인했습니다.');
+    assert.equal(digest.json().data.digests[0].reason, 'morning_review');
   } finally { await scheduler.stop(); await app.close(); }
 });
 

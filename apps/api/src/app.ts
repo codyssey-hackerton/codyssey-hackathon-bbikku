@@ -8,6 +8,7 @@ import { AgentExecutionFailure, type AgentMetrics, type ModelPort } from './agen
 import { PlanningAgentRunner } from './agent-runner.ts';
 import { chatContext } from './chat-context.ts';
 import { createExternalTools } from './external-tools.ts';
+import { deviceContext } from './device-context.ts';
 import { createExternalAccountTools } from './external-account-tools.ts';
 import type { SessionResolver } from './auth.ts';
 import type { MemberAuth } from './member-auth.ts';
@@ -22,6 +23,7 @@ import { MODEL_ID, REASONING_EFFORT } from './model.ts';
 import { PlanningError, PlanningService } from './planning-service.ts';
 import { createPreparationProposal } from './preparation-service.ts';
 import { getCalendarConnection } from './google-calendar.ts';
+import { listReviewDigests } from './review-digests.ts';
 import { CalendarImportService } from './calendar-import.ts';
 import type { createKakaoPlaces } from './kakao-places.ts';
 import type { createKakaoTravel } from './kakao-travel.ts';
@@ -76,6 +78,7 @@ const chatBody = z.object({
   }),
   coordinationTarget: z.object({ id: nonblank, expectedRevision: z.number().int().min(1) }).strict().optional(),
   entryContext: chatContext.optional(),
+  deviceContext: deviceContext.optional(),
 }).strict().refine(value => !(value.coordinationTarget && value.entryContext));
 const reviewTime = z.object({ enabled: z.boolean(), localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict()
   .refine(value => !value.enabled || value.localTime !== null);
@@ -92,7 +95,8 @@ const travelPoint = z.object({ longitude: z.number().finite().min(-180).max(180)
 const travelBody = z.object({ origin: travelPoint, destination: travelPoint, mode: z.string().min(1).max(30), departureAt: z.string().max(100).optional() }).strict();
 const weatherBody = z.object({ destination: travelPoint, appointmentAt: timestamp }).strict();
 const subwayBody = z.object({ stationName: z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f/\\?#]/.test(value) && value !== '.' && value !== '..') }).strict();
-const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100), expectedScheduleRevision: z.number().int().min(0) }).strict();
+const calendarImportBody = calendarQuery.extend({ requestId: identifier, selectedEvents: z.array(z.object({ id: identifier, etag: identifier }).strict()).min(1).max(100),
+  expectedScheduleRevision: z.number().int().min(0), expectedAccountRef: identifier.optional(), skipExisting: z.boolean().optional() }).strict();
 const phoneNumber = z.string().refine(validPhoneNumber);
 const phoneCallBody = z.object({ requestId: identifier, contactRevision: z.number().int().min(1), expectedSenderNumber: phoneNumber }).strict();
 
@@ -181,12 +185,13 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
       access: 'app' as const },
     };
   };
-  const runner = options.model ? new PlanningAgentRunner(planning, options.model, agentCapabilities, async userId => {
+  const runner = options.model ? new PlanningAgentRunner(planning, options.model, agentCapabilities, async (userId, device) => {
     const google = await googleFor(userId);
     return [
       ...createExternalTools(userId, { places: options.placesConfigured ? options.places : undefined,
         travel: options.travelConfigured ? options.travel : undefined, weather: options.weather,
-        subway: options.subwayConfigured ? options.subway : undefined, clock: options.clock }),
+        subway: options.subwayConfigured ? options.subway : undefined, clock: options.clock,
+        currentLocation: device?.currentLocation, travelMode: device?.travelMode }),
       ...createExternalAccountTools(userId, { calendarConnection: google.calendarConnection,
         gmailReplyConnection: await gmailRepliesFor(userId), store, clock: options.clock }),
     ];
@@ -247,8 +252,8 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
           let prepared;
           try {
             const message = event.reason === 'evening_plan'
-              ? `${event.targetDate} 일정을 검토하고 필요한 경우 제안해 주세요.`
-              : `${event.targetDate} 오늘의 일정을 검토하고 필요한 경우 제안해 주세요.`;
+              ? `오늘의 일정과 사용자가 기록한 수행 상태를 조회하고, 하루가 어땠는지 짧게 물어봐 주세요. 미기록을 미완료로 단정하지 마세요. 이어서 내일 ${event.targetDate} 일정을 함께 확인할지 물어보거나 필요한 대안을 추천해 주세요. 승인 전에는 변경하지 마세요.`
+              : `${event.targetDate} 오늘의 일정을 조회해 중요한 일정과 준비할 일을 간략히 브리핑해 주세요. 충돌이 있으면 가능한 구체적인 대안을 추천하되 승인 전에는 변경하지 마세요.`;
             prepared = await runner.prepare({ userId: event.userId, requestId: event.id, conversationId: null, message,
               timezone: event.timezone, history: [], triggerEvent: event });
             modelStatus = 'available';
@@ -264,7 +269,8 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
             const agentResult = await runner.finish(prepared);
             const retryable = agentResult.kind === 'failure' && ['stale_proposal', 'stale_snapshot', 'external_data_expired'].includes(agentResult.code);
             const outcome = retryable ? { status: 'failed' as const, result: agentResult } : { status: 'completed' as const, result: agentResult };
-            await store.transaction(event.userId, state => { state.reviewLedger.set(event.idempotencyKey, { eventId: event.id, ...outcome, at: now().toISOString() }); });
+            await store.transaction(event.userId, state => { state.reviewLedger.set(event.idempotencyKey, { eventId: event.id, ...outcome,
+              reason: event.reason, timezone: event.timezone, targetDate: event.targetDate, scheduledFor: event.scheduledFor, at: now().toISOString() }); });
             return { status: retryable ? 503 : 200, body: outcome, ...(retryable ? { retryableWithoutEffects: true as const } : {}) };
           }));
         },
@@ -376,7 +382,12 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
   };
   app.get('/v1/calendar-connection', async request => {
     const connection = (await googleFor(authenticated.get(request)!)).calendarConnection;
-    return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', accountLabel: connection?.accountLabel ?? null } };
+    return { requestId: request.id, data: { status: connection ? 'available' : 'not_configured', accountLabel: connection?.accountLabel ?? null,
+      accountRef: connection?.accountRef ?? null } };
+  });
+  app.get('/v1/review-digests', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    return { requestId: request.id, data: listReviewDigests(await store.read(authenticated.get(request)!), now()) };
   });
   app.get('/v1/calendar/calendars', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listCalendars() }));
   app.get('/v1/calendar/events', async request => ({ requestId: request.id, data: await (await calendarFor(authenticated.get(request)!)).listEvents(parse(calendarQuery, request.query)) }));
@@ -425,12 +436,24 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
       : await options.googleOAuth?.callback(query.data.state, query.data.code ?? '');
     return reply.code(confirmationCode ? 200 : 400).header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer')
       .header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'").type('text/plain; charset=utf-8')
-      .send(confirmationCode ? `앱으로 돌아가 아래 연결 확인 코드를 입력해 주세요.\n\n${confirmationCode}` : 'Google 연결을 완료하지 못했습니다. 앱에서 다시 시도해 주세요.');
+      .send(confirmationCode ? `Google 인증을 확인했습니다. PIKKU 앱으로 돌아가면 자동으로 연결됩니다.\n\n자동 확인이 되지 않을 때만 앱의 수동 확인 메뉴에 아래 코드를 입력하세요. 다른 사람에게 전달하지 마세요.\n\n${confirmationCode}` : 'Google 연결을 완료하지 못했습니다. 앱에서 다시 시도해 주세요.');
   });
   app.post('/v1/google/oauth/complete', async (request, reply) => {
-    const body = parse(z.object({ completionSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/), confirmationCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict(), request.body);
-    if (!await options.googleOAuth?.complete(authenticated.get(request)!, body.completionSecret, body.confirmationCode)) throw invalidRequest();
+    const body = parse(z.object({ completionSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      confirmationCode: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), cancel: z.literal(true).optional() }).strict()
+      .refine(value => !(value.cancel && value.confirmationCode)), request.body);
     reply.header('Cache-Control', 'no-store');
+    const userId = authenticated.get(request)!;
+    if (body.cancel) {
+      if (!await options.googleOAuth?.cancel(userId, body.completionSecret)) throw invalidRequest();
+      return { requestId: request.id, data: { status: 'cancelled' } };
+    }
+    if (!body.confirmationCode) {
+      const result = await store.atomic(userId, async () => options.googleOAuth?.poll(userId, body.completionSecret));
+      if (!result) throw invalidRequest();
+      return { requestId: request.id, data: result };
+    }
+    if (!await store.atomic(userId, async () => options.googleOAuth?.complete(userId, body.completionSecret, body.confirmationCode!))) throw invalidRequest();
     return { requestId: request.id, data: { status: 'connected' } };
   });
   app.get('/v1/places/search', async request => {
@@ -541,9 +564,13 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
   app.post('/v1/calendar/import', async (request, reply) => {
     const result = await runIdempotent(request, 'calendar_import', async (_requestBody, control) => {
       const body = parse(calendarImportBody, request.body); const userId = authenticated.get(request)!;
-      const service = new CalendarImportService(store, await calendarFor(userId));
+      const connection = await calendarFor(userId);
+      const service = new CalendarImportService(store, connection);
       const prepared = await service.prepareSelected({ ...body, userId });
-      return control.finalize(async () => ({ status: 200, body: { requestId: body.requestId, data: await service.commitPrepared(prepared) } }));
+      return control.finalize(() => store.atomic(userId, async () => {
+        if ((await calendarFor(userId)).accountRef !== connection.accountRef) throw new ApiError(409, 'conflict', 'Google 캘린더 계정이 변경되었습니다. 다시 확인해 주세요.');
+        return { status: 200, body: { requestId: body.requestId, data: await service.commitPrepared(prepared) } };
+      }));
     });
     return reply.code(result.status).send(result.body);
   });
@@ -601,7 +628,7 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
         try {
           if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
           prepared = await untilAborted(runner.prepare({ userId, message: body.message, requestId: body.requestId, conversationId,
-            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext },
+            timezone: body.timezone, history: reserved.turns, coordinationTarget: body.coordinationTarget, entryContext: body.entryContext, deviceContext: body.deviceContext },
           { signal: controller.signal, metrics: agentMetrics }), controller.signal);
           if (controller.signal.aborted) throw new AgentExecutionFailure('AGENT_DEADLINE');
           modelStatus = 'available';
@@ -624,6 +651,7 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
           await store.transaction(userId, state => {
             const current = state.conversations.get(conversationId)!;
             current.turns = [...current.turns, { role: 'user' as const, content: body.message }, { role: 'assistant' as const, content: agentResult.message,
+              ...(agentResult.kind === 'proposal' ? { proposalIds: agentResult.proposalIds } : {}),
               ...(prepared.baseline.externalExpiresAt ? { externalExpiresAt: prepared.baseline.externalExpiresAt } : {}) }].slice(-20);
             delete current.lock;
           });

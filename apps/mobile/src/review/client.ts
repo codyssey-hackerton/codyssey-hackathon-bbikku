@@ -2,6 +2,7 @@ import type { ReviewSchedule, UpdateReviewScheduleInput } from '@pikku/domain';
 import { ApiError } from '../api/http';
 import type { ApiClient } from '../api/http';
 import type { Mutation } from '../api/useMutation';
+import { parseOffsetDateTime } from '@pikku/domain';
 
 export type ReviewInput = Omit<UpdateReviewScheduleInput, 'requestId'>;
 export type CapabilityStatus = 'not_configured' | 'available' | 'degraded';
@@ -10,6 +11,7 @@ export type ReviewCapabilities = {
   model: CapabilityStatus;
   storage: { mode: 'memory' | 'postgres'; durable: boolean };
 };
+export type ReviewDigest = { id: string; reason: 'morning_review' | 'evening_plan'; createdAt: string; message: string; proposalIds: string[] };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -45,6 +47,25 @@ function isStatus(value: unknown): value is CapabilityStatus {
 
 export function createReviewClient(api: ApiClient) {
   return {
+    async digests(): Promise<ReviewDigest[]> {
+      const data = await api.get<unknown>('/v1/review-digests');
+      if (!isRecord(data) || !Array.isArray(data.digests) || data.digests.length > 10) {
+        throw new ApiError('invalid_response', '브리핑과 회고를 확인할 수 없습니다.');
+      }
+      const valid = (value: unknown): value is ReviewDigest => isRecord(value) &&
+        typeof value.id === 'string' && !!value.id.trim() && value.id.length <= 200 &&
+        (value.reason === 'morning_review' || value.reason === 'evening_plan') &&
+        typeof value.createdAt === 'string' && value.createdAt.length <= 100 &&
+        parseOffsetDateTime(value.createdAt.replace(/(\.\d{3})\d+(?=Z|[+-]\d{2}:\d{2}$)/, '$1')) !== null &&
+        typeof value.message === 'string' && !!value.message.trim() && value.message.length <= 8000 &&
+        Array.isArray(value.proposalIds) && value.proposalIds.length <= 10 &&
+        value.proposalIds.every((id: unknown) => typeof id === 'string' && !!id.trim() && id.length <= 200) &&
+        new Set(value.proposalIds).size === value.proposalIds.length;
+      if (!data.digests.every(valid) || new Set(data.digests.map(value => value.id)).size !== data.digests.length) {
+        throw new ApiError('invalid_response', '브리핑과 회고를 확인할 수 없습니다.');
+      }
+      return data.digests;
+    },
     async get(): Promise<ReviewSchedule> {
       return scheduleFrom(await api.get<unknown>('/v1/review-schedule'));
     },

@@ -6,12 +6,20 @@ export const phoneRequestDecision = z.strictObject({ kind: z.literal('phone_requ
   itemId: z.string().trim().min(1).max(200), expectedRevision: z.number().int().positive().safe() });
 export const callReviewDecision = z.strictObject({ kind: z.literal('call_review'), text: z.string().trim().min(1).max(2000),
   location: z.string().trim().min(1).max(200).nullable() });
+export const reminderRequestDecision = z.strictObject({ kind: z.literal('reminder_request'), text: z.string().trim().min(1).max(2000),
+  itemId: z.string().trim().min(1).max(200), expectedRevision: z.number().int().positive().safe(),
+  minutesBefore: z.number().int().min(0).max(1440), basis: z.enum(['event_start', 'departure']),
+  destinationPlaceId: z.string().trim().min(1).max(100).optional() });
+export const chatSuggestions = z.array(z.strictObject({
+  label: z.string().max(60).refine(value => !!value.trim()),
+  message: z.string().max(500).refine(value => !!value.trim()),
+})).min(1).max(2);
 const Decision = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('answer'), text: z.string().min(1) }),
-  z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]) }),
+  z.object({ kind: z.literal('answer'), text: z.string().min(1), suggestions: chatSuggestions.optional() }),
+  z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]), suggestions: chatSuggestions.optional() }),
   z.object({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }).strict(),
   z.object({ kind: z.literal('proposal'), reason: z.string(), changeSet: z.object({ changes: z.array(z.unknown()), timingConstraints: z.array(z.unknown()).optional() }), evidenceRefs: z.array(z.string()) }),
-  phoneRequestDecision, callReviewDecision,
+  phoneRequestDecision, callReviewDecision, reminderRequestDecision,
   z.object({ kind: z.literal('tool_call'), name: z.string(), input: z.unknown(), providerTrace: z.unknown().optional() }),
 ]);
 export type AgentDecision = z.infer<typeof Decision>;

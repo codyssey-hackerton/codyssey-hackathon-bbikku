@@ -8,6 +8,7 @@ import type { TimeSlot } from '@pikku/domain';
 import type { ApiClient } from '../api/http';
 import { useMutation } from '../api/useMutation';
 import { operationGuard } from '../api/operationGuard';
+import { addDays, civilDate, civilOrdinal } from '../schedule/dates';
 import ContactPanel from '../contacts/ContactPanel';
 import { canAccept, createProposalClient, type DecisionInput, type DecisionResult, type Proposal, type ProposalClient, type ProposalPage, type ScheduleFields } from './client';
 
@@ -195,10 +196,31 @@ const kindText = (item: ScheduleFields) => item.kind === 'event' ? '일정' : '�
 const durationText = (value: number | null) => value === null ? '미설정' : `${value}분`;
 const deadlineText = (item: ScheduleFields) => item.deadline === null ? '미설정' : instantText(item.deadline);
 
+function allDayText(slot: TimeSlot | null): string | null {
+  if (!slot) return null;
+  try {
+    const start = civilDate(new Date(slot.startsAt), slot.timezone);
+    const end = addDays(civilDate(new Date(slot.endsAt), slot.timezone), -1);
+    if (civilOrdinal(end) < civilOrdinal(start)) return null;
+    const date = (value: typeof start) => `${value.year}년 ${value.month}월 ${value.day}일`;
+    return `종일 · ${date(start)}${civilOrdinal(start) === civilOrdinal(end) ? '' : ` ~ ${date(end)}`}`;
+  } catch { return null; }
+}
+
+function effectiveFields(before: ScheduleFields | undefined, after: ScheduleFields | undefined): ScheduleFields | undefined {
+  if (!before || !after) return after;
+  return { ...after, category: after.category === undefined ? before.category : after.category,
+    attendance: after.attendance === undefined ? before.attendance : after.attendance,
+    location: after.location === undefined ? before.location : after.location,
+    allDay: after.allDay === undefined ? before.allDay : after.allDay,
+    blocksTime: after.blocksTime === undefined ? before.blocksTime : after.blocksTime,
+    notes: after.notes === undefined ? before.notes : after.notes };
+}
+
 function Fields({ item }: { item: ScheduleFields }) {
   return <View style={styles.fieldGroup}>
     <Text style={styles.cardTitle}>{item.title || '(빈 제목)'}</Text>
-    <Text style={styles.text}>{slotText(item.timeSlot)}</Text>
+    <Text style={styles.text}>{item.allDay ? allDayText(item.timeSlot) ?? '종일 · 날짜 확인 필요' : slotText(item.timeSlot)}</Text>
   </View>;
 }
 
@@ -211,6 +233,17 @@ function FieldDetails({ item }: { item: ScheduleFields }) {
 }
 
 function ChangedDetails({ before, after }: { before?: ScheduleFields; after?: ScheduleFields }) {
+  const [notesOpen, setNotesOpen] = useState(false);
+  const oldNotes = before?.notes ?? null;
+  const newNotes = after ? (after.notes === undefined && before ? oldNotes : after.notes ?? null) : null;
+  const notesChanged = oldNotes !== newNotes;
+  const notes = notesChanged && <View style={styles.fieldGroup}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: notesOpen }} onPress={() => setNotesOpen(value => !value)}>
+      <Text style={styles.text}>메모 변경 ({oldNotes === null ? '추가' : newNotes === null ? '삭제' : '수정'}) · {notesOpen ? '접기' : '펼치기'}</Text>
+    </Pressable>
+    {notesOpen && <><Text style={styles.muted}>변경 전 메모</Text><Text style={styles.text}>{oldNotes === null ? '없음' : oldNotes || '(빈 메모)'}</Text>
+      <Text style={styles.muted}>변경 후 메모</Text><Text style={styles.text}>{newNotes === null ? '없음' : newNotes || '(빈 메모)'}</Text></>}
+  </View>;
   if (!before || !after) {
     const item = (after ?? before)!;
     const details = [
@@ -221,10 +254,11 @@ function ChangedDetails({ before, after }: { before?: ScheduleFields; after?: Sc
       item.deadline !== null && `마감 ${deadlineText(item)}`,
       item.category != null && `분류 ${categoryText(item.category)}`,
       item.location != null && `장소 ${item.location}`,
+      item.blocksTime === false && '시간 차단 안 함',
       (item.completion === 'completed' || item.completion === 'incomplete') && `완료 ${completionText[item.completion]}`,
       item.kind === 'event' && (item.attendance === 'attended' || item.attendance === 'absent') && `참석 ${attendanceText(item.attendance)}`,
     ].filter(Boolean);
-    return <Text style={styles.muted}>{details.join(' · ')}</Text>;
+    return <View><Text style={styles.muted}>{details.join(' · ')}</Text>{notes}</View>;
   }
   const effectiveCategory = after.category === undefined ? before.category : after.category;
   const effectiveAttendance = after.attendance === undefined ? before.attendance : after.attendance;
@@ -236,10 +270,12 @@ function ChangedDetails({ before, after }: { before?: ScheduleFields; after?: Sc
     before.involvement !== after.involvement && `참여 범위: ${before.involvement === 'personal' ? '개인' : '공동'} → ${after.involvement === 'personal' ? '개인' : '공동'}`,
     (before.category ?? null) !== (effectiveCategory ?? null) && `분류: ${categoryText(before.category)} → ${categoryText(effectiveCategory)}`,
     after.location !== undefined && (before.location ?? null) !== (after.location ?? null) && `장소: ${before.location ?? '미설정'} → ${after.location ?? '미설정'}`,
+    after.allDay !== undefined && (before.allDay ?? false) !== after.allDay && `종일: ${before.allDay ? '종일' : '시간 지정'} → ${after.allDay ? '종일' : '시간 지정'}`,
+    after.blocksTime !== undefined && (before.blocksTime ?? true) !== after.blocksTime && `시간 차단: ${before.blocksTime === false ? '안 함' : '함'} → ${after.blocksTime ? '함' : '안 함'}`,
     before.completion !== after.completion && `완료 상태: ${completionText[before.completion]} → ${completionText[after.completion]}`,
     (before.attendance ?? null) !== (effectiveAttendance ?? null) && `참석 상태: ${attendanceText(before.attendance)} → ${attendanceText(effectiveAttendance)}`,
   ].filter((line): line is string => !!line);
-  return changes.length ? <View style={styles.fieldGroup}>{changes.map((line, index) => <Text key={index} style={styles.text}>{line}</Text>)}</View> : null;
+  return changes.length || notesChanged ? <View style={styles.fieldGroup}>{changes.map((line, index) => <Text key={index} style={styles.text}>{line}</Text>)}{notes}</View> : null;
 }
 
 function conflictText(reason: string): string {
@@ -318,8 +354,7 @@ function ProposalContent({ proposal }: { proposal: Proposal }) {
     {proposal.changeSet.changes.map((change, index) => {
       const before = change.operation === 'create' ? undefined : proposal.beforeItems.find((item) => item.id === change.targetId);
       const after = change.operation === 'delete' ? undefined : change.after;
-      const effectiveAfter = after && before ? { ...after, category: after.category === undefined ? before.category : after.category,
-        attendance: after.attendance === undefined ? before.attendance : after.attendance } : after;
+      const effectiveAfter = effectiveFields(before, after);
       return <View style={styles.card} key={change.changeId}>
         <Text style={styles.cardTitle}>{index + 1}. {change.operation === 'create' ? '일정 추가' : change.operation === 'update' ? '일정 변경' : '일정 삭제'}</Text>
         {change.operation === 'create' ? effectiveAfter && <Fields item={effectiveAfter} /> : <>
@@ -344,9 +379,9 @@ function compactReviewable(proposal: Proposal): boolean {
   return proposal.changeSet.changes.length > 0 && proposal.changeSet.changes.every(change => {
     const before = change.operation === 'create' ? undefined : proposal.beforeItems.find(item => item.id === change.targetId);
     if (change.operation !== 'create' && !before) return false;
-    const after = change.operation === 'delete' ? undefined : change.after;
+    const after = effectiveFields(before, change.operation === 'delete' ? undefined : change.after);
     return [before, after].every(item => !item || ((!item.timeSlot || !!localTime(item.timeSlot.startsAt) && !!localTime(item.timeSlot.endsAt)) &&
-      (item.deadline === null || !!localTime(item.deadline))));
+      (!item.allDay || !!allDayText(item.timeSlot)) && (item.deadline === null || !!localTime(item.deadline))));
   });
 }
 
@@ -360,7 +395,7 @@ function CompactChanges({ proposal }: { proposal: Proposal }) {
   return <>
     {proposal.changeSet.changes.map(change => {
       const before = change.operation === 'create' ? undefined : proposal.beforeItems.find(item => item.id === change.targetId);
-      const after = change.operation === 'delete' ? undefined : change.after;
+      const after = effectiveFields(before, change.operation === 'delete' ? undefined : change.after);
       return <View key={change.changeId} style={styles.fieldGroup}>
         <Text style={styles.muted}>{change.operation === 'create' ? '일정 추가' : change.operation === 'update' ? '일정 변경' : '일정 삭제'}</Text>
         {change.operation !== 'create' && <>{before ? <><Text style={styles.muted}>변경 전</Text><Fields item={before} /></> : <Text>기존 일정을 확인할 수 없습니다.</Text>}</>}
@@ -387,7 +422,6 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
   inline?: boolean; onLockChange?: (locked: boolean) => void;
 }) {
   const [contactProposal, setContactProposal] = useState<Proposal | null>(null);
-  const [showReason, setShowReason] = useState(false);
   const [guardMessage, setGuardMessage] = useState(false);
   const mounted = useRef(false);
   useLayoutEffect(() => {
@@ -450,7 +484,7 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
     {shown && <>
       {shown.changeSet.changes.length !== 1 && <Text style={styles.cardTitle}>{proposalTitle(shown)}</Text>}
       <CompactChanges proposal={shown} />
-      <Text style={styles.muted}>{statusText[shown.status]}</Text>
+      {shown.status !== 'pending' && <Text style={styles.muted}>{statusText[shown.status]}</Text>}
       {!compactReviewable(shown) && <Text accessibilityRole="alert" style={styles.notice}>변경 내용을 확인할 수 없어 수락할 수 없습니다.</Text>}
       {!canAccept(shown) && shown.status === 'pending' && <View accessibilityRole="alert" style={styles.notice}>
         <Text>확인이 필요한 내용이 있어 수락할 수 없습니다.</Text>
@@ -459,8 +493,6 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
         {shown.validation.protectedTargets.length > 0 && <Text>보호된 일정: {shown.validation.protectedTargets.map(id => shown.beforeItems.find(item => item.id === id)?.title || '확인 필요').join(', ')}</Text>}
       </View>}
       {shown.mode === 'coordination' && shown.status === 'pending' && <Text style={styles.muted}>수락해도 원 일정은 유지되며 연락은 별도로 진행합니다.</Text>}
-      {shown.reason.trim() !== '' && <><Button label={showReason ? '이유 접기' : '이유 보기'} onPress={() => setShowReason(!showReason)} secondary />
-        {showReason && <Text style={styles.text}>{Array.from(shown.reason).slice(0, 180).join('')}{Array.from(shown.reason).length > 180 ? '…' : ''}</Text>}</>}
     </>}
     {state.status === 'success' && <Text accessibilityLiveRegion="polite" style={styles.notice}>{state.result.outcome === 'applied' ? '일정이 반영되었습니다.' :
       state.result.outcome === 'rejected' ? '제안을 거절했습니다.' : '원 일정은 유지됩니다. 연락 준비와 발송은 별도로 진행합니다.'}</Text>}
@@ -472,10 +504,9 @@ function ProposalDetail({ api, client, id, refreshVersion, onScheduleChanged, on
       {!uncertain && <Button label="제안 다시 조회" onPress={reload} secondary />}</>}
     {shown && state.status === 'idle' && <View style={styles.actions}>
       {shown.status === 'pending' && <Button label="수락" onPress={() => decide(shown, 'accept')} disabled={!canAccept(shown) || !compactReviewable(shown)} />}
-      <Button label="수정" onPress={() => { if (operationGuard.hasUnresolved()) setGuardMessage(true); else onRequestRevision(shown); }} secondary />
       {shown.status === 'pending' && <Button label="거절" onPress={() => decide(shown, 'reject')} secondary />}
     </View>}
-    {shown && !locked && shown.mode === 'coordination' && ['pending', 'awaiting_contact', 'applied', 'stale'].includes(shown.status) &&
+    {shown && !locked && shown.mode === 'coordination' && ['awaiting_contact', 'applied', 'stale'].includes(shown.status) &&
       <Button label={shown.status === 'applied' || shown.status === 'stale' ? '연락 내역' : '연락 준비'} onPress={() => { onLockChange?.(true); setContactProposal(shown); }} />}
   </View>;
   return <ScrollView contentContainerStyle={styles.container}>

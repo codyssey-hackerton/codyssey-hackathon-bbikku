@@ -52,7 +52,7 @@ export function ChatScheduleSummary({ client, selectedDate, timezone, refreshVer
           <View style={styles.accent} />
           <View style={styles.itemContent}>
             <Text style={styles.itemTitle}>{item.title}</Text>
-            {item.timeSlot && <Text style={styles.itemTime}>{formatTime(item.timeSlot.startsAt, timezone)} – {formatTime(item.timeSlot.endsAt, timezone)}</Text>}
+            {item.timeSlot && <Text style={styles.itemTime}>{item.allDay ? '종일' : `${formatTime(item.timeSlot.startsAt, timezone)} – ${formatTime(item.timeSlot.endsAt, timezone)}`}</Text>}
           </View>
         </View>))}
       {items.length > 3 && <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(value => !value)} style={styles.retry}>

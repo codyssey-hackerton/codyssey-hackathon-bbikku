@@ -83,7 +83,7 @@ test('thanks uses one model turn without a tool; retries replay the first respon
     assert.equal(input.message, '고마워');
     assert.deepEqual(input.observations, []);
     assert.deepEqual(input.tools.map(tool => tool.name), ['read_schedule', 'read_memory', 'calculate_timing', 'find_free_slots', 'validate_changes',
-      'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
+      'get_current_location', 'search_places', 'estimate_travel', 'get_weather', 'get_subway_arrivals',
       'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
     return { kind: 'answer', text: '천만에요!' };
   } };

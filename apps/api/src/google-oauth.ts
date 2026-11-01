@@ -18,7 +18,8 @@ const scopes: Record<GoogleOAuthKind, string[]> = {
 };
 const filenames: Record<GoogleOAuthKind, string> = { calendar: 'calendar-connection.json', calendar_write: 'calendar-write-connection.json', gmail_send: 'gmail-connection.json', gmail_read: 'gmail-replies-connection.json', contacts: 'contacts-connection.json' };
 const b64 = () => randomBytes(32).toString('base64url');
-type Flow = { userId: string; kind: GoogleOAuthKind; verifier: string; completionHash: Buffer; expiresAt: number; ticketHash?: string };
+type Flow = { userId: string; kind: GoogleOAuthKind; state: string; verifier: string; completionHash: Buffer; expiresAt: number;
+  ticketHash?: string; cancelled?: boolean; completed?: boolean };
 type Pending = { flow: Flow; senderAddress: string; subject: string; refreshToken: string };
 type Connections = {
   gmailContact?: Awaited<ReturnType<typeof getGmailConnection>>;
@@ -38,7 +39,7 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
   const configured = !!clientId && !!clientSecret && !!directory && isAbsolute(directory) && !!redirectUrl &&
     redirectUrl.protocol === 'https:' && !redirectUrl.username && !redirectUrl.password && !redirectUrl.search && !redirectUrl.hash &&
     redirectUrl.pathname === '/v1/google/oauth/callback';
-  const states = new Map<string, Flow>(), latest = new Map<string, Flow>(), pending = new Map<string, Pending>();
+  const states = new Map<string, Flow>(), latest = new Map<string, Flow>(), pending = new Map<string, Pending>(), flows = new Map<string, Flow>();
   const locks = new Map<string, Promise<void>>();
   const digest = (value: string) => createHash('sha256').update(value).digest();
   const keyFor = (userId: string, kind: GoogleOAuthKind) => JSON.stringify([userId, kind]);
@@ -74,13 +75,14 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
     return locked(keyFor(userId, kind), async () => {
     const now = clock();
     for (const [state, flow] of states) if (flow.expiresAt <= now) { states.delete(state); if (latest.get(keyFor(flow.userId, flow.kind)) === flow) latest.delete(keyFor(flow.userId, flow.kind)); }
-    if (states.size + pending.size >= 1000) throw new Error('unavailable');
+    for (const [key, flow] of flows) if (flow.expiresAt <= now) { flow.cancelled = true; flows.delete(key); if (flow.ticketHash) pending.delete(flow.ticketHash); }
+    if (flows.size >= 1000) throw new Error('unavailable');
     const state = b64(), verifier = b64(), completionSecret = b64();
     const previous = latest.get(keyFor(userId, kind));
-    if (previous?.ticketHash) pending.delete(previous.ticketHash);
-    const flow: Flow = { userId, kind, verifier, completionHash: digest(completionSecret), expiresAt: now + 10 * 60_000 };
-    states.set(state, flow); latest.set(keyFor(userId, kind), flow);
-    const timer = setTimeout(() => { states.delete(state); if (flow.ticketHash) pending.delete(flow.ticketHash); if (latest.get(keyFor(userId, kind)) === flow) latest.delete(keyFor(userId, kind)); }, 10 * 60_000);
+    if (previous) { previous.cancelled = true; states.delete(previous.state); flows.delete(previous.completionHash.toString('hex')); if (previous.ticketHash) pending.delete(previous.ticketHash); }
+    const flow: Flow = { userId, kind, state, verifier, completionHash: digest(completionSecret), expiresAt: now + 10 * 60_000 };
+    states.set(state, flow); latest.set(keyFor(userId, kind), flow); flows.set(flow.completionHash.toString('hex'), flow);
+    const timer = setTimeout(() => { flow.cancelled = true; states.delete(state); flows.delete(flow.completionHash.toString('hex')); if (flow.ticketHash) pending.delete(flow.ticketHash); if (latest.get(keyFor(userId, kind)) === flow) latest.delete(keyFor(userId, kind)); }, 10 * 60_000);
     timer.unref();
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     url.search = new URLSearchParams({ client_id: clientId!, redirect_uri: redirect!, response_type: 'code', scope: scopes[kind].join(' '),
@@ -93,7 +95,7 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
     if (!configured || !flow) return undefined;
     let completed = false;
     try {
-      if (flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow || !code || code.length > 2048) return undefined;
+      if (flow.cancelled || flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow || !code || code.length > 2048) return undefined;
       const response = await fetcher('https://oauth2.googleapis.com/token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: clientId!, client_secret: clientSecret!, redirect_uri: redirect!, grant_type: 'authorization_code', code, code_verifier: flow.verifier }).toString() });
       if (!response.ok) return undefined;
@@ -108,20 +110,17 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
         const sent = await readGmailCredential(await sendPath(flow.userId));
         if (!sent || sent.subject !== identity.subject || sent.senderAddress !== identity.senderAddress) return undefined;
       }
-      if (flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow) return undefined;
+      if (flow.cancelled || flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow) return undefined;
       const confirmationCode = b64(); flow.ticketHash = digest(confirmationCode).toString('hex');
       pending.set(flow.ticketHash, { flow, senderAddress: identity.senderAddress, subject: identity.subject, refreshToken: token.refresh_token });
       completed = true;
       return confirmationCode;
     } catch { return undefined; }
-    finally { if (!completed && latest.get(keyFor(flow.userId, flow.kind)) === flow) latest.delete(keyFor(flow.userId, flow.kind)); }
+    finally { if (!completed) { flows.delete(flow.completionHash.toString('hex')); if (latest.get(keyFor(flow.userId, flow.kind)) === flow) latest.delete(keyFor(flow.userId, flow.kind)); } }
   }
-  async function complete(userId: string, completionSecret: string, confirmationCode: string): Promise<boolean> {
-    const ticketHash = digest(confirmationCode).toString('hex'), item = pending.get(ticketHash);
-    if (!item || item.flow.userId !== userId) return false;
-    return locked(keyFor(userId, item.flow.kind), async () => {
-    if (pending.get(ticketHash) !== item || item.flow.expiresAt <= clock() ||
-        latest.get(keyFor(userId, item.flow.kind)) !== item.flow || !timingSafeEqual(item.flow.completionHash, digest(completionSecret))) return false;
+  async function finish(userId: string, item: Pending, ticketHash: string): Promise<boolean> {
+    if (pending.get(ticketHash) !== item || item.flow.cancelled || item.flow.expiresAt <= clock() ||
+        latest.get(keyFor(userId, item.flow.kind)) !== item.flow) return false;
     const flow = item.flow; pending.delete(ticketHash);
     try {
       if (flow.kind === 'gmail_read') {
@@ -135,12 +134,44 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
         created = true;
         await handle.writeFile(JSON.stringify({ version: 1, clientId, senderAddress: item.senderAddress, subject: item.subject, refreshToken: item.refreshToken }));
         await handle.close(); handle = undefined;
-        if (flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow) return false;
+        if (flow.cancelled || flow.expiresAt <= clock() || latest.get(keyFor(flow.userId, flow.kind)) !== flow) return false;
         await rename(temporary, path);
       } finally { await handle?.close(); if (created) await unlink(temporary).catch(() => {}); }
-      return true;
+      flow.completed = true; return true;
     } catch { return false; }
-    finally { if (latest.get(keyFor(flow.userId, flow.kind)) === flow) latest.delete(keyFor(flow.userId, flow.kind)); }
+    finally { if (!flow.completed) { flows.delete(flow.completionHash.toString('hex')); if (latest.get(keyFor(flow.userId, flow.kind)) === flow) latest.delete(keyFor(flow.userId, flow.kind)); } }
+  }
+  async function complete(userId: string, completionSecret: string, confirmationCode: string): Promise<boolean> {
+    const ticketHash = digest(confirmationCode).toString('hex'), item = pending.get(ticketHash);
+    if (!item || item.flow.userId !== userId) return false;
+    return locked(keyFor(userId, item.flow.kind), async () => {
+      if (!timingSafeEqual(item.flow.completionHash, digest(completionSecret))) return false;
+      return finish(userId, item, ticketHash);
+    });
+  }
+  async function poll(userId: string, completionSecret: string): Promise<{ status: 'pending' | 'completed' } | null> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(completionSecret)) return null;
+    const flow = flows.get(digest(completionSecret).toString('hex'));
+    if (!flow || flow.userId !== userId) return null;
+    return locked(keyFor(userId, flow.kind), async () => {
+      if (flow.cancelled || flow.expiresAt <= clock() || latest.get(keyFor(userId, flow.kind)) !== flow ||
+          !timingSafeEqual(flow.completionHash, digest(completionSecret))) return null;
+      if (flow.completed) return { status: 'completed' as const };
+      const item = flow.ticketHash && pending.get(flow.ticketHash);
+      if (!item || !flow.ticketHash) return { status: 'pending' as const };
+      return await finish(userId, item, flow.ticketHash) ? { status: 'completed' as const } : null;
+    });
+  }
+  async function cancel(userId: string, completionSecret: string): Promise<boolean> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(completionSecret)) return false;
+    const key = digest(completionSecret).toString('hex'), flow = flows.get(key);
+    if (!flow || flow.userId !== userId) return false;
+    return locked(keyFor(userId, flow.kind), async () => {
+      if (flow.cancelled || flow.completed || flow.expiresAt <= clock() || latest.get(keyFor(userId, flow.kind)) !== flow) return false;
+      flow.cancelled = true; flows.delete(key); states.delete(flow.state);
+      if (flow.ticketHash) pending.delete(flow.ticketHash);
+      if (latest.get(keyFor(userId, flow.kind)) === flow) latest.delete(keyFor(userId, flow.kind));
+      return true;
     });
   }
   async function connections(userId: string): Promise<Connections> {
@@ -173,5 +204,5 @@ export function createGoogleOAuth(options: { env: NodeJS.ProcessEnv; fetcher?: t
       return { gmailContact, gmailReplyConnection, calendarConnection, calendarWriteConnection, contactsConnection, blocked };
     } catch { return { blocked }; }
   }
-  return { start, callback, complete, connections };
+  return { start, callback, complete, poll, cancel, connections };
 }

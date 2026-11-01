@@ -61,6 +61,20 @@ export function createAuthClient(baseUrlInput: string, fetcher: typeof fetch = f
       if (!record(value) || typeof value.sessionToken !== 'string' || !value.sessionToken.trim() || typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))) throw invalid();
       return { sessionToken: value.sessionToken, expiresAt: value.expiresAt, member: member(value.member) };
     },
+    async poll(completionSecret: string): Promise<{ status: 'pending' } | { status: 'completed'; result: LoginResult }> {
+      if (!tokenPattern.test(completionSecret)) throw new ApiError('invalid_request', '로그인 요청을 확인할 수 없습니다.');
+      const value = await publicPost('/v1/auth/google/complete', { completionSecret });
+      if (!record(value)) throw invalid();
+      if (value.status === 'pending') return { status: 'pending' };
+      if (value.status !== 'completed' || typeof value.sessionToken !== 'string' || !tokenPattern.test(value.sessionToken) ||
+          typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))) throw invalid();
+      return { status: 'completed', result: { sessionToken: value.sessionToken, expiresAt: value.expiresAt, member: member(value.member) } };
+    },
+    async cancel(completionSecret: string): Promise<void> {
+      if (!tokenPattern.test(completionSecret)) return;
+      const value = await publicPost('/v1/auth/google/complete', { completionSecret, cancel: true });
+      if (!record(value) || value.status !== 'cancelled') throw invalid();
+    },
     async me(api: ApiClient): Promise<Member> {
       const value = await api.get<unknown>('/v1/auth/me');
       if (!record(value)) throw invalid(); return member(value.member);

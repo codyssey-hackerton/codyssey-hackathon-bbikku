@@ -119,7 +119,7 @@ const components = build({
   stdin: {
     contents: `export { default as ChatScreen } from './ChatScreen';
       export { default as ProposalPanel, ChatProposalCard } from '../proposals/ProposalPanel';
-      export { createChatClient } from './client'; export { createApiClient } from '../api/http';`,
+      export { createChatClient } from './client'; export { createApiClient, ApiError } from '../api/http';`,
     resolveDir: resolve(__dirname, '../src/chat'), loader: 'ts',
   },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
@@ -148,6 +148,7 @@ const components = build({
     ChatProposalCard: any;
     createApiClient: (options: any) => any;
     createChatClient: (api: any) => any;
+    ApiError: new (code: string, message: string) => Error;
   };
 });
 
@@ -207,6 +208,71 @@ test('chat offers access to automatic review settings', async () => {
   view.update({ ...props, onOpenReviewSchedule: () => { opened += 1; } });
   press(view, '자동 검토 설정');
   assert.equal(opened, 1);
+});
+
+test('location is requested only on tap and the chosen mode reaches chat; reminder remains a confirmation candidate', async t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  t.after(() => { if (original) Object.defineProperty(globalThis, 'navigator', original); else delete (globalThis as any).navigator; });
+  let locationCalls = 0;
+  const timestamp = Date.now();
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { geolocation: {
+    getCurrentPosition(success: (position: unknown) => void) {
+      locationCalls++;
+      success({ coords: { latitude: 37.5, longitude: 127, accuracy: 10 }, timestamp });
+    },
+  } } });
+  const appointment = timestamp + 3_600_000;
+  const reminder = { itemId: 'item-1', expectedRevision: 1, title: '합성 약속', timezone: 'Asia/Seoul',
+    appointmentAt: new Date(appointment).toISOString(), appointmentEndsAt: new Date(appointment + 3_600_000).toISOString(),
+    basis: 'event_start', minutesBefore: 10, reminderAt: new Date(appointment - 600_000).toISOString(),
+    expiresAt: new Date(timestamp + 300_000).toISOString() };
+  let body: any, shown: unknown;
+  const { view, props } = await screen(async (_url, init) => {
+    body = JSON.parse(String(init?.body));
+    return chatResponse({ kind: 'reminder_request', message: '알림을 확인해 주세요.', reminder });
+  }, () => assert.fail('reminder candidate is not a saved proposal'));
+  view.update({ ...props, renderReminder: (value: unknown) => { shown = value; return '알림 확인 카드'; } });
+  assert.equal(locationCalls, 0);
+  press(view, '위치·이동수단');
+  assert.equal(locationCalls, 0);
+  press(view, '현재 위치 사용');
+  await view.settle();
+  assert.equal(locationCalls, 1);
+  press(view, '대중교통');
+  send(view, '10분 전에 알림 해줘');
+  await view.settle();
+  assert.deepEqual(body.deviceContext, { currentLocation: { latitude: 37.5, longitude: 127, accuracyMeters: 10,
+    capturedAt: new Date(timestamp).toISOString() }, travelMode: 'transit', notificationSupport: 'device' });
+  assert.deepEqual(shown, reminder);
+  assert.match(textOf(view.tree), /알림 확인 카드/);
+  press(view, '위치 공유 끄기');
+  send(view, '다시 확인해줘');
+  await view.settle();
+  assert.equal(body.deviceContext.currentLocation, undefined);
+  assert.equal(body.deviceContext.travelMode, 'transit');
+});
+
+test('expired location after an unknown outcome keeps the original request guarded even when status is retryable', async () => {
+  const { ApiError } = await components;
+  let attempts = 0, checks = 0;
+  const { props, view } = await screen(async () => assert.fail('unexpected fetch'), () => {});
+  view.update({ ...props, client: {
+    async sendMessage() { throw new ApiError(++attempts === 1 ? 'network' : 'location_expired', 'synthetic'); },
+    async checkRequest() { checks++; return { status: 'retryable' }; },
+  } });
+  send(view, '출발 전에 알려줘');
+  await view.settle();
+  press(view, '같은 요청 다시 시도');
+  await view.settle();
+  assert.match(textOf(view.tree), /공유한 위치가 만료/);
+  assert.doesNotMatch(textOf(view.tree), /같은 요청 다시 시도|메시지 수정/);
+  press(view, '처리 결과 확인');
+  await view.settle();
+  assert.equal(checks, 1);
+  assert.equal(attempts, 2);
+  assert.match(textOf(view.tree), /중복 방지를 위해 새 요청을 열지 않습니다/);
+  const input = nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === '채팅 메시지');
+  assert.equal(input.props.editable, false);
 });
 
 test('validated proposals notify the latest parent callback once per successful response', async () => {
@@ -531,7 +597,7 @@ function inlineProposal(id: string, title: string, status = 'pending') {
       checkedScheduleRevision: 1, checkedContextRevision: 0, checkedAt: '2026-10-31T00:00:00Z' }, createdAt: '2026-10-31T00:00:00Z', expiresAt: null, status, coordinationTarget: null };
 }
 
-test('inline proposal shows direct actions and hides reason until requested', async () => {
+test('normal inline proposal offers only accept and reject without status or reason', async () => {
   const { ChatProposalCard } = await components; const proposal = inlineProposal('p/1', '운동'); const reads: string[] = []; const writes: any[] = [];
   const api = { async get(path: string) { reads.push(path); return { proposal }; }, async post(path: string, body: any, options: any) {
     writes.push({ path, body, options }); return { outcome: 'rejected', proposal: { ...proposal, status: 'rejected' }, scheduleRevision: 1 }; } };
@@ -539,8 +605,8 @@ test('inline proposal shows direct actions and hides reason until requested', as
   await view.settle(); assert.deepEqual(reads, ['/v1/proposals/p%2F1']); assert.match(textOf(view.tree), /운동/);
   assert.equal(nodes(view.tree).filter(node => node.type === 'Text' && textOf(node.children) === '운동').length, 1);
   assert.doesNotMatch(textOf(view.tree), /상세에서만 보이는 긴 설명/); assert.ok(!nodes(view.tree).some(node => node.type === 'ScrollView'));
-  assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락'));
-  assert.match(textOf(view.tree), /일정 추가/); press(view, '이유 보기'); assert.match(textOf(view.tree), /상세에서만 보이는 긴 설명/);
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'Pressable').map(node => node.props.accessibilityLabel), ['수락', '거절']);
+  assert.doesNotMatch(textOf(view.tree), /확인 대기|이유 보기|수정/); assert.match(textOf(view.tree), /일정 추가/);
   assert.doesNotMatch(textOf(view.tree), /변경 전|변경 후|없음 \(새 일정\)/); assert.equal(writes.length, 0);
   press(view, '거절'); await view.settle(); assert.equal(writes.length, 1); assert.equal(writes[0].body.decision, 'reject');
   assert.match(textOf(view.tree), /제안을 거절했습니다/);
@@ -637,4 +703,17 @@ test('compact changes expose update and delete approval scope and enforce valida
   view.update({ ...props, id: 'invalid' }); await view.settle(); text = textOf(view.tree);
   assert.match(text, /시간이 겹칩니다/); assert.match(text, /빠진 정보: 마감/); assert.match(text, /보호된 일정: 기존 제목/);
   assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '수락').props.disabled, true); assert.equal(writes, 0);
+});
+
+test('shared inline acceptance preserves the original schedule and only then offers contact preparation', async () => {
+  const { ChatProposalCard } = await components; const base = inlineProposal('shared', '공동 약속');
+  const proposal = { ...base, mode: 'coordination', coordinationTarget: { id: 'event', expectedRevision: 1 } }; const writes: any[] = [];
+  const api = { async get() { return { proposal }; }, async post(_path: string, body: any) {
+    writes.push(body); return { outcome: 'awaiting_contact', proposal: { ...proposal, status: 'awaiting_contact' }, scheduleRevision: 1 }; } };
+  const view = harness.renderer(ChatProposalCard, { api, id: 'shared', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} });
+  await view.settle(); assert.match(textOf(view.tree), /원 일정은 유지되며 연락은 별도로 진행/);
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'Pressable').map(node => node.props.accessibilityLabel), ['수락', '거절']);
+  assert.equal(writes.length, 0); press(view, '수락'); await view.settle(); assert.equal(writes.length, 1);
+  assert.match(textOf(view.tree), /원 일정은 유지됩니다/); assert.match(textOf(view.tree), /연락 대기/);
+  assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '연락 준비'));
 });

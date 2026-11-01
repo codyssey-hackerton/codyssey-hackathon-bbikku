@@ -84,14 +84,23 @@ function Choice<T extends string>({ label, options, value, onChange, disabled }:
   );
 }
 
-function FactRow({ fact, disabled, onEdit }: { fact: MemoryFact; disabled: boolean; onEdit: (fact: MemoryFact) => void }) {
+function FactRow({ fact, disabled, expanded, onExpand, onEdit }: { fact: MemoryFact; disabled: boolean; expanded: boolean; onExpand: () => void; onEdit: (fact: MemoryFact) => void }) {
   const display = memoryDisplay(fact);
+  const title = fact.key === 'planning_preferences' ? '생활 선호' : display.title;
+  const preview = fact.key === 'planning_preferences' && display.lines.length > 1
+    ? [display.lines[0], display.lines[display.lines.length - 1]] : display.lines.slice(0, 1);
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>{fact.kind === 'preference' ? '선호' : '일시 상황'} · {display.title}</Text>
-      {display.lines.map((line, index) => <Text key={index} style={styles.body}>{line}</Text>)}
-      {fact.validUntil !== null && <Text style={styles.hint}>{new Date(fact.validUntil).toLocaleString('ko-KR')}까지</Text>}
-      {editableMemory(fact) && <Button label={`${display.title} 수정`} onPress={() => onEdit(fact)} disabled={disabled} secondary />}
+      <Pressable accessibilityRole="button" accessibilityLabel={`${title} 상세`} accessibilityState={{ expanded }}
+        onPress={onExpand} style={styles.cardContent}>
+        <Text numberOfLines={1} style={styles.cardTitle}>{title}</Text>
+        {expanded ? display.lines.map((line, index) => <Text key={index} style={styles.body}>{line}</Text>)
+          : <Text numberOfLines={2} style={styles.body}>{preview.join(' · ')}</Text>}
+        <View style={styles.badges}><Text style={styles.badge}>{fact.kind === 'preference' ? '선호' : '일시 상황'}</Text>
+          {fact.validUntil !== null && <Text style={styles.badge}>{new Date(fact.validUntil).toLocaleString('ko-KR')}까지</Text>}</View>
+        <Text style={styles.hint}>{expanded ? '접기' : '자세히 보기'}</Text>
+      </Pressable>
+      {expanded && editableMemory(fact) && <Button label={`${display.title} 수정`} onPress={() => onEdit(fact)} disabled={disabled} secondary />}
     </View>
   );
 }
@@ -102,6 +111,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
   const [draft, setDraft] = useState<MemoryDraft>(initialDraft);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<MemoryFact | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const submittedDraft = useRef<MemoryDraft | null>(null);
   const submittedEdit = useRef<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -115,6 +125,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
           draft.value === submitted.value && draft.expiry === submitted.expiry && (editing?.id ?? null) === submittedEdit.current) {
         setDraft(initialDraft);
         setEditing(null);
+        setFormOpen(false);
       }
       submittedDraft.current = null;
       submittedEdit.current = null;
@@ -171,6 +182,13 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
 
   function editFact(fact: MemoryFact) {
     if (disabled || !editableMemory(fact) || typeof fact.value !== 'string') return;
+    if (editing?.id === fact.id) { setFormOpen(true); return; }
+    const original = editing ? { kind: editing.kind, key: editing.key, value: editing.value, expiry: editing.kind === 'situation' ? 'keep' : null } : initialDraft;
+    if (draft.kind !== original.kind || draft.key !== original.key || draft.value !== original.value || draft.expiry !== original.expiry) {
+      setFormError('작성 중인 내용을 저장하거나 입력을 취소한 뒤 다른 항목을 수정해 주세요.');
+      setFormOpen(true);
+      return;
+    }
     setEditing(fact);
     setDraft({ kind: fact.kind as MemoryDraft['kind'], key: fact.key, value: fact.value,
       expiry: fact.kind === 'situation' ? 'keep' : null });
@@ -182,6 +200,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
     setEditing(null);
     setDraft(initialDraft);
     setFormError(null);
+    setFormOpen(false);
   }
 
   function refreshAfterConflict() {
@@ -203,7 +222,8 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
       <FlatList
         data={entries.set}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <FactRow fact={item} disabled={disabled} onEdit={editFact} />}
+        renderItem={({ item }) => <FactRow fact={item} disabled={disabled} expanded={expandedId === item.id}
+          onExpand={() => setExpandedId(value => value === item.id ? null : item.id)} onEdit={editFact} />}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.content}
         ListHeaderComponent={(
@@ -252,7 +272,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
               <Text accessibilityRole="header" style={styles.subtitle}>미설정 항목</Text>
               {entries.unset.map((fact) => <Text key={fact.id} style={styles.hint}>{memoryDisplay(fact).title} · 값 미설정</Text>)}
             </View>}
-            <Button label={formOpen ? '입력 접기' : '선호 또는 상황 추가'} onPress={() => setFormOpen(!formOpen)} secondary />
+            <Button label={formOpen ? '입력 접기' : editing || draft.key || draft.value || draft.kind !== initialDraft.kind ? '입력 계속하기' : '선호 또는 상황 추가'} onPress={() => setFormOpen(!formOpen)} secondary />
             {formOpen && <>
               {editing && <Text style={styles.body}>{editing.key} 수정 중</Text>}
               <Choice label="종류" value={draft.kind} disabled={disabled || !!editing} onChange={(kind) => updateDraft({ kind, expiry: null })} options={[
@@ -277,7 +297,7 @@ function MemoryPanelContent({ api, onMemoryChanged, onBack, isCurrent }: MemoryP
               </>}
               {formError && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{formError}</Text>}
               <Button label="저장" onPress={save} disabled={disabled} />
-              {editing && <Button label="수정 취소" onPress={cancelEdit} disabled={disabled} secondary />}
+              <Button label={editing ? '수정 취소' : '입력 취소'} onPress={cancelEdit} disabled={disabled} secondary />
             </>}
           </View>
         ) : undefined}
@@ -321,6 +341,8 @@ const styles = StyleSheet.create({
   statusBlock: { gap: 8 },
   error: { color: '#a01818', lineHeight: 22 },
   success: { color: '#176342', lineHeight: 22 },
-  card: { padding: 18, backgroundColor: colors.surface, borderRadius: 20, gap: 8, borderWidth: 1, borderColor: colors.border },
+  card: { padding: 12, backgroundColor: colors.surface, borderRadius: 14, gap: 6, borderWidth: 1, borderColor: colors.border },
+  cardContent: { gap: 4, minHeight: 44 }, badges: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  badge: { color: colors.muted, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2, fontSize: 12 },
   cardTitle: { color: colors.text, fontWeight: '700' },
 });

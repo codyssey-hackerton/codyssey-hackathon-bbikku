@@ -27,13 +27,14 @@ const component = build({
   stdin: { contents: "export { default } from './ChatScreen'; export { ApiError } from '../api/http'; export { operationGuard } from '../api/operationGuard';", resolveDir: resolve(__dirname), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', loader: { '.png': 'empty' },
   plugins: [{ name: 'native-test', setup(builder) {
-    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\.\/ui\/(typography|Icon)|\.\/ChatScheduleSummary)$/ }, args => ({ path: args.path, namespace: 'mock' }));
+    builder.onResolve({ filter: /^(react|react\/jsx-runtime|react-native|\.\.\/ui\/(typography|Icon)|\.\/ChatScheduleSummary|\.\/ChatDeviceContext)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents:
       path === 'react' ? 'module.exports=globalThis.__chatHarness.react' :
       path === 'react-native' ? 'module.exports=globalThis.__chatHarness.native' :
       path.endsWith('/typography') ? 'exports.Text="Text";exports.TextInput="TextInput"' :
       path.endsWith('/Icon') ? 'exports.Icon=()=>null' :
       path === './ChatScheduleSummary' ? 'exports.ChatScheduleSummary=()=>null' :
+      path === './ChatDeviceContext' ? 'module.exports=()=>null' :
       'exports.jsx=exports.jsxs=globalThis.__chatHarness.jsx;exports.Fragment=globalThis.__chatHarness.fragment' }));
   } }],
 }).then(result => { const module: any = { exports: {} }; new Function('module', 'exports', result.outputFiles[0].text)(module, module.exports); module.exports.default.ApiError = module.exports.ApiError; module.exports.default.operationGuard = module.exports.operationGuard; return module.exports.default; });
@@ -72,6 +73,74 @@ function type(view: any, value: string) {
 }
 const base = { timezone: 'Asia/Seoul', scheduleClient: {}, selectedDate: new Date('2026-11-01'), refreshVersion: 0,
   onOpenProposals() {}, onProposalCreated() {}, onOpenReviewSchedule() {}, onClearCoordinationTarget() {} };
+
+test('선택지에 실제 본문을 표시하고 같은 대화에 사용자 메시지로 한 번만 보낸다', async t => {
+  const Screen = await component, calls: any[] = []; let finish!: (value: unknown) => void;
+  let phone = 0, reminder = 0, proposals = 0;
+  const choice = { label: '간단히 조정', message: '저녁 7시로 미루는 제안을 만들어줘' };
+  const client = { sendMessage(input: any) {
+    calls.push(input);
+    if (calls.length === 1) return Promise.resolve({ conversationId: 'conversation', result: { kind: 'reply', message: '어떤 방법이 좋을까요?', suggestions: [choice] } });
+    return new Promise(resolve => { finish = resolve; });
+  } };
+  const view = render(Screen, { ...base, client, onOpenScheduleCall() { phone++; }, renderReminder() { reminder++; return null; },
+    onProposalCreated() { proposals++; }, renderProposal(id: string) { return jsx('ProposalCard', { id }); } });
+  t.after(view.unmount);
+  type(view, '계획을 검토해줘'); press(view, '메시지 보내기'); await view.settle();
+  assert.match(text(view.tree), /간단히 조정/); assert.match(text(view.tree), /저녁 7시로 미루는 제안을 만들어줘/);
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const card = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.ok(card); assert.equal(card.props.disabled, false);
+  card.props.onPress(); card.props.onPress(); view.flush();
+  assert.equal(calls.length, 2); assert.equal(calls[1].message, choice.message); assert.equal(calls[1].conversationId, 'conversation');
+  const busyCard = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.equal(busyCard.props.disabled, true); assert.equal(phone, 0); assert.equal(reminder, 0);
+  finish({ conversationId: 'conversation', result: { kind: 'proposal', message: '검토해 주세요', proposalIds: ['pending-proposal'] } });
+  await view.settle(); assert.equal(proposals, 1); assert.equal(phone, 0); assert.equal(reminder, 0);
+  assert.ok(nodes(view.tree).some(node => node.type === 'ProposalCard' && node.props.id === 'pending-proposal'));
+});
+
+test('연결이나 입력 맥락 세대가 바뀐 오래된 선택지는 보낼 수 없다', async t => {
+  const Screen = await component, calls: any[] = [];
+  const choice = { label: '제안', message: '가능한 시간으로 제안해줘' };
+  const client = { async sendMessage(input: any) { calls.push(input); return { conversationId: 'c', result: { kind: 'question',
+    message: '고르세요', missingFields: [], suggestions: [choice] } }; } };
+  const view = render(Screen, { ...base, client }); t.after(view.unmount);
+  type(view, '계획'); press(view, '메시지 보내기'); await view.settle();
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const oldCard = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  assert.equal(oldCard.props.disabled, false);
+  view.props = { ...view.props, client: { async sendMessage() { throw new Error('unexpected'); } } }; view.dirty = true; view.flush();
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label).props.disabled, true);
+  view.props = { ...view.props, client }; view.dirty = true; view.flush();
+  oldCard.props.onPress(); view.flush(); assert.equal(calls.length, 1);
+  assert.equal(nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label).props.disabled, true);
+  view.props = { ...view.props, entryContext: { kind: 'item', key: 'new-context', id: 'item', expectedRevision: 1, title: '새 일정' } };
+  view.dirty = true; view.flush(); oldCard.props.onPress(); view.flush();
+  assert.equal(calls.length, 1);
+});
+
+test('다른 작업 또는 미확정 요청이 있으면 선택지를 사용할 수 없다', async t => {
+  const Screen = await component, calls: any[] = [];
+  const choice = { label: '제안', message: '새 제안을 만들어줘' };
+  const client = { async sendMessage(input: any) {
+    calls.push(input);
+    if (calls.length === 1) return { conversationId: 'c', result: { kind: 'reply', message: '선택', suggestions: [choice] } };
+    throw new Screen.ApiError('timeout', 'synthetic', true);
+  } };
+  const view = render(Screen, { ...base, client }); t.after(view.unmount);
+  type(view, '계획'); press(view, '메시지 보내기'); await view.settle();
+  const label = `${choice.label}. 보낼 메시지: ${choice.message}`;
+  const card = () => nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityLabel === label);
+  const beforeGuard = card();
+  const owner = {}; Screen.operationGuard.update(owner, { status: 'pending' });
+  beforeGuard.props.onPress(); assert.equal(calls.length, 1);
+  view.dirty = true; view.flush(); assert.equal(card().props.disabled, true);
+  card().props.onPress(); view.flush(); assert.equal(calls.length, 1);
+  Screen.operationGuard.clear(owner); view.dirty = true; view.flush(); assert.equal(card().props.disabled, false);
+  press(view, label); await view.settle(); assert.equal(calls.length, 2); assert.equal(card().props.disabled, true);
+  card().props.onPress(); view.flush(); assert.equal(calls.length, 2);
+});
 
 function fakeWaitTimer(t: any) {
   const timers = new Map<number, () => void>(); let next = 0;
@@ -119,12 +188,12 @@ test('불확정 오류는 같은 요청만 재시도하고 중복 재시도를 �
   } } });
   t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
   assert.equal(clock.timers.size, 0); assert.match(text(view.tree), /AI 연결을 사용할 수 없어요/);
-  assert.match(text(view.tree), /같은 요청만 다시 시도/); assert.doesNotMatch(text(view.tree), /메시지 수정/);
+  assert.match(text(view.tree), /결과를 확인할 때까지/); assert.doesNotMatch(text(view.tree), /메시지 수정/);
   const retry = nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === '같은 요청 다시 시도');
   assert.ok(retry); retry.props.onPress(); retry.props.onPress(); view.flush();
   assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(clock.timers.size, 1);
   retryFinish({ conversationId: 'c', result: { kind: 'reply', message: '완료' } }); await view.settle();
-  assert.equal(clock.timers.size, 0); assert.doesNotMatch(text(view.tree), /같은 요청만 다시 시도/);
+  assert.equal(clock.timers.size, 0); assert.doesNotMatch(text(view.tree), /결과를 확인할 때까지/);
 });
 
 test('확정 입력 오류는 메시지 수정 경로를 유지한다', async t => {
@@ -223,7 +292,7 @@ test('폼 재요청 중 결과 불명 재시도는 원래 맥락과 키를 유�
   type(view, '처음 요청'); press(view, '메시지 보내기');
   view.props = { ...view.props, entryContext: nextContext }; view.dirty = true; view.flush();
   reject(new Error('network')); await view.settle();
-  assert.match(text(view.tree), /같은 요청만 다시 시도/); press(view, '같은 요청 다시 시도'); await view.settle();
+  assert.match(text(view.tree), /결과를 확인할 때까지/); press(view, '같은 요청 다시 시도'); await view.settle();
   assert.deepEqual(calls[1], calls[0]); assert.doesNotMatch(text(view.tree), /이전 제안/);
   assert.doesNotMatch(text(view.tree), /입력 화면에서 검토/);
   type(view, '두 번째 요청'); press(view, '메시지 보내기'); await view.settle();

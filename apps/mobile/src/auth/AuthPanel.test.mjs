@@ -59,11 +59,12 @@ const all = node => !node || typeof node !== 'object' ? [] : [node, ...[node.pro
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 function setup(overrides = {}) {
   slots = []; index = 0; effects = []; dirty = false;
-  const start = deferred(), complete = deferred(), activity = [], signedIn = [], backs = [];
-  client = { start: () => start.promise, complete: () => complete.promise };
+  const start = deferred(), complete = deferred(), poll = deferred(), activity = [], signedIn = [], backs = [], cancels = [];
+  client = { start: () => start.promise, complete: () => complete.promise, poll: () => poll.promise,
+    cancel: async secret => { cancels.push(secret); } };
   const pending = new Set();
   guard = { hasUnresolved: () => pending.size > 0, clear: owner => pending.delete(owner),
-    update: (owner, state) => state.status === 'pending' ? pending.add(owner) : pending.delete(owner) };
+    update: (owner, state) => state.status === 'pending' || (state.status === 'error' && state.uncertain) ? pending.add(owner) : pending.delete(owner) };
   const props = { baseUrl: 'https://example.test', onBack: () => backs.push(true), onSignedIn: result => { signedIn.push(result); return true; },
     onFlowActiveChange: value => activity.push(value), ...overrides };
   let tree;
@@ -75,7 +76,7 @@ function setup(overrides = {}) {
   const settle = async () => { await new Promise(resolve => setImmediate(resolve)); flush(); };
   const unmount = () => { for (const slot of slots) slot?.cleanup?.(); };
   flush();
-  return { start, complete, activity, signedIn, backs, pending, find, press, settle, unmount, flush };
+  return { start, complete, poll, cancels, activity, signedIn, backs, pending, find, press, settle, unmount, flush };
 }
 const started = { authorizationUrl: 'https://accounts.google.com/example', completionSecret: 's'.repeat(43) };
 
@@ -90,12 +91,14 @@ test('시작과 ready는 활성 상태를 유지하고 명시적 뒤로는 인�
   assert.deepEqual(view.activity, [true]);
   view.press('뒤로');
   assert.deepEqual(view.activity, [true, false]); assert.equal(view.backs.length, 1);
+  assert.deepEqual(view.cancels, [started.completionSecret]);
   view.unmount(); host.open = async () => {};
 });
 
 test('완료 중 잠금을 유지하고 완료 결과를 받으면 세션 전환 전에 해제한다', async () => {
   const view = setup({ mode: 'login' });
   view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+  view.press('자동 확인이 안 되나요?');
   view.find('TextInput', 'Google 로그인 확인 코드').props.onChangeText('z'.repeat(43)); view.flush();
   view.press('Google 로그인 확인');
   assert.deepEqual(view.activity, [true]); assert.equal(view.pending.size, 1);
@@ -114,12 +117,18 @@ test('시작 실패와 언마운트는 연결 변경 잠금을 해제하고 늦�
   assert.deepEqual(abandoned.activity, [true, false]);
 });
 
-test('완료 결과 불명은 자동 재시도하지 않고 활성 상태를 해제한다', async () => {
+test('수동 완료 결과가 불명이면 같은 비밀로 자동 확인하며 활성 상태를 유지한다', async () => {
   const view = setup(); view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+  view.press('자동 확인이 안 되나요?');
   view.find('TextInput', 'Google 로그인 확인 코드').props.onChangeText('z'.repeat(43)); view.flush(); view.press('Google 로그인 확인');
   view.complete.reject(new Error('synthetic')); await view.settle();
-  assert.deepEqual(view.activity, [true, false]); assert.equal(view.pending.size, 0); assert.equal(view.signedIn.length, 0);
-  assert.equal(view.find('Button', 'Google 로그인 확인'), undefined); view.unmount();
+  assert.deepEqual(view.activity, [true]); assert.equal(view.pending.size, 1); assert.equal(view.signedIn.length, 0);
+  assert.equal(view.find('Button', '뒤로').props.disabled, true);
+  await new Promise(resolve => setTimeout(resolve, 5)); view.flush();
+  view.poll.resolve({ status: 'completed', result: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z',
+    member: { id: 'test', email: 'test@example.test', displayName: 'test' } } });
+  await view.settle(); assert.equal(view.signedIn.length, 1); assert.equal(view.pending.size, 0);
+  view.unmount();
 });
 
 test('환영 화면의 개발 설정은 개발 환경에서만 보조 진입으로 표시한다', () => {
@@ -133,12 +142,64 @@ test('환영 화면의 개발 설정은 개발 환경에서만 보조 진입으�
 
 test('다른 미해결 요청은 완료를 막되 현재 인증 흐름은 유지한다', async () => {
   const view = setup(); view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+  view.press('자동 확인이 안 되나요?');
   view.find('TextInput', 'Google 로그인 확인 코드').props.onChangeText('z'.repeat(43)); view.flush();
   const other = {}; view.pending.add(other); view.press('Google 로그인 확인');
   assert.deepEqual(view.activity, [true]); assert.equal(view.pending.size, 1); assert.equal(view.signedIn.length, 0);
   view.pending.delete(other); view.press('Google 로그인 확인'); assert.equal(view.pending.size, 1);
   view.complete.resolve({ sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z', member: { id: 'test', email: 'test@example.test', displayName: 'test' } });
   await view.settle(); assert.deepEqual(view.activity, [true, false]); view.unmount();
+});
+
+test('Google 동의 후 확인 코드를 입력하지 않아도 완료 결과를 반영한다', async () => {
+  const view = setup(); view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+  assert.equal(view.find('TextInput', 'Google 로그인 확인 코드'), undefined);
+  view.press('Google 로그인 화면 열기'); await view.settle();
+  await new Promise(resolve => setTimeout(resolve, 5)); view.flush();
+  assert.equal(view.pending.size, 1);
+  view.poll.resolve({ status: 'completed', result: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z',
+    member: { id: 'test', email: 'test@example.test', displayName: 'test' } } });
+  await view.settle();
+  assert.equal(view.signedIn.length, 1); assert.equal(view.pending.size, 0);
+  assert.deepEqual(view.activity, [true, false]); assert.deepEqual(view.cancels, []);
+  view.unmount();
+});
+
+test('조회 중 뒤로를 잠그고 응답 유실 뒤 같은 비밀로 완료 결과를 복구한다', async () => {
+  const original = globalThis.setTimeout; let retry;
+  globalThis.setTimeout = (fn, delay, ...args) => {
+    if (delay === 6_000) { retry = () => fn(...args); return -1; }
+    return original(fn, delay, ...args);
+  };
+  const view = setup();
+  try {
+    const first = deferred(), second = deferred(), secrets = [];
+    client.poll = secret => { secrets.push(secret); return secrets.length === 1 ? first.promise : second.promise; };
+    view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+    view.press('Google 로그인 화면 열기'); await view.settle();
+    await new Promise(resolve => original(resolve, 5)); view.flush();
+    assert.equal(view.find('Button', '뒤로').props.disabled, true);
+    first.reject(new Error('lost response')); await view.settle();
+    assert.equal(view.find('Button', '뒤로').props.disabled, true); assert.equal(view.pending.size, 1);
+    assert.equal(typeof retry, 'function'); retry(); await view.settle();
+    assert.deepEqual(secrets, [started.completionSecret, started.completionSecret]);
+    second.resolve({ status: 'completed', result: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z',
+      member: { id: 'test', email: 'test@example.test', displayName: 'test' } } });
+    await view.settle();
+    assert.equal(view.signedIn.length, 1); assert.equal(view.pending.size, 0);
+  } finally { view.unmount(); globalThis.setTimeout = original; }
+});
+
+test('언마운트 후 도착한 이전 로그인 결과는 세션에 적용하지 않는다', async () => {
+  const view = setup(); view.press('Google 로그인 시작'); view.start.resolve(started); await view.settle();
+  view.press('Google 로그인 화면 열기'); await view.settle();
+  await new Promise(resolve => setTimeout(resolve, 5)); view.flush();
+  assert.equal(view.find('Button', '뒤로').props.disabled, true);
+  view.unmount();
+  view.poll.resolve({ status: 'completed', result: { sessionToken: 'synthetic', expiresAt: '2030-01-01T00:00:00Z',
+    member: { id: 'test', email: 'test@example.test', displayName: 'test' } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(view.signedIn.length, 0);
 });
 
 test('10분이 지난 인증은 열지 않고 활성 상태를 해제한다', async () => {

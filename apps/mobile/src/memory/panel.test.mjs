@@ -170,9 +170,9 @@ function input(view, label) {
   return element;
 }
 function press(view, label) {
-  const element = nodes(view.tree).find((node) => node.type === 'Pressable' && textOf(node.children) === label);
+  const element = nodes(view.tree).find((node) => node.type === 'Pressable' && (node.props.accessibilityLabel === label || textOf(node.children) === label));
   assert.ok(element, `missing button: ${label}`);
-  assert.equal(element.props.disabled, false, `disabled button: ${label}`);
+  assert.notEqual(element.props.disabled, true, `disabled button: ${label}`);
   element.props.onPress();
   view.flush();
 }
@@ -273,7 +273,8 @@ for (const errorKind of ['network', 'not_configured']) {
     assert.equal(reads, 2);
     assert.equal(changed, 1);
     assert.match(textOf(view.tree), /서버에 저장했습니다/);
-    assert.equal(input(view, '내용').props.value, errorKind === 'not_configured' ? '수정한 초안' : '');
+    if (errorKind === 'not_configured') assert.equal(input(view, '내용').props.value, '수정한 초안');
+    else assert.equal(nodes(view.tree).some(node => node.type === 'TextInput'), false);
   });
 }
 
@@ -332,7 +333,7 @@ test('saved data is readable without raw objects; adding cannot overwrite and ex
   press(view, '저장');
   assert.equal(calls.length, 0);
   assert.match(textOf(view.tree), /다른 이름/);
-  press(view, 'focus 수정');
+  press(view, '입력 취소'); press(view, 'focus 상세'); press(view, 'focus 수정');
   assert.equal(input(view, '항목 이름').props.editable, false);
   assert.equal(input(view, '내용').props.value, '오전');
   enter(view, '내용', '오후');
@@ -340,6 +341,26 @@ test('saved data is readable without raw objects; adding cannot overwrite and ex
   await view.settle();
   assert.equal(calls.length, 1);
   assert.deepEqual([calls[0].body.kind, calls[0].body.key, calls[0].body.value, calls[0].body.validUntil, calls[0].body.expectedContextRevision], ['preference', 'focus', '오후', null, 4]);
+});
+
+test('compact cards expand details and preserve an unfinished draft when choosing another entry', async () => {
+  const preferences = { version: 1, goals: ['work'], timing: { preparationMinutes: 10, travelEstimateMinutes: 20, bufferMinutes: 5 }, preferredPeriod: 'morning', onboardingStatus: 'completed' };
+  const api = { get: async () => ({ facts: [fact('planning_preferences', preferences), fact('focus', '오전'), fact('place', '조용한 곳')], contextRevision: 4 }), post: async () => assert.fail('unexpected write') };
+  const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
+  await view.settle();
+  assert.match(textOf(view.tree), /생활 선호/);
+  assert.doesNotMatch(textOf(view.tree), /준비시간:|이동시간 참고값:/);
+  press(view, '생활 선호 상세');
+  assert.match(textOf(view.tree), /준비시간: 10분/);
+  assert.match(textOf(view.tree), /이동시간 참고값: 20분/);
+  press(view, 'focus 상세'); press(view, 'focus 수정'); enter(view, '내용', '수정 중');
+  press(view, 'place 상세'); press(view, 'place 수정');
+  assert.match(textOf(view.tree), /작성 중인 내용을 저장하거나 입력을 취소/);
+  assert.equal(input(view, '항목 이름').props.value, 'focus');
+  assert.equal(input(view, '내용').props.value, '수정 중');
+  press(view, '수정 취소'); press(view, 'place 수정');
+  assert.equal(input(view, '항목 이름').props.value, 'place');
+  assert.equal(nodes(view.tree).filter(node => node.type === 'TextInput' && node.props.accessibilityLabel === '내용').length, 1);
 });
 
 test('a new situation requires the user to choose its expiration', async () => {
@@ -401,7 +422,7 @@ test('editing an existing situation keeps its selected expiration unless changed
   try {
     const view = harness.renderer(MemoryPanel, { api, onBack() {}, onMemoryChanged() {} });
     await view.settle();
-    press(view, 'trip 수정');
+    press(view, 'trip 상세'); press(view, 'trip 수정');
     const keep = nodes(view.tree).find(node => node.type === 'Pressable' && node.props.accessibilityRole === 'radio' && textOf(node.children).startsWith('기존 기간 유지'));
     assert.equal(keep.props.accessibilityState.checked, true);
     enter(view, '내용', '출장 연장');
