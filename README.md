@@ -182,17 +182,27 @@ JS export는 설치용 바이너리가 아닙니다. HealthKit·Health Connect �
 - `2fbc0c8` 프롬프트 배포 때 공개 웹 HTML/JS와 API health 응답, 두 API의 프롬프트 소스 일치를 확인했습니다. 이것을 신규 사용자의 Google 동의·전체 E2E 성공으로 확대하지 않습니다.
 - 실제 모델/외부 API 일부 실연결 기록과 모의 검증을 구분해 [구현 기록](docs/IMPLEMENTATION_PLAN.md)에 보존했습니다. 실기기 알림 울림, 워치 건강 데이터, 모든 계정·외부 제공자 조합은 검증하지 않았습니다.
 
-## 팀과 문서
+## 팀 소개 | 다섯 개의 전문성을, 하나의 AI 비서로
 
-| 팀원 | 담당 범위 |
-|---|---|
-| 세진 | 전체 아키텍처, 앱·백엔드 구현, API 계약, 통합 |
-| 찬욱 | DB·사용자 Memory 구조, VM 검토 |
-| 영휘 | 시스템 프롬프트, AI 질문·추천·승인 가이드라인 |
-| 서연 | Calendar·지도·교통·음성/전화 API 검토 |
-| 홍빈 | 기획·PRD, UX/UI, 시연·QA·제출 총괄 |
+PIKKU는 서비스 기획과 사용자 경험 설계부터 모바일 앱·서버, 데이터·Memory, AI Agent, 외부 API 및 음성 연동까지 다섯 가지 전문 영역을 결합한 프로젝트입니다. 각 팀원은 공통 데이터·API 계약을 기준으로 협업하며, 개인화 추천부터 사용자 승인과 실행까지 하나의 서비스로 연결합니다.
 
-역할은 [팀 계획](docs/TEAM_PLAN.md) 기준이며 최종 발표의 개인별 실제 기여는 팀에서 확인합니다.
+| 팀원 | 전문 영역 | 핵심 담당 및 기여 |
+|---|---|---|
+| 홍빈 · 팀장 | Product · UX | 서비스 기획 및 PRD, UX/UI와 서비스 전체 경험 설계, 추천·승인 사용자 흐름, 통합 QA·시연·발표 총괄 |
+| 세진 | App · Server | 모바일 앱·백엔드 아키텍처, Fastify·LangGraph 기반 Agent 실행 구조, 공통 API 계약, 승인 흐름 및 서비스 통합 |
+| 찬욱 | Data · Memory | PostgreSQL 데이터 모델, 일정·승인 상태의 영속 저장, 사용자 Memory, pg-boss Scheduler 및 VM 인프라 |
+| 영휘 | AI Agent · Prompt | Agent 행동 정책, 질문·추천 로직, 시스템 프롬프트, Tool 사용 가드레일, 예외 처리 및 품질 평가 |
+| 서현 | External · Voice | Google Calendar·Gmail 연동, OAuth 및 이동정보 API, ClawOps 기반 전화·음성 연동·검증 |
+
+### 협업 방식
+
+**제품·UX 정의 → 공통 데이터·API 계약 수립 → 전문 영역별 병렬 개발 → 서비스 통합 → 사용자 승인 기반 E2E 검증**
+
+홍빈이 정리한 제품 요구사항과 사용자 흐름을 기준으로 담당 영역을 연결하고, 세진을 중심으로 앱·서버를 통합하며 팀이 함께 검증합니다. AI가 추천한 변경은 서버 검증을 거쳐 사용자의 명시적 승인 이후 반영하도록 설계했습니다.
+
+상세 인계 범위는 [팀 계획](docs/TEAM_PLAN.md)을 참고합니다. 개인별 실제 기여와 연동 검증 범위는 최종 제출 기준으로 확인하며, 위 역할 소개가 모든 기능의 실연결 검증 완료를 의미하지는 않습니다.
+
+### 프로젝트 상세 문서
 
 - [PRD](docs/PRD.md) · [아키텍처](docs/ARCHITECTURE.md) · [ADR](docs/ADR.md) · [공통 계약](docs/CONTRACTS.md)
 - [시스템 프롬프트](docs/AGENT_PROMPT.md) · [디자인 연결](docs/DESIGN_INTEGRATION.md) · [건강 데이터](docs/WEARABLE_INTEGRATION.md)
