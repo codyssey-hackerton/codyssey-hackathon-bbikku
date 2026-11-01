@@ -33,7 +33,7 @@ import { PhoneConnections, validPhoneNumber } from './phone-connection.ts';
 import { managedCallBindingKey, PhoneDispatch } from './phone-dispatch.ts';
 import { createClawOpsReplies } from './clawops-replies.ts';
 import { createManagedCallWatch } from './clawops-call-watch.ts';
-import { ScheduleCallService } from './schedule-call-service.ts';
+import { ScheduleCallService, scheduleCallCreation } from './schedule-call-service.ts';
 import { VoiceTokens } from './voice-token.ts';
 import { VoiceWebhook } from './voice-webhook.ts';
 import type { VoiceClassifier } from './voice-model.ts';
@@ -537,9 +537,9 @@ export function buildApp(options: { memberAuth?: MemberAuth; memberAllowLocalIns
     return { requestId: request.id, data: await scheduleCalls.get(authenticated.get(request)!, id) };
   });
   app.post('/v1/schedule-calls', async (request, reply) => {
-    const body = parse(z.object({ requestId: nonblank, itemId: identifier, expectedRevision: z.number().int().positive(),
-      toNumber: z.string().trim().min(1).max(30) }).strict(), request.body);
-    const { requestId: _requestId, ...input } = body;
+    const body = parse(z.object({ requestId: nonblank }).passthrough(), request.body);
+    const { requestId: _requestId, ...rest } = body;
+    const input = parse(scheduleCallCreation, rest);
     const result = await runIdempotent(request, 'schedule_call_create', async () => ({ status: 200,
       body: { requestId: body.requestId, data: await scheduleCalls.create(authenticated.get(request)!, input) } }));
     return reply.code(result.status).send(result.body);

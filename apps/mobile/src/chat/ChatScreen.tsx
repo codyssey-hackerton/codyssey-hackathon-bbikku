@@ -15,6 +15,7 @@ import { operationGuard } from '../api/operationGuard';
 import { useMutation } from '../api/useMutation';
 import type { ScheduleClient } from '../schedule/client';
 import type { ChatClient, ChatContext, ChatEntryContext, ChatResponse, CoordinationTarget, FormDraft } from './client';
+import type { ScheduleCallTarget } from '../contacts/schedule-call-client';
 export type { ChatEntryContext } from './client';
 import { ChatScheduleSummary } from './ChatScheduleSummary';
 import ChatDeviceContext from './ChatDeviceContext';
@@ -22,7 +23,7 @@ import ChatDeviceContext from './ChatDeviceContext';
 type SuggestionSource = { client: ChatClient; conversationId: string; epoch: number; generation: number; mode: string | null;
   entry?: ChatEntryContext; target?: CoordinationTarget & { title: string } };
 type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; proposalIds?: string[]; proposalMissing?: boolean;
-  reminder?: ReminderCandidate; phoneTarget?: { itemId: string; expectedRevision: number }; suggestions?: ChatSuggestion[]; suggestionSource?: SuggestionSource };
+  reminder?: ReminderCandidate; phoneTarget?: ScheduleCallTarget; suggestions?: ChatSuggestion[]; suggestionSource?: SuggestionSource };
 type Input = Omit<ChatInput, 'requestId'> & { entryContext?: ChatContext };
 const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
 const weekdayLabels: Record<string, string> = { '1': '월', '2': '화', '3': '수', '4': '목', '5': '금', '6': '토', '7': '일' };
@@ -67,7 +68,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   entryContext?: ChatEntryContext;
   onClearEntryContext?: () => void;
   onApplyDraft?: (draft: FormDraft) => void;
-  onOpenScheduleCall?: (target: { itemId: string; expectedRevision: number }) => void;
+  onOpenScheduleCall?: (target: ScheduleCallTarget) => void;
   renderProposal?: (id: string) => ReactNode;
   renderReminder?: (reminder: ReminderCandidate) => ReactNode;
   reviewDigests?: ReactNode;
@@ -148,7 +149,8 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
           ...(result.kind === 'proposal' && !ids.length ? { proposalMissing: true } : {}),
           ...(suggestions && suggestionSource ? { suggestions, suggestionSource } : {}),
           ...(result.kind === 'reminder_request' ? { reminder: result.reminder } : {}),
-          ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) }];
+          ...(result.kind === 'phone_request' ? { phoneTarget: 'itemId' in result
+            ? { itemId: result.itemId, expectedRevision: result.expectedRevision } : { mode: 'inquiry' as const, brief: result.brief } } : {}) }];
       });
       if (result.kind === 'proposal') onProposalCreated();
     },

@@ -14,7 +14,7 @@ const allowedTools = new Set(['read_schedule', 'read_memory', 'calculate_timing'
   'list_calendars', 'read_calendar_events', 'list_contact_requests', 'read_contact_replies']);
 const serverFields = new Set(['userId', 'authenticatedUserId', 'scope', 'authorization', 'permissions', 'coordinationTarget']);
 
-const FinalDecision = z.discriminatedUnion('kind', [
+const FinalDecision = z.union([
   z.strictObject({ kind: z.literal('answer'), text: z.string().min(1), suggestions: chatSuggestions.optional() }),
   z.strictObject({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]), suggestions: chatSuggestions.optional() }),
   z.strictObject({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }),

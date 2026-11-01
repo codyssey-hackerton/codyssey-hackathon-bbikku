@@ -431,6 +431,16 @@ test('전화 요청 응답은 사용자가 확인 버튼을 눌러야 대상과 
   press(view, '전화 요청 확인'); assert.deepEqual(targets, [{ itemId: 'i1', expectedRevision: 2 }]);
 });
 
+test('일반 문의는 일정을 선택하지 않고 확인 버튼을 눌러야 전화 초안으로 전달된다', async t => {
+  const Screen = await component; const targets: any[] = [];
+  const view = render(Screen, { ...base, onOpenScheduleCall: (target: any) => targets.push(target), client: { async sendMessage() {
+    return { conversationId: 'c', result: { kind: 'phone_request', mode: 'inquiry', message: '문의 내용을 확인해 주세요.', brief: '영업시간을 알려 주세요' } };
+  } } });
+  t.after(view.unmount); type(view, '전화로 물어봐 줘'); press(view, '메시지 보내기'); await view.settle();
+  assert.deepEqual(targets, []); press(view, '전화 요청 확인');
+  assert.deepEqual(targets, [{ mode: 'inquiry', brief: '영업시간을 알려 주세요' }]);
+});
+
 test('복구한 전화 요청도 버튼을 직접 누르기 전에는 전화 단계로 이동하지 않는다', async t => {
   const Screen = await component; const targets: any[] = [];
   const client = { async sendMessage() { throw new Screen.ApiError('timeout', 'timeout', true); }, async checkRequest() {

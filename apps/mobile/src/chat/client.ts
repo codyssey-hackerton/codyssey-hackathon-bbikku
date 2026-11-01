@@ -1,5 +1,6 @@
 import { ApiClient, ApiError } from '../api/http';
 import { parseOffsetDateTime } from '@pikku/domain';
+import { normalizeInquiryBrief } from '../contacts/schedule-call-client';
 
 import type { AgentResult, ChatContext, ChatInput, FormDraft } from '@pikku/domain';
 export type { AgentResult, CoordinationTarget } from '@pikku/domain';
@@ -94,8 +95,10 @@ function isChatResponse(value: unknown): value is ChatResponse {
     case 'reply': return isSuggestions(result.suggestions) && (result.draft === undefined || (result.suggestions === undefined && isFormDraft(result.draft)));
     case 'question': return isSuggestions(result.suggestions) && isStringArray(result.missingFields);
     case 'proposal': return isStringArray(result.proposalIds);
-    case 'phone_request': return typeof result.itemId === 'string' && !!result.itemId.trim() && result.itemId.length <= 200 &&
-      typeof result.expectedRevision === 'number' && Number.isSafeInteger(result.expectedRevision) && result.expectedRevision >= 1;
+    case 'phone_request': return result.mode === 'inquiry'
+      ? typeof result.brief === 'string' && normalizeInquiryBrief(result.brief) === result.brief && result.itemId === undefined && result.expectedRevision === undefined
+      : (result.mode === undefined || result.mode === 'schedule_check') && typeof result.itemId === 'string' && !!result.itemId.trim() && result.itemId.length <= 200 &&
+        typeof result.expectedRevision === 'number' && Number.isSafeInteger(result.expectedRevision) && result.expectedRevision >= 1 && result.brief === undefined;
     case 'reminder_request': return isReminder(result.reminder);
     case 'failure': return typeof result.code === 'string' && typeof result.retryable === 'boolean';
     default: return false;

@@ -7,15 +7,18 @@ import { ActionButton } from '../ui/ActionButton';
 import { Text, TextInput } from '../ui/typography';
 import { colors } from '../ui/theme';
 import { ContactPicker } from './ContactPicker';
-import { createScheduleCallClient, normalizeScheduleCallNumber } from './schedule-call-client';
-import type { ScheduleCall, ScheduleCallOperation } from './schedule-call-client';
+import { createScheduleCallClient, normalizeInquiryBrief, normalizeScheduleCallNumber } from './schedule-call-client';
+import type { ScheduleCall, ScheduleCallOperation, ScheduleCallTarget } from './schedule-call-client';
 
-export type ScheduleCallPanelProps = { api: ApiClient; itemId: string; expectedRevision: number; onClose: () => void; onFinish: () => void; onScheduleChanged: () => void; onOpenPhoneSettings: () => void; onOpenGoogleContacts?: () => void };
-export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClose, onFinish, onScheduleChanged, onOpenPhoneSettings, onOpenGoogleContacts }: ScheduleCallPanelProps) {
+export type ScheduleCallPanelProps = { api: ApiClient; onClose: () => void; onFinish: () => void; onScheduleChanged: () => void; onOpenPhoneSettings: () => void; onOpenGoogleContacts?: () => void } & ScheduleCallTarget;
+export default function ScheduleCallPanel(props: ScheduleCallPanelProps) {
+  const { api, onClose, onFinish, onScheduleChanged, onOpenPhoneSettings, onOpenGoogleContacts } = props;
+  const inquiry = 'mode' in props && props.mode === 'inquiry';
   const client = useMemo(() => createScheduleCallClient(api), [api]);
   const requestClient = useRef<typeof client | null>(null), readLock = useRef(false);
   const lastKind = useRef<ScheduleCallOperation['kind'] | null>(null);
   const [number, setNumber] = useState('');
+  const [brief, setBrief] = useState(inquiry ? props.brief : '');
   const [recipientName, setRecipientName] = useState('');
   const [call, setCall] = useState<ScheduleCall | null>(null);
   const [readback, setReadback] = useState<ScheduleCall | null>(null);
@@ -49,7 +52,7 @@ export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClo
   const phoneSetup = errorCode === 'not_configured' && (lastKind.current === 'create' || lastKind.current === 'approve');
   const approvalNeedsRead = action.state.status === 'error' && lastKind.current === 'approve' && !phoneSetup && !approvalRead;
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-    <Text accessibilityRole="header" style={styles.title}>일정 장소 전화 확인</Text>
+    <Text accessibilityRole="header" style={styles.title}>{inquiry ? '일반 문의 전화' : '일정 장소 전화 확인'}</Text>
     <Text style={styles.hint}>전화 내용과 번호를 확인한 뒤 직접 승인해야 발신합니다.</Text>
     {!call && <View style={styles.card}><Text style={styles.label}>받는 전화번호</Text>
       <TextInput accessibilityLabel="받는 전화번호" keyboardType="phone-pad" value={number} onChangeText={value => { setNumber(value); setRecipientName(''); }}
@@ -57,20 +60,28 @@ export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClo
       <Text style={styles.hint}>확인할 상대의 번호를 직접 입력해 주세요.</Text>
       <ContactPicker api={api} disabled={locked} onOpenGoogleContacts={onOpenGoogleContacts} onSelect={value => { setRecipientName(value.name); setNumber(value.number); }} />
       {!!recipientName && <Text>선택한 상대: {recipientName}</Text>}
-      <ActionButton label="전화 내용 확인" disabled={locked || !normalizeScheduleCallNumber(number)} onPress={() => submit({ kind: 'create', itemId, expectedRevision, toNumber: number })} />
+      {inquiry && <><Text style={styles.label}>문의 내용</Text><TextInput accessibilityLabel="문의 내용" value={brief} onChangeText={setBrief}
+        editable={!locked} multiline maxLength={1000} style={styles.input} />
+        {!normalizeInquiryBrief(brief) && <Text accessibilityRole="alert" style={styles.error}>문의 내용을 입력하고 보이지 않는 제어 문자를 제거해 주세요.</Text>}</>}
+      <ActionButton label="전화 내용 확인" disabled={locked || !normalizeScheduleCallNumber(number) || (inquiry && !normalizeInquiryBrief(brief))}
+        onPress={() => submit('itemId' in props ? { kind: 'create', itemId: props.itemId, expectedRevision: props.expectedRevision, toNumber: number } :
+          { kind: 'create', mode: 'inquiry', brief, toNumber: number })} />
     </View>}
     {call && <>
-      <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>확인할 일정과 질문</Text>
-        <Text>일정: {call.title}</Text>{!!recipientName && <Text>선택한 상대: {recipientName}</Text>}<Text>받는 번호: {call.toNumber}</Text><Text>질문: {call.question}</Text>
+      <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>{call.mode === 'inquiry' ? '확인할 문의 내용' : '확인할 일정과 질문'}</Text>
+        {call.mode !== 'inquiry' && <Text>일정: {call.title}</Text>}{!!recipientName && <Text>선택한 상대: {recipientName}</Text>}<Text>받는 번호: {call.toNumber}</Text><Text>{call.mode === 'inquiry' ? '문의 내용' : '질문'}: {call.question}</Text>
         <Text style={styles.hint}>전화 요청 접수는 통화 연결이나 상대의 응답을 보장하지 않습니다.</Text></View>
+      {call.mode === 'inquiry' && call.status === 'pending' && <ActionButton label="번호 또는 문의 내용 수정" secondary disabled={locked} onPress={() => {
+        if (action.state.status === 'success') action.reset(); setNumber(call.toNumber); setBrief(call.brief); setCall(null); setMessage('');
+      }} />}
       <Text accessibilityLiveRegion="polite">전화 상태: {statusLabel[call.status]}</Text>
       {call.status === 'pending' && <ActionButton label="승인하고 전화" disabled={locked} onPress={() => submit({ kind: 'approve', call })} />}
       {call.status === 'submitted' && <ActionButton label="통화 결과 확인" disabled={locked} onPress={() => submit({ kind: 'check', call })} />}
-      {call.status === 'completed' && <ActionButton label="장소 정정 검토" disabled={locked} onPress={() => submit({ kind: 'propose', call })} />}
+      {call.mode !== 'inquiry' && call.status === 'completed' && <ActionButton label="장소 정정 검토" disabled={locked} onPress={() => submit({ kind: 'propose', call })} />}
       {call.transcript && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>통화 내용</Text>
         <Text style={styles.hint}>전사는 외부 발화이며, 실제 내용과 다를 수 있습니다. 직접 확인해 주세요.</Text>
         {call.transcript.map((entry, index) => <Text key={index}>{entry.role === 'agent' ? 'PIKKU' : '상대방'}: {entry.text}</Text>)}</View>}
-      {call.status === 'review_pending' && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>장소 정정 검토</Text>
+      {call.mode !== 'inquiry' && call.status === 'review_pending' && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>장소 정정 검토</Text>
         {!!call.reviewNote && <Text>{call.reviewNote}</Text>}
         {call.correction ? <><Text>변경 전: {call.correction.beforeLocation ?? '장소 미설정'}</Text><Text>변경 제안: {call.correction.afterLocation}</Text>
           <Text>통화 요약: {call.correction.summary}</Text>
@@ -96,7 +107,7 @@ export default function ScheduleCallPanel({ api, itemId, expectedRevision, onClo
       {errorCode === 'conflict' && !uncertain && <ActionButton label="일정 다시 조회" secondary onPress={() => { onScheduleChanged(); if (call) onClose(); else onFinish(); }} />}
       <ActionButton label="같은 요청 다시 시도" disabled={reading || requestClient.current !== client} onPress={action.retry} />
       {!uncertain && <ActionButton label="오류 닫기" secondary disabled={approvalNeedsRead || reading} onPress={action.reset} />}</View>}
-    {(!call || ['pending', 'failed', 'no_answer', 'applied', 'rejected'].includes(call.status)) &&
+    {(!call || ['pending', 'failed', 'no_answer', 'applied', 'rejected'].includes(call.status) || (call.mode === 'inquiry' && call.status === 'completed')) &&
       <ActionButton label="이 전화 요청 닫기" secondary disabled={!canClose || approvalNeedsRead} onPress={onFinish} />}
     <ActionButton label="대화로 돌아가기" secondary disabled={!canClose} onPress={onClose} />
   </ScrollView>;

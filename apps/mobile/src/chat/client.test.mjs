@@ -41,6 +41,15 @@ test('전화 요청은 일정 ID와 버전이 유효할 때만 표시 가능한 
   }
 });
 
+test('일반 문의 요청은 유효한 문의 본문만 일정 없이 표시한다', async () => {
+  const valid = { kind: 'phone_request', message: '전화 내용을 확인해 주세요.', mode: 'inquiry', brief: '영업시간을 알려 주세요' };
+  assert.deepEqual((await setup(valid).client.sendMessage(request)).result, valid);
+  for (const bad of [{ ...valid, brief: '' }, { ...valid, brief: 'x'.repeat(1001) }, { ...valid, brief: '문의\u202e변경' },
+    { ...valid, brief: '\ud800' }, { ...valid, itemId: 'event-1' }, { ...valid, mode: 'other' }]) {
+    await assert.rejects(setup(bad).client.sendMessage(request), error => error.code === 'invalid_response');
+  }
+});
+
 test('응답 선택지는 문자열 두 필드로 된 한두 개만 허용한다', async () => {
   const suggestions = [{ label: '시간 조정', message: '오후 2시로 옮기는 제안을 만들어줘' }];
   for (const result of [{ kind: 'reply', message: '선택해 주세요', suggestions },

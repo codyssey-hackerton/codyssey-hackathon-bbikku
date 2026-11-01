@@ -1316,6 +1316,25 @@ test('전화 미연결 안내에서 설정을 열고 돌아와도 입력한 번�
   view.unmount();
 });
 
+test('대화의 일반 문의 대상은 일정 없이 문의 전화 화면을 연다', async t => {
+  const { App } = await components; const calls: any[] = [];
+  globalThis.fetch = async (raw, init) => {
+    const path = new URL(String(raw)).pathname;
+    if (path === '/v1/schedule-calls' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)); calls.push({ path, body });
+      return apiResponse({ call: { id: 'inquiry-1', revision: 1, status: 'pending', mode: 'inquiry', brief: body.brief, question: body.brief, toNumber: body.toNumber } });
+    }
+    return response([]);
+  };
+  const view = harness.renderer(App); t.after(() => view.unmount());
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  chat(view).props.onOpenScheduleCall({ mode: 'inquiry', brief: '영업시간 문의' }); view.flush();
+  assert.match(textOf(visibleNodes(view.tree)), /일반 문의 전화/); assert.equal(input(view, '문의 내용').props.value, '영업시간 문의');
+  enter(view, '받는 전화번호', '01012345678'); visiblePress(view, '전화 내용 확인'); await view.settle();
+  assert.equal(calls.length, 1); assert.equal(calls[0].body.mode, 'inquiry'); assert.equal(calls[0].body.itemId, undefined);
+  assert.match(textOf(visibleNodes(view.tree)), /문의 내용: 영업시간 문의/); assert.equal(calls.some(call => call.path.endsWith('/approve')), false);
+});
+
 
 test('normal chat proposal shows only accept and reject actions and can be accepted directly', async t => {
   const { App, operationGuard } = await components;

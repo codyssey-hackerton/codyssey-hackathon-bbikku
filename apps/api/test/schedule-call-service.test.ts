@@ -12,14 +12,14 @@ const now = new Date('2026-11-01T00:00:00Z');
 const base: ScheduleItem = { id: 'event-1', revision: 1, kind: 'event', title: '회의 장소', timeSlot: { startsAt: '2026-11-02T03:00:00Z', endsAt: '2026-11-02T04:00:00Z', timezone: 'Asia/Seoul' },
   durationMinutes: 60, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending', location: '강남역', sourceRefs: [] };
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
-function fixture(options: { item?: ScheduleItem; model?: ModelPort; settings?: unknown; dispatch?: () => Promise<Response>; status?: string; complete?: boolean; dispatchTimeoutMs?: number } = {}) {
+function fixture(options: { item?: ScheduleItem; model?: ModelPort; settings?: unknown; preflight?: () => Promise<void>; dispatch?: () => Promise<Response>; status?: string; complete?: boolean; dispatchTimeoutMs?: number } = {}) {
   const store = new MemoryPlanningStore(); Object.defineProperty(store, 'durable', { value: true });
   const planning = new PlanningService(store, () => now);
   let active: PhoneCredential | undefined = credential; let posts = 0; let gets = 0;
   const sentBodies: unknown[] = [];
   const fetcher: typeof fetch = async (url, init) => {
     const path = String(url);
-    if (path.includes('/agents/')) return Response.json(options.settings ?? { agentId: 'agent', maxDurationSeconds: 120, liveEvents: { events: ['transcript.final'] } });
+    if (path.includes('/agents/')) { await options.preflight?.(); return Response.json(options.settings ?? { agentId: 'agent', maxDurationSeconds: 120, liveEvents: { events: ['transcript.final'] } }); }
     if (init?.method === 'POST') { posts++; sentBodies.push(JSON.parse(String(init.body))); return options.dispatch ? options.dispatch() : Response.json({ callId: 'call-1' }, { status: 201 }); }
     gets++;
     if (path.includes('/live-events')) return Response.json({ data: options.complete === false ? [] : [
@@ -237,4 +237,45 @@ test('a non-durable store refuses creation before touching the telephone provide
   } });
   await assert.rejects(() => service.create('alice', { itemId: 'event-1', expectedRevision: 1, toNumber: '01099988877' }), { code: 'not_configured' });
   assert.equal(calls, 0);
+});
+
+test('general inquiry preserves approved subject, never modifies a schedule or permits correction', async () => {
+  const f = fixture(); await f.seed();
+  const input = { mode: 'inquiry' as const, brief: '  영업시간을 물어봐 주세요 😀  ', toNumber: '01099988877' };
+  const created = (await f.service.create('alice', input)).call;
+  assert.equal(created.mode, 'inquiry'); assert.equal(created.brief, '영업시간을 물어봐 주세요 😀');
+  assert.equal(created.question, created.brief); assert.equal(created.toNumber, '+821099988877');
+  assert.equal('itemId' in created, false); assert.equal(f.posts, 0);
+  await assert.rejects(() => f.service.get('bob', created.id), { code: 'not_found' });
+  await assert.rejects(() => f.service.propose('alice', created.id, { revision: created.revision }), { code: 'invalid_request' });
+  await assert.rejects(() => f.service.decide('alice', created.id, { revision: created.revision, decision: 'accept' }), { code: 'invalid_request' });
+  const submitted = (await f.service.approve('alice', created.id, { revision: created.revision })).call;
+  assert.equal(submitted.status, 'submitted'); assert.equal(f.posts, 1);
+  const sent = f.sentBodies[0] as { To: string; CallContext: { Instruction: string } };
+  assert.equal(sent.To, '01099988877');
+  assert.equal(JSON.parse(sent.CallContext.Instruction.split('승인된 문의 데이터: ')[1]!).question, created.brief);
+  assert.doesNotMatch(sent.CallContext.Instruction, /강남역/);
+  const checked = (await f.service.check('alice', created.id, { revision: submitted.revision })).call;
+  assert.equal(checked.status, 'completed'); assert.equal(checked.question, created.question);
+  await assert.rejects(() => f.service.propose('alice', created.id, { revision: checked.revision }), { code: 'invalid_request' });
+  await assert.rejects(() => f.service.approve('alice', created.id, { revision: created.revision }), { code: 'conflict' });
+  assert.equal(f.posts, 1); assert.deepEqual((await f.store.read('alice')).items.get('event-1'), base);
+  for (const brief of [' ', 'a\u200db', '\ud800', 'a\uffffb', 'x'.repeat(1001)]) {
+    await assert.rejects(() => f.service.create('alice', { ...input, brief }), { code: 'invalid_request' });
+  }
+  await assert.rejects(() => f.service.create('alice', { ...input, itemId: 'event-1' } as typeof input), { code: 'invalid_request' });
+});
+
+test('inquiry approval rejects changed subject or number during provider preflight', async () => {
+  for (const change of [{ brief: '변경된 문의', question: '변경된 문의' }, { toNumber: '+821011112222' }]) {
+    const entered = deferred<void>(), gate = deferred<void>();
+    const f = fixture({ async preflight() { entered.resolve(); await gate.promise; } });
+    const call = (await f.service.create('alice', { mode: 'inquiry', brief: '영업시간 문의', toNumber: '01099988877' })).call;
+    const approval = f.service.approve('alice', call.id, { revision: call.revision }); await entered.promise;
+    await f.store.transaction('alice', state => {
+      const key = `schedule-call:${call.id}`; const stored = state.voiceSessions.get(key) as object;
+      state.voiceSessions.set(key, { ...stored, ...change });
+    });
+    gate.resolve(); await assert.rejects(approval, { code: 'conflict' }); assert.equal(f.posts, 0);
+  }
 });

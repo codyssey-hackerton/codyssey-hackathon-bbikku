@@ -162,3 +162,69 @@ test('search failure permits manual input and explicit selection of one of multi
  assert.ok(nodes(selectedView.tree).some(n => n.props?.accessibilityLabel === '승인하고 전화'));
  assert.ok(!writes.some(write => write.path.endsWith('/approve')));
 });
+
+test('general inquiry confirms server-stored question and number before approval and only shows transcript', async t => {
+ const writes = []; let refreshed = 0;
+ const saved = { id: 'inquiry-1', revision: 1, status: 'pending', mode: 'inquiry', brief: '영업시간을 알려 주세요', question: '영업시간을 알려 주세요', toNumber: '+821012345678' };
+ const api = { async post(path, body, options) { writes.push({ path, body, options });
+   if (path === '/v1/schedule-calls') return { call: saved };
+   if (path.endsWith('/approve')) return { call: { ...saved, revision: 2, status: 'submitted' } };
+   if (path.endsWith('/check')) return { call: { ...saved, revision: 3, status: 'completed', transcript: [{ role: 'user', text: '오후 여섯 시입니다' }] } };
+   throw Error('unexpected write'); }, async get() { throw Error('unexpected read'); } };
+ const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '영업시간을 알려 주세요', onClose() {}, onFinish() {}, onScheduleChanged() { refreshed++; }, onOpenPhoneSettings() {} });
+ t.after(view.close); enterNumber(view); assert.equal(input(view, '문의 내용'), saved.brief);
+ press(view, '전화 내용 확인'); await view.settle();
+ assert.equal(writes.length, 1); assert.equal(writes[0].body.mode, 'inquiry'); assert.equal(writes[0].body.brief, saved.brief);
+ assert.equal(writes[0].body.itemId, undefined); assert.match(text(view.tree), /받는 번호: \+821012345678/); assert.match(text(view.tree), /문의 내용: 영업시간을 알려 주세요/);
+ assert.equal(writes.some(write => write.path.endsWith('/approve')), false);
+ press(view, '승인하고 전화'); await view.settle(); press(view, '통화 결과 확인'); await view.settle();
+ assert.match(text(view.tree), /상대방: 오후 여섯 시입니다/); assert.equal(refreshed, 0);
+ assert.ok(!nodes(view.tree).some(node => ['장소 정정 검토', '장소 변경 승인'].includes(node.props?.accessibilityLabel)));
+});
+
+test('editing a pending inquiry creates a new confirmation and never approves the old subject', async t => {
+ const writes = [];
+ const api = { async post(path, body, options) { writes.push({ path, body, options });
+   assert.equal(path, '/v1/schedule-calls'); return { call: { id: `inquiry-${writes.length}`, revision: 1, status: 'pending', mode: 'inquiry',
+     brief: body.brief, question: body.brief, toNumber: body.toNumber } }; }, async get() {} };
+ const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '원래 문의', onClose() {}, onFinish() {}, onScheduleChanged() {}, onOpenPhoneSettings() {} });
+ t.after(view.close); enterNumber(view); press(view, '전화 내용 확인'); await view.settle();
+ press(view, '번호 또는 문의 내용 수정'); input(view, '문의 내용', '변경한 문의'); input(view, '받는 전화번호', '01098765432');
+ assert.equal(writes.length, 1); assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '승인하고 전화'));
+ press(view, '전화 내용 확인'); await view.settle(); assert.equal(writes.length, 2);
+ assert.notEqual(writes[0].options.idempotencyKey, writes[1].options.idempotencyKey);
+ assert.equal(writes[1].body.brief, '변경한 문의'); assert.equal(writes[1].body.toNumber, '+821098765432');
+ assert.match(text(view.tree), /문의 내용: 변경한 문의/); assert.ok(!writes.some(write => write.path.endsWith('/approve')));
+});
+
+test('mismatched inquiry question or recipient is never approved', async t => {
+ for (const changed of [{ question: '다른 문의' }, { toNumber: '+821099999999' }, { brief: '다른 문의' }]) {
+  const api = { async post() { return { call: { id: 'inquiry', revision: 1, status: 'pending', mode: 'inquiry', brief: '문의', question: '문의', toNumber: '+821012345678', ...changed } }; }, async get() {} };
+  const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '문의', onClose() {}, onFinish() {}, onScheduleChanged() {}, onOpenPhoneSettings() {} });
+  enterNumber(view); press(view, '전화 내용 확인'); await view.settle();
+  assert.match(text(view.tree), /요청 결과를 확인하지 못했습니다/); assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '승인하고 전화')); view.close();
+ }
+});
+
+test('uncertain inquiry approval retries the same intent and cannot create another request', async t => {
+ const writes = []; const saved = { id: 'inquiry', revision: 1, status: 'pending', mode: 'inquiry', brief: '문의', question: '문의', toNumber: '+821012345678' };
+ const api = { async post(path, body, options) { writes.push({ path, body, options });
+   if (path === '/v1/schedule-calls') return { call: saved };
+   if (writes.length === 2) throw new ApiError('timeout', 'timeout', true);
+   return { call: { ...saved, revision: 2, status: 'submitted' } }; }, async get() { return { call: { ...saved, revision: 2, status: 'submitted' } }; } };
+ const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '문의', onClose() {}, onFinish() {}, onScheduleChanged() {}, onOpenPhoneSettings() {} });
+ t.after(view.close); enterNumber(view); press(view, '전화 내용 확인'); await view.settle(); press(view, '승인하고 전화'); await view.settle();
+ assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '번호 또는 문의 내용 수정').props.disabled, true);
+ press(view, '저장된 전화 상태 조회'); await view.settle(); assert.equal(writes.length, 2);
+ press(view, '같은 요청 다시 시도'); await view.settle(); assert.deepEqual(writes[1], writes[2]); assert.match(text(view.tree), /전화 요청 접수/);
+});
+
+test('inquiry disallows control characters and unpaired surrogates before creating a request', async t => {
+ let writes = 0; const api = { async post() { writes++; throw Error('unexpected'); }, async get() {} };
+ const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '문의', onClose() {}, onFinish() {}, onScheduleChanged() {}, onOpenPhoneSettings() {} });
+ t.after(view.close); enterNumber(view);
+ for (const bad of [' ', 'x'.repeat(1001), '문의\u202e추가', '\ud800', '문의\ufffe', '문의\uffff']) {
+  input(view, '문의 내용', bad); assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '전화 내용 확인').props.disabled, true);
+ }
+ assert.equal(writes, 0);
+});

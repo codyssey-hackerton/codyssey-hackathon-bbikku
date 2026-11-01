@@ -1,9 +1,13 @@
 import { END, START, StateGraph, StateSchema } from '@langchain/langgraph';
 import { z } from 'zod';
 import { formDraft } from './chat-context.ts';
+import { inquiryBrief } from './phone-inquiry.ts';
 
-export const phoneRequestDecision = z.strictObject({ kind: z.literal('phone_request'), text: z.string().trim().min(1).max(2000),
-  itemId: z.string().trim().min(1).max(200), expectedRevision: z.number().int().positive().safe() });
+export const phoneRequestDecision = z.union([
+  z.strictObject({ kind: z.literal('phone_request'), text: z.string().trim().min(1).max(2000),
+    itemId: z.string().trim().min(1).max(200), expectedRevision: z.number().int().positive().safe() }),
+  z.strictObject({ kind: z.literal('phone_request'), text: z.string().trim().min(1).max(2000), mode: z.literal('inquiry'), brief: inquiryBrief }),
+]);
 export const callReviewDecision = z.strictObject({ kind: z.literal('call_review'), text: z.string().trim().min(1).max(2000),
   location: z.string().trim().min(1).max(200).nullable() });
 export const reminderRequestDecision = z.strictObject({ kind: z.literal('reminder_request'), text: z.string().trim().min(1).max(2000),
@@ -14,7 +18,7 @@ export const chatSuggestions = z.array(z.strictObject({
   label: z.string().max(60).refine(value => !!value.trim()),
   message: z.string().max(500).refine(value => !!value.trim()),
 })).min(1).max(2);
-const Decision = z.discriminatedUnion('kind', [
+const Decision = z.union([
   z.object({ kind: z.literal('answer'), text: z.string().min(1), suggestions: chatSuggestions.optional() }),
   z.object({ kind: z.literal('question'), text: z.string().min(1), missingFields: z.array(z.string()).default([]), suggestions: chatSuggestions.optional() }),
   z.object({ kind: z.literal('draft'), text: z.string().min(1), draft: formDraft }).strict(),

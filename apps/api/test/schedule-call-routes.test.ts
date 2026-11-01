@@ -30,7 +30,8 @@ test('chat → explicit call approval → Hongdae correction → separate approv
     if (url.pathname.endsWith('/agents/synthetic-agent')) return Response.json({ agentId: credential.agentId, maxDurationSeconds: 120, liveEvents: { events: ['transcript.final'] } });
     if (url.pathname.endsWith('/calls') && init?.method === 'POST') {
       calls++; const body = JSON.parse(String(init.body)); assert.equal(body.AgentId, credential.agentId);
-      assert.match(body.CallContext.Instruction, /강남역/); return Response.json({ callId: 'synthetic-call' }, { status: 201 });
+      assert.match(body.CallContext.Instruction, calls === 1 ? /강남역/ : /영업시간을 물어봐 주세요/);
+      return Response.json({ callId: 'synthetic-call' }, { status: 201 });
     }
     if (url.pathname.endsWith('/live-events')) {
       const event = (id: string, name: string, detail: object = {}) => ({ id, event: name, timestamp: now, detail });
@@ -82,4 +83,19 @@ test('chat → explicit call approval → Hongdae correction → separate approv
   const duplicate = await post(`/v1/schedule-calls/${call.id}/decision`, decisionBody, 'accept'); assert.equal(duplicate.statusCode, 200);
   assert.equal((await store.read('alice')).items.get(original.id)!.revision, current.revision);
   assert.equal(calls, 1);
+  const inquiry = await post('/v1/schedule-calls', { mode: 'inquiry', brief: ' 영업시간을 물어봐 주세요 ', toNumber: '01012345678' }, 'inquiry-create');
+  assert.equal(inquiry.statusCode, 200, inquiry.body); let inquiryCall = inquiry.json().data.call;
+  assert.equal(inquiryCall.mode, 'inquiry'); assert.equal(inquiryCall.brief, '영업시간을 물어봐 주세요');
+  assert.equal(inquiryCall.question, inquiryCall.brief); assert.equal(inquiryCall.toNumber, '+821012345678');
+  assert.equal('itemId' in inquiryCall, false); assert.equal(calls, 1);
+  const sentInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/approve`, { revision: inquiryCall.revision }, 'inquiry-approve');
+  assert.equal(sentInquiry.statusCode, 200, sentInquiry.body); inquiryCall = sentInquiry.json().data.call;
+  const replayInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/approve`, { revision: 1 }, 'inquiry-approve');
+  assert.equal(replayInquiry.statusCode, 200); assert.equal(calls, 2);
+  const checkedInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/check`, { revision: inquiryCall.revision }, 'inquiry-check');
+  assert.equal(checkedInquiry.statusCode, 200, checkedInquiry.body); inquiryCall = checkedInquiry.json().data.call;
+  assert.equal(inquiryCall.status, 'completed'); assert.equal(inquiryCall.question, '영업시간을 물어봐 주세요');
+  assert.equal((await post(`/v1/schedule-calls/${inquiryCall.id}/propose`, { revision: inquiryCall.revision }, 'inquiry-propose')).statusCode, 400);
+  assert.equal((await post(`/v1/schedule-calls/${inquiryCall.id}/decision`, { revision: inquiryCall.revision, decision: 'accept' }, 'inquiry-decision')).statusCode, 400);
+  assert.deepEqual((await store.read('alice')).items.get(original.id), current);
 });

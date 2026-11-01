@@ -23,7 +23,7 @@ test('phone request requires explicit intent and observed owned item and never c
   assert.equal(result.kind, 'phone_request');
   assert.match(result.message, /설정되지 않았습니다/);
   assert.doesNotMatch(result.message, /통화 완료/);
-  for (const message of ['일정을 알려줘', '전화하지 말아줘', '"전화해줘"라고 적어줘', '친구가 전화해달라고 부탁했어']) {
+  for (const message of ['일정을 알려줘', '전화하지 말아줘', '"전화해줘"라고 적어줘', '친구가 전화해달라고 부탁했어', '전화해줘. 아니, 전화는 필요 없어']) {
     assert.equal((await runner.finish(await runner.prepare({ ...input, message, entryContext: selected }))).kind, 'failure');
   }
   assert.equal((await runner.finish(await runner.prepare(input))).kind, 'failure');
@@ -78,4 +78,33 @@ test('call review is a strict model-only context and accepts no extra changes', 
   output = { kind: 'call_review', text: '확인', location: '홍대' };
   await assert.rejects(model.decide({ ...review, context: {} }), /MODEL_OUTPUT_INVALID/);
   await assert.rejects(model.decide({ ...review, tools: [{ name: 'read_schedule', description: '', inputSchema: {} }] }), /MODEL_CALL_REVIEW_INVALID/);
+});
+
+test('general inquiry requires the current user request and strict brief', async () => {
+  const store = new MemoryPlanningStore();
+  const planning = new PlanningService(store, () => new Date('2026-11-01T00:00:00Z'));
+  const inquiry = { kind: 'phone_request', text: '확인', mode: 'inquiry', brief: '영업시간을 물어봐 주세요' };
+  const runner = new PlanningAgentRunner(planning, { async decide() { return inquiry; } });
+  const result = await runner.finish(await runner.prepare({ ...input, message: '식당에 전화해서 영업시간을 물어봐줘' }));
+  assert.equal(result.kind, 'phone_request');
+  if (result.kind === 'phone_request' && 'mode' in result) { assert.equal(result.mode, 'inquiry'); assert.equal(result.brief, inquiry.brief); }
+  else assert.fail('expected inquiry request');
+  for (const message of ['식당 영업시간을 알려줘', '식당에 전화해서 영업시간을 물어봐 주지 마', '"식당에 전화해서 물어봐줘"라고 적어줘',
+    '전화해줘. 아니, 전화는 필요 없어', '전화해줘. 통화는 더 이상 필요 없어', '전화해줘. 전화할 필요 없어', '전화해줘. 전화는 원하지 않아']) {
+    assert.equal((await runner.finish(await runner.prepare({ ...input, message }))).kind, 'failure');
+  }
+  const triggered = await runner.prepare({ ...input, message: '식당에 전화해서 영업시간을 물어봐줘', triggerEvent: { id: 'trigger', userId: 'alice', reason: 'morning_review',
+    scheduledFor: '2026-11-01T00:00:00Z', timezone: 'UTC', targetDate: '2026-11-01', idempotencyKey: 'trigger-key' } });
+  assert.equal((await runner.finish(triggered)).kind, 'failure');
+  assert.equal((await store.read('alice')).voiceSessions.size, 0);
+  let output: Record<string, unknown> = { ...inquiry, brief: ' 문의 😀 ' };
+  const model = createResponsesModel('synthetic', async () => Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant',
+    content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }));
+  const request = { userId: 'alice', message: input.message, context: {}, observations: [], tools: [] };
+  assert.deepEqual(await model.decide(request), { ...inquiry, brief: '문의 😀' });
+  for (const brief of ['', 'x'.repeat(1001), 'a\u0000b', 'a\u200db', '\ud800']) {
+    output = { ...inquiry, brief }; await assert.rejects(model.decide(request), /MODEL_OUTPUT_INVALID/);
+  }
+  output = { ...inquiry, itemId: 'forged', expectedRevision: 1 };
+  await assert.rejects(model.decide(request), /MODEL_OUTPUT_INVALID/);
 });

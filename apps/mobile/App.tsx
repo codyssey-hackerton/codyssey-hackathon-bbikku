@@ -23,6 +23,7 @@ import type { Proposal } from './src/proposals/client';
 import ReminderCard from './src/notifications/ReminderCard';
 import MemoryPanel from './src/memory/MemoryPanel';
 import ScheduleCallPanel from './src/contacts/ScheduleCallPanel';
+import type { ScheduleCallTarget } from './src/contacts/schedule-call-client';
 import ReviewPanel from './src/review/ReviewPanel';
 import ReviewDigests from './src/review/ReviewDigests';
 import CalendarScreen from './src/screens/CalendarScreen';
@@ -68,7 +69,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
   const [tab, setTab] = useState<Tab>('home');
   const [googleReturnTo, setGoogleReturnTo] = useState<'main' | 'scheduleCall' | 'calendarImport' | 'proposals'>('main');
   const [panel, setPanel] = useState<'main' | 'profile' | 'connections' | 'proposals' | 'memory' | 'review' | 'calendarImport' | 'phoneConnection' | 'googleConnection' | 'calendarSync' | 'addItem' | 'scheduleCall' | 'upcomingPreview'>('main');
-  const [scheduleCallTarget, setScheduleCallTarget] = useState<{ itemId: string; expectedRevision: number } | null>(null);
+  const [scheduleCallTarget, setScheduleCallTarget] = useState<ScheduleCallTarget | null>(null);
   const [phoneReturnToCall, setPhoneReturnToCall] = useState(false);
   const profile = usePlanningProfile(api);
   const [onboarding, setOnboarding] = useState<'check' | 'show' | 'hidden'>(member ? 'check' : 'hidden');
@@ -242,7 +243,9 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
             }
             setEntryContext(undefined);
           }} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
-            if (scheduleCallTarget && (scheduleCallTarget.itemId !== target.itemId || scheduleCallTarget.expectedRevision !== target.expectedRevision)) {
+            if (scheduleCallTarget && ('mode' in scheduleCallTarget
+              ? !('mode' in target) || target.brief !== scheduleCallTarget.brief
+              : 'mode' in target || target.itemId !== scheduleCallTarget.itemId || target.expectedRevision !== scheduleCallTarget.expectedRevision)) {
               setNavigationError('진행 중인 전화 요청을 먼저 확인해 주세요.');
             } else if (!scheduleCallTarget) setScheduleCallTarget(target);
             setPanel('scheduleCall');

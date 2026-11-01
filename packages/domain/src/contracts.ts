@@ -143,6 +143,7 @@ export type AgentResult =
   | { kind: "reply"; message: string; suggestions?: ChatSuggestion[] }
   | { kind: "reminder_request"; message: string; reminder: ReminderCandidate }
   | { kind: "phone_request"; message: string; itemId: string; expectedRevision: number }
+  | { kind: "phone_request"; message: string; mode: "inquiry"; brief: string }
   | { kind: "question"; message: string; missingFields: string[]; suggestions?: ChatSuggestion[] }
   | { kind: "proposal"; message: string; proposalIds: string[] }
   | { kind: "failure"; message: string; code: string; retryable: boolean };
