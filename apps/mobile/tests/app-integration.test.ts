@@ -61,7 +61,7 @@ function createHarness() {
     Linking: { openURL: async (url: string) => { openedLinks.push(url); } },
     Platform: { OS: 'ios' }, StyleSheet: { create: (styles: any) => styles },
   };
-  const host: any = { react, native, jsx, fragment, backListeners, openedLinks, marker: 0, fontState: [true, null],
+  const host: any = { react, native, jsx, fragment, backListeners, openedLinks, marker: 0, fontState: [true, null], insets: { top: 0, right: 0, bottom: 0, left: 0 },
     profile: { scope: 'test', load: { status: 'success', value: null, contextRevision: 0 }, mutation: { state: { status: 'idle' }, canRetry: true }, refresh() {}, save() { return true; }, skip() { return true; } } };
   (globalThis as any).__appIntegrationHarness = host;
 
@@ -128,7 +128,7 @@ const components = build({
         path === 'expo-font' ? 'exports.useFonts=()=>globalThis.__appIntegrationHarness.fontState' :
         path === 'react' ? 'module.exports = globalThis.__appIntegrationHarness.react' :
         path === 'react-native' ? 'module.exports = globalThis.__appIntegrationHarness.native' :
-        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider = ({children}) => children; exports.SafeAreaView = "View"; exports.useSafeAreaInsets=()=>({top:0,right:0,bottom:0,left:0})' :
+        path === 'react-native-safe-area-context' ? 'exports.SafeAreaProvider = ({children}) => children; exports.SafeAreaView = "View"; exports.useSafeAreaInsets=()=>globalThis.__appIntegrationHarness.insets' :
         path === 'expo-status-bar' ? 'exports.StatusBar = "StatusBar"' :
           'exports.jsx = exports.jsxs = globalThis.__appIntegrationHarness.jsx; exports.Fragment = globalThis.__appIntegrationHarness.fragment', loader: 'js',
     }));
@@ -208,7 +208,7 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { harness.cleanup(); delete (globalThis as any).__appIntegrationHarness.inlineProposalId; globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
+test.afterEach(() => { harness.cleanup(); delete (globalThis as any).__appIntegrationHarness.inlineProposalId; globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; (globalThis as any).__appIntegrationHarness.insets.top = 0; (globalThis as any).__appIntegrationHarness.native.Platform.OS = 'ios'; });
 
 test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 요청으로 이동한다', async () => {
   const { App } = await components;
@@ -228,6 +228,35 @@ test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 
   visiblePress(view, 'PIKKU에게 부탁하기');
   assert.equal(chat(view).props.entryContext.kind, 'create');
   assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
+});
+
+test('키보드 회피는 iOS 채팅과 하단 탭을 함께 감싸며 화면 전환에서 대화 상태를 유지한다', async () => {
+  const { App } = await components; globalThis.fetch = async () => response([]);
+  (globalThis as any).__appIntegrationHarness.insets.top = 47;
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  const owner = () => node(view, 'KeyboardAvoidingView', item => nodes(item.children).some(child => child.type === 'ChatScreen'));
+  assert.equal(owner().props.enabled, false); const marker = chat(view).props.marker;
+  visiblePress(view, 'PIKKU'); assert.equal(owner().props.enabled, true); assert.equal(owner().props.behavior, 'padding');
+  assert.equal(owner().props.keyboardVerticalOffset, 47);
+  assert.ok(nodes(owner().children).some(child => child.props?.accessibilityRole === 'tablist'));
+  visiblePress(view, '캘린더'); assert.equal(owner().props.enabled, false); assert.equal(chat(view).props.marker, marker);
+  visiblePress(view, 'PIKKU'); assert.equal(owner().props.enabled, true); assert.equal(chat(view).props.marker, marker);
+  (globalThis as any).__appIntegrationHarness.native.Platform.OS = 'android'; view.flush();
+  visiblePress(view, '홈'); visiblePress(view, 'PIKKU'); assert.equal(owner().props.enabled, false);
+});
+
+test('글꼴 대체 안내가 표시되면 실제 안내 높이를 키보드 회피 위치에 더한다', async () => {
+  const { App } = await components; globalThis.fetch = async () => response([]);
+  (globalThis as any).__appIntegrationHarness.insets.top = 47;
+  (globalThis as any).__appIntegrationHarness.fontState = [false, new Error('font unavailable')];
+  const view = harness.renderer(App);
+  const notice = node(view, 'Text', item => textOf(item.children).includes('글꼴을 불러오지 못해'));
+  notice.props.onLayout({ nativeEvent: { layout: { height: 39 } } }); view.flush();
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, 'PIKKU');
+  const owner = node(view, 'KeyboardAvoidingView', item => nodes(item.children).some(child => child.type === 'ChatScreen'));
+  assert.equal(owner.props.enabled, true); assert.equal(owner.props.keyboardVerticalOffset, 86);
 });
 
 test('선호·상황은 프로필에서만 열리고 뒤로 가면 프로필로 돌아간다', async () => {
