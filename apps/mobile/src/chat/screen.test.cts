@@ -94,7 +94,7 @@ test('대기 시간 안내는 실제 진행률을 주장하지 않고 완료·�
   clock.fire(); view.flush();
   assert.match(text(view.tree), /답변이 오래 걸리고 있어요/);
   assert.match(text(view.tree), /다른 화면을 확인해도 요청은 취소되지 않아요/);
-  press(view, '제안 검토'); assert.equal(navigations, 1);
+  press(view, '제안 기록'); assert.equal(navigations, 1);
   assert.equal(calls.length, 1);
   complete({ conversationId: 'c', result: { kind: 'reply', message: '답변' } }); await view.settle();
   assert.doesNotMatch(text(view.tree), /답변이 오래 걸리고 있어요/); assert.equal(clock.timers.size, 0);
@@ -252,7 +252,7 @@ test('결과 확인 중 재시도는 잠기고 저장된 제안 응답은 원래
   const Screen = await component; const calls: any[] = [], checks: any[] = []; let finish!: (value: unknown) => void; let refreshed = 0;
   const client = { async sendMessage(input: any) { calls.push(input); throw new Screen.ApiError('timeout', 'timeout', true); },
     checkRequest(input: any) { checks.push(input); return new Promise(resolve => { finish = resolve; }); } };
-  const view = render(Screen, { ...base, client, onProposalCreated() { refreshed++; } }); t.after(view.unmount);
+  const view = render(Screen, { ...base, client, onProposalCreated() { refreshed++; }, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); } }); t.after(view.unmount);
   type(view, '원래 요청'); press(view, '메시지 보내기'); await view.settle();
   assert.equal(Screen.operationGuard.hasUnresolved(), true);
   const retry = nodes(view.tree).find(node => node.type === 'Pressable' && text(node.children) === '같은 요청 다시 시도');
@@ -262,6 +262,7 @@ test('결과 확인 중 재시도는 잠기고 저장된 제안 응답은 원래
   assert.deepEqual(checks[0], { requestId: calls[0].requestId, idempotencyKey: calls[0].idempotencyKey, conversationId: null });
   finish({ status: 'completed', result: { response: { conversationId: 'c', result: { kind: 'proposal', message: '복구된 제안', proposalIds: ['p'] } } } });
   await view.settle(); assert.equal(refreshed, 1); assert.match(text(view.tree), /복구된 제안/);
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'ProposalCard').map(node => node.props.proposalId), ['p']);
   assert.equal(Screen.operationGuard.hasUnresolved(), false); assert.equal(calls.length, 1);
 });
 
@@ -370,4 +371,104 @@ test('복구한 전화 요청도 버튼을 직접 누르기 전에는 전화 단
   t.after(view.unmount); type(view, '전화해줘'); press(view, '메시지 보내기'); await view.settle();
   press(view, '처리 결과 확인'); await view.settle(); assert.deepEqual(targets, []);
   press(view, '전화 요청 확인'); assert.deepEqual(targets, [{ itemId: 'i1', expectedRevision: 2 }]);
+});
+
+test('서버가 반환한 제안만 해당 답변 아래에 표시하며 같은 ID는 중복하지 않는다', async t => {
+  const Screen = await component; let sends = 0;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { sends++; return { conversationId: 'c', result: { kind: 'proposal', message: `제안 답변 ${sends}`,
+      proposalIds: sends === 1 ? ['server-a', 'server-b', 'server-a'] : ['server-a'] } }; } } });
+  t.after(view.unmount);
+  type(view, '제안해줘'); press(view, '메시지 보내기'); await view.settle();
+  const tree = nodes(view.tree);
+  const cards = tree.filter(node => node.type === 'ProposalCard');
+  assert.deepEqual(cards.map(card => card.props.proposalId), ['server-a', 'server-b']);
+  assert.ok(tree.findIndex(node => node.type === 'Text' && text(node.children) === '제안 답변 1') < tree.indexOf(cards[0]));
+  assert.match(text(view.tree), /아래 제안을 확인해 주세요/);
+  assert.doesNotMatch(text(view.tree), /제안 목록에서/);
+  type(view, '다시'); press(view, '메시지 보내기'); await view.settle();
+  assert.deepEqual(nodes(view.tree).filter(node => node.type === 'ProposalCard').map(node => node.props.proposalId), ['server-a', 'server-b']);
+});
+
+test('일반·질문·실패·전화 요청에는 제안 카드를 만들지 않는다', async t => {
+  const Screen = await component;
+  for (const result of [
+    { kind: 'reply', message: '일반 답변' }, { kind: 'question', message: '언제인가요?', missingFields: ['time'] },
+    { kind: 'failure', message: '실패', code: 'not_ready', retryable: false },
+    { kind: 'phone_request', message: '전화할까요?', itemId: 'event', expectedRevision: 1 },
+  ]) {
+    const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+      onOpenScheduleCall() {}, client: { async sendMessage() { return { conversationId: 'c', result }; } } });
+    t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
+    assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0, result.kind);
+    if (result.kind === 'phone_request') assert.match(text(view.tree), /전화 요청 확인/);
+  }
+});
+
+test('비어 있는 제안 ID는 카드로 추측하지 않고 기록 확인을 안내한다', async t => {
+  const Screen = await component;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { return { conversationId: 'c', result: { kind: 'proposal', message: '제안', proposalIds: ['', '  '] } }; } } });
+  t.after(view.unmount); type(view, '요청'); press(view, '메시지 보내기'); await view.settle();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0);
+  assert.match(text(view.tree), /제안 정보를 확인할 수 없어요/);
+});
+
+test('새 메시지만 자동 스크롤하고 제안 카드 크기 변경은 검토 위치를 유지한다', async t => {
+  const Screen = await component; let finish!: (value: unknown) => void; let scrolls = 0;
+  const view = render(Screen, { ...base, renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { sendMessage() { return new Promise(resolve => { finish = resolve; }); } } });
+  t.after(view.unmount);
+  const scroll = () => nodes(view.tree).find(node => node.type === 'ScrollView');
+  scroll().props.ref.current = { scrollToEnd() { scrolls++; } };
+  type(view, '일정 제안'); press(view, '메시지 보내기');
+  scroll().props.onContentSizeChange(); assert.equal(scrolls, 1);
+  finish({ conversationId: 'c', result: { kind: 'proposal', message: '제안을 확인해 주세요', proposalIds: ['p'] } });
+  await view.settle(); scroll().props.onContentSizeChange(); assert.equal(scrolls, 2);
+  scroll().props.onContentSizeChange(); scroll().props.onContentSizeChange(); assert.equal(scrolls, 2);
+});
+
+test('다른 제안의 미해결 승인 중 전송과 맥락 전환을 막고 카드와 초안을 보존한다', async t => {
+  const Screen = await component; const owner = {}; let interval: (() => void) | undefined; let calls = 0; let cleared = 0;
+  t.mock.method(globalThis, 'setInterval', ((callback: () => void) => { interval = callback; return 1; }) as typeof setInterval);
+  t.mock.method(globalThis, 'clearInterval', (() => {}) as typeof clearInterval);
+  const oldEntry = { key: 'old', kind: 'item', id: 'item-1', expectedRevision: 1, title: '기존 일정' };
+  const nextEntry = { key: 'next', kind: 'item', id: 'item-2', expectedRevision: 1, title: '새 일정' };
+  const props = { ...base, entryContext: oldEntry, onClearEntryContext() { cleared++; },
+    renderProposal(id: string) { return jsx('ProposalCard', { proposalId: id }); },
+    client: { async sendMessage() { calls++; return { conversationId: 'c', result: { kind: 'proposal', message: '승인할 제안', proposalIds: ['p'] } }; } } };
+  const view = render(Screen, props);
+  t.after(() => { Screen.operationGuard.clear(owner); view.unmount(); });
+  type(view, '첫 요청'); press(view, '메시지 보내기'); await view.settle();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  Screen.operationGuard.update(owner, { status: 'pending' });
+  type(view, '보존할 초안'); press(view, '메시지 보내기');
+  assert.equal(calls, 1); assert.match(text(view.tree), /변경 요청을 먼저 확인/);
+  press(view, '맥락 닫기'); assert.equal(cleared, 0);
+  view.props = { ...props, entryContext: nextEntry, revisionRequest: { key: 'revision', proposalId: 'p', text: '수정 초안' } };
+  view.dirty = true; view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  assert.match(text(view.tree), /기존 일정/); assert.doesNotMatch(text(view.tree), /선택한 일정: 새 일정/);
+  assert.equal(nodes(view.tree).find(node => node.type === 'TextInput' && node.props.accessibilityLabel === '채팅 메시지').props.value, '보존할 초안');
+  Screen.operationGuard.update(owner, { status: 'error', error: new Error('timeout'), uncertain: true });
+  interval?.(); view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 1);
+  assert.equal(calls, 1);
+  Screen.operationGuard.clear(owner); assert.ok(interval); interval!(); view.flush();
+  assert.equal(nodes(view.tree).filter(node => node.type === 'ProposalCard').length, 0);
+  assert.match(text(view.tree), /선택한 일정: 새 일정|제안 수정 요청 초안/);
+});
+
+test('사용자 말풍선은 헤더 없이 본문만 표시하고 AI 응답은 레이블을 유지한다', async t => {
+  const Screen = await component;
+  const view = render(Screen, { ...base, client: { async sendMessage() { return { conversationId: 'c', result: { kind: 'reply', message: 'AI의 답변' } }; } } });
+  t.after(view.unmount); type(view, '사용자의 메시지'); press(view, '메시지 보내기'); await view.settle();
+  const userBubble = nodes(view.tree).find(node => node.type === 'View' && Array.isArray(node.children) &&
+    node.children.some((child: any) => child?.type === 'Text' && text(child.children) === '사용자의 메시지'));
+  assert.ok(userBubble);
+  assert.deepEqual(userBubble.children.filter(Boolean).map((child: any) => child.type), ['Text']);
+  assert.equal(userBubble.children.find((child: any) => child?.type === 'Text').props.accessibilityLabel, '내 메시지: 사용자의 메시지');
+  assert.match(text(view.tree), /AI 응답/);
+  assert.match(text(view.tree), /AI의 답변/);
+  assert.equal(nodes(view.tree).some(node => node.type === 'Text' && text(node.children) === '나'), false);
 });

@@ -287,7 +287,7 @@ async function openContact(view: any, id = 'contact-1') {
   await view.settle(); press(view, `연락 ${id} 상세`); await view.settle();
 }
 async function openProposalContact(view: any) {
-  await view.settle(); press(view, '제안 시간 조정, 확인 대기, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 옮긴 회의, 확인 대기, 상세 보기'); await view.settle();
   press(view, '연락 준비'); await view.settle();
 }
 const posts = (calls: Call[], suffix?: string) => calls.filter(call => call.method === 'POST' && (!suffix || call.path.endsWith(suffix)));
@@ -358,7 +358,7 @@ test('실제 제안 화면의 승인 preview는 수신자, 제목, 본문과 모
   await openProposalContact(view); await openContact(view);
   const preview = textOf(view.tree);
   for (const value of [recipient.displayName, recipient.address, draft.purpose, draft.messageOrCallBrief,
-    '기존 회의', '옮긴 회의', '09:00', '10:00', '11:00', '12:00', '없음 (삭제)']) {
+    '기존 회의', '옮긴 회의', ...[oldSlot.startsAt, oldSlot.endsAt, newSlot.startsAt, newSlot.endsAt].map(value => new Intl.DateTimeFormat('ko-KR', { hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(value))), '없음 (삭제)']) {
     assert.ok(preview.includes(value), `preview missing ${value}`);
   }
   assert.doesNotMatch(preview, /move-1|delete-2|변경 ID|스냅샷 버전/);
@@ -986,7 +986,7 @@ test('회신 반영 후 현재 제안 상태를 표시하고 나갔다 다시 �
   };
   const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
   t.after(() => view.unmount());
-  await view.settle(); press(view, '제안 시간 조정, 연락 대기, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 옮긴 회의, 연락 대기, 상세 보기'); await view.settle();
   press(view, '연락 준비'); await openContact(view);
   assert.match(textOf(view.tree), /원 일정은 유지됩니다/);
   press(view, '회신 확인'); await view.settle();
@@ -1019,7 +1019,7 @@ test('완료된 여러 대안은 한 건 적용, 나머지 미반영으로 표�
   const mock = memoryApi([contact]); mock.proposals.set(selected.id, selected); mock.proposals.set(other.id, other);
   const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
   t.after(() => view.unmount());
-  await view.settle(); press(view, '제안 시간 조정, 적용됨, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 옮긴 회의, 적용됨, 상세 보기'); await view.settle();
   press(view, '연락 내역'); await openContact(view);
   assert.match(textOf(view.tree), /일정에 반영된 제안입니다/); assert.match(textOf(view.tree), /일정이 바뀌어 새 제안을 확인해야 합니다/);
   assert.match(textOf(view.tree), /나머지 대안은 반영되지 않았습니다/);
@@ -1073,7 +1073,7 @@ test('다른 대안이 적용되어 stale이 된 원래 제안에서도 연락 �
   const mock = memoryApi([contact]); mock.proposals.set(original.id, original); mock.proposals.set(selected.id, selected);
   const view = harness.renderer(ProposalPanel, { api: mock.api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
   t.after(() => view.unmount());
-  await view.settle(); press(view, '제안 시간 조정, 다시 확인 필요, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 옮긴 회의, 다시 확인 필요, 상세 보기'); await view.settle();
   press(view, '연락 내역'); await view.settle();
   assert.equal(button(view, '새 연락 초안 작성').props.disabled, true);
   await openContact(view);

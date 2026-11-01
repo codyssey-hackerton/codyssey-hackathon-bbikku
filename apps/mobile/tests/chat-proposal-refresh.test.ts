@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 function createHarness() {
   type Instance = { hooks: any[]; index: number; alive: boolean; view: any };
   let current: Instance | undefined;
+  const views = new Set<any>();
   const fragment = Symbol('fragment');
   const sameDeps = (a?: unknown[], b?: unknown[]) =>
     a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
@@ -63,6 +64,7 @@ function createHarness() {
 
   function renderer(Component: any, initialProps: any) {
     const view: any = { props: initialProps, dirty: true, effects: [], instances: new Map(), tree: null };
+    views.add(view);
     function render(node: any, path: string, seen: Set<string>): any {
       if (node === null || node === undefined || typeof node === 'boolean') return null;
       if (typeof node === 'string' || typeof node === 'number') return node;
@@ -104,17 +106,19 @@ function createHarness() {
     };
     view.update = (props: any) => { view.props = props; view.dirty = true; view.flush(); };
     view.settle = async () => { for (let i = 0; i < 4; i += 1) { await new Promise((done) => setImmediate(done)); view.flush(); } };
+    view.unmount = () => { for (const instance of view.instances.values() as Iterable<Instance>) { instance.alive = false; for (const hook of instance.hooks) hook?.cleanup?.(); } view.instances.clear(); views.delete(view); };
     view.flush();
     return view;
   }
-  return { react, native, jsx, fragment, renderer };
+  return { react, native, jsx, fragment, renderer, cleanup: () => { for (const view of views) view.unmount(); } };
 }
 
 const harness = createHarness();
+test.afterEach(() => harness.cleanup());
 const components = build({
   stdin: {
     contents: `export { default as ChatScreen } from './ChatScreen';
-      export { default as ProposalPanel } from '../proposals/ProposalPanel';
+      export { default as ProposalPanel, ChatProposalCard } from '../proposals/ProposalPanel';
       export { createChatClient } from './client'; export { createApiClient } from '../api/http';`,
     resolveDir: resolve(__dirname, '../src/chat'), loader: 'ts',
   },
@@ -141,6 +145,7 @@ const components = build({
   return compiled.exports as {
     ChatScreen: any;
     ProposalPanel: any;
+    ChatProposalCard: any;
     createApiClient: (options: any) => any;
     createChatClient: (api: any) => any;
   };
@@ -174,8 +179,9 @@ function send(view: any, value: string) {
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -401,7 +407,7 @@ test('proposal detail revision is read-only and unavailable during an unresolved
   const api = { get: async (path: string) => { calls.push(path); return path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal }; }, post: async (path: string, body: any, options: any) => { calls.push('POST'); decisions.push({ path, body, options }); return decisions.length === 1 ? firstDecision : decision.promise; } };
   const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: (value: any) => { selected = value; } });
   await view.settle();
-  press(view, '제안 이유, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '제안 바뀐 회의 외 1개, 확인 대기, 상세 보기'); await view.settle();
   press(view, '수정 요청');
   assert.deepEqual(selected, proposal);
   assert.equal(calls.includes('POST'), false);
@@ -438,9 +444,9 @@ test('proposal summary keeps all decision-relevant changes visible without inter
   const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
   await view.settle();
   assert.doesNotMatch(textOf(view.tree), /private-proposal-id|생성:|버전:/);
-  press(view, '제안 일정을 옮겨요, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '제안 변경 회의, 확인 대기, 상세 보기'); await view.settle();
   const text = textOf(view.tree);
-  for (const value of ['기존 회의', '변경 회의', '09:00:00.123456+09:00', '11:00', '확인 기한:', '소요 시간:', '마감:', '시간 조정:', '참여 범위:', '분류:', '완료 상태:', '참석 상태:', '연결된 원본이 있는 일정']) assert.ok(text.includes(value), `missing ${value}`);
+  for (const value of ['기존 회의', '변경 회의', '.123456', '확인 기한:', '소요 시간:', '마감:', '시간 조정:', '참여 범위:', '분류:', '완료 상태:', '참석 상태:', '연결된 원본이 있는 일정']) assert.ok(text.includes(value), `missing ${value}`);
   assert.doesNotMatch(text, /private-proposal-id|private-change-id|private-event-id|private@example\.test|private-calendar|private-external|private-evidence|서버 검증 결과|기준 일정 버전/);
   assert.equal(decisions.length, 0);
   press(view, '제안 승인'); await view.settle();
@@ -460,7 +466,7 @@ test('invalid proposal displays actionable conflict and missing information whil
     createdAt: '2026-10-31T00:00:00Z', expiresAt: null, status: 'pending', coordinationTarget: null };
   const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal }, post: async () => { throw new Error('unexpected write'); } };
   const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
-  await view.settle(); press(view, '제안 일정 변경, 확인 대기, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 새 일정, 확인 대기, 상세 보기'); await view.settle();
   const text = textOf(view.tree);
   assert.match(text, /시간이 겹칩니다/); assert.match(text, /빠진 정보: 마감/); assert.match(text, /보호된 일정: 겹치는 일정/);
   assert.doesNotMatch(text, /overlap:|c-invalid|event-hidden/);
@@ -484,7 +490,7 @@ test('create and delete show meaningful values while default fields stay in coll
   const api = { get: async (path: string) => path === '/v1/proposals' ? { proposals: [proposal], nextCursor: null } : { proposal },
     post: async () => { throw new Error('unexpected write'); } };
   const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} });
-  await view.settle(); press(view, '제안 일정 정리, 확인 대기, 상세 보기'); await view.settle();
+  await view.settle(); press(view, '제안 새 일정 외 1개, 확인 대기, 상세 보기'); await view.settle();
   const collapsed = textOf(view.tree);
   for (const value of ['새 일정', '기존 공동 일정', '공동', '고정', '소요 60분', '마감 ', '분류 업무', '완료 완료', '참석 불참']) assert.ok(collapsed.includes(value), `missing ${value}`);
   assert.doesNotMatch(collapsed, /소요 미설정|마감 미설정|분류 미분류|완료 대기|참석 미기록/);
@@ -508,11 +514,127 @@ test('proposal confirmation deadline displays exact instant in the device timezo
       post: async () => { writes++; throw new Error('unexpected write'); } };
     const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged: () => {}, onBack: () => {}, onRequestRevision: () => {} });
     {
-      await view.settle(); press(view, '제안 시각 확인, 확인 대기, 상세 보기'); await view.settle();
+      await view.settle(); press(view, '제안 일정, 확인 대기, 상세 보기'); await view.settle();
       const deadline = nodes(view.tree).find(node => node.type === 'Text' && textOf(node.children).startsWith('확인 기한:'));
       assert.ok(deadline); const label = textOf(deadline.children);
-      assert.match(label, /2026\D+11\D+1\D+08:56:31\.276123/); assert.doesNotMatch(label, /2026-10-31T23:56/);
+      assert.match(label, /2026\D+11\D+1\D+오전\s+8:56:31\.276123/); assert.doesNotMatch(label, /2026-10-31T23:56/);
       assert.equal(proposal.expiresAt, '2026-10-31T23:56:31.276123Z'); assert.equal(writes, 0);
     }
   } finally { if (previousTimezone === undefined) delete process.env.TZ; else process.env.TZ = previousTimezone; }
+});
+
+function inlineProposal(id: string, title: string, status = 'pending') {
+  const after = { kind: 'event', title, timeSlot: { startsAt: '2026-11-02T09:00:00Z', endsAt: '2026-11-02T10:00:00Z', timezone: 'UTC' },
+    durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending' };
+  return { id, revision: 1, mode: 'personal', baseScheduleRevision: 1, baseContextRevision: 0, changeSet: { changes: [{ changeId: 'c1', operation: 'create', after }] },
+    beforeItems: [], reason: '상세에서만 보이는 긴 설명입니다.', evidenceRefs: [], validation: { valid: true, conflicts: [], missingFields: [], protectedTargets: [],
+      checkedScheduleRevision: 1, checkedContextRevision: 0, checkedAt: '2026-10-31T00:00:00Z' }, createdAt: '2026-10-31T00:00:00Z', expiresAt: null, status, coordinationTarget: null };
+}
+
+test('inline proposal shows direct actions and hides reason until requested', async () => {
+  const { ChatProposalCard } = await components; const proposal = inlineProposal('p/1', '운동'); const reads: string[] = []; const writes: any[] = [];
+  const api = { async get(path: string) { reads.push(path); return { proposal }; }, async post(path: string, body: any, options: any) {
+    writes.push({ path, body, options }); return { outcome: 'rejected', proposal: { ...proposal, status: 'rejected' }, scheduleRevision: 1 }; } };
+  const view = harness.renderer(ChatProposalCard, { api, id: 'p/1', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} });
+  await view.settle(); assert.deepEqual(reads, ['/v1/proposals/p%2F1']); assert.match(textOf(view.tree), /운동/);
+  assert.equal(nodes(view.tree).filter(node => node.type === 'Text' && textOf(node.children) === '운동').length, 1);
+  assert.doesNotMatch(textOf(view.tree), /상세에서만 보이는 긴 설명/); assert.ok(!nodes(view.tree).some(node => node.type === 'ScrollView'));
+  assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락'));
+  assert.match(textOf(view.tree), /일정 추가/); press(view, '이유 보기'); assert.match(textOf(view.tree), /상세에서만 보이는 긴 설명/);
+  assert.doesNotMatch(textOf(view.tree), /변경 전|변경 후|없음 \(새 일정\)/); assert.equal(writes.length, 0);
+  press(view, '거절'); await view.settle(); assert.equal(writes.length, 1); assert.equal(writes[0].body.decision, 'reject');
+  assert.match(textOf(view.tree), /제안을 거절했습니다/);
+});
+
+test('inline pending and uncertain decision keep original ID, API and retry identifiers until resolved', async () => {
+  const { ChatProposalCard } = await components; const oldProposal = inlineProposal('old', '기존 운동'), newProposal = inlineProposal('new', '새 운동');
+  const first = deferred<any>(), retry = deferred<any>(); const oldPosts: any[] = [], newReads: string[] = [];
+  const api = { async get(path: string) { assert.equal(path, '/v1/proposals/old'); return { proposal: oldProposal }; }, post(path: string, body: any, options: any) {
+    oldPosts.push({ path, body, options }); return oldPosts.length === 1 ? first.promise : retry.promise; } };
+  const nextApi = { async get(path: string) { newReads.push(path); return { proposal: newProposal }; }, async post() { throw new Error('unexpected new write'); } };
+  const props = { api, id: 'old', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} };
+  const view = harness.renderer(ChatProposalCard, props); await view.settle();
+  press(view, '수락'); assert.equal(oldPosts.length, 1);
+  assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '제안 접기')); assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락'));
+  view.update({ ...props, api: nextApi, id: 'new' }); assert.match(textOf(view.tree), /진행 중인 제안 요청/); assert.deepEqual(newReads, []);
+  first.reject(new Error('network')); await view.settle(); assert.match(textOf(view.tree), /동일한 요청만 다시 시도/); assert.deepEqual(newReads, []);
+  press(view, '동일 요청 다시 시도'); assert.deepEqual(oldPosts[1], oldPosts[0]);
+  retry.resolve({ outcome: 'applied', proposal: { ...oldProposal, status: 'applied' }, scheduleRevision: 2 }); await view.settle();
+  assert.deepEqual(newReads, ['/v1/proposals/new']); assert.match(textOf(view.tree), /새 운동/); assert.doesNotMatch(textOf(view.tree), /기존 운동/);
+});
+
+test('inline card rejects mismatched IDs and stale proposals do not offer approval', async () => {
+  const { ChatProposalCard } = await components; let posts = 0;
+  const wrong = inlineProposal('wrong', '다른 일정'); const stale = inlineProposal('stale', '기한 지난 일정', 'expired');
+  const api = { async get(path: string) { return { proposal: path.endsWith('/stale') ? stale : wrong }; }, async post() { posts++; } };
+  const props = { api, id: 'expected', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} };
+  const view = harness.renderer(ChatProposalCard, props); await view.settle(); assert.match(textOf(view.tree), /제안 응답을 확인할 수 없습니다/);
+  assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락'));
+  view.update({ ...props, id: 'stale' }); await view.settle(); assert.match(textOf(view.tree), /만료됨/);
+  assert.ok(!nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락')); assert.equal(posts, 0);
+});
+
+test('separate inline cards cannot start a second approval while one is unresolved', async () => {
+  const { ChatProposalCard } = await components; const pending = deferred<any>(); const first = inlineProposal('first', '첫 일정'); const second = inlineProposal('second', '둘째 일정'); const posts: string[] = [];
+  const api = { async get(path: string) { return { proposal: path.endsWith('/first') ? first : second }; }, post(path: string) { posts.push(path); return pending.promise; } };
+  const props = { api, refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} };
+  const a = harness.renderer(ChatProposalCard, { ...props, id: 'first' }); const b = harness.renderer(ChatProposalCard, { ...props, id: 'second' });
+  await a.settle(); await b.settle();
+  press(a, '수락'); press(b, '수락'); assert.deepEqual(posts, ['/v1/proposals/first/decision']);
+  assert.match(textOf(b.tree), /처리 중이거나 결과를 확인하지 못한 요청/);
+  pending.resolve({ outcome: 'applied', proposal: { ...first, status: 'applied' }, scheduleRevision: 2 }); await a.settle();
+});
+
+test('proposal list titles use changed fields, deletion uses before title and reason stays in detail', async () => {
+  const { ProposalPanel } = await components; const source = inlineProposal('delete', '미사용');
+  const before = { ...source.changeSet.changes[0].after, id: 'target', revision: 1, title: '기존 운동', sourceRefs: [] };
+  const deleted = { ...source, changeSet: { changes: [{ changeId: 'd', operation: 'delete', targetId: 'target', expectedRevision: 1 }] }, beforeItems: [before], reason: '삭제 설명 원문' };
+  const multi = inlineProposal('multi', '운동'); multi.changeSet.changes.push({ ...multi.changeSet.changes[0], changeId: 'c2' }); multi.reason = '긴 이유 원문';
+  const api = { async get(path: string) { if (path === '/v1/proposals') return { proposals: [deleted, multi], nextCursor: null }; return { proposal: deleted }; }, async post() { throw new Error('unexpected write'); } };
+  const view = harness.renderer(ProposalPanel, { api, refreshVersion: 0, onScheduleChanged() {}, onBack() {}, onRequestRevision() {} }); await view.settle();
+  assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '제안 기존 운동, 확인 대기, 상세 보기'));
+  assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '제안 운동 외 1개, 확인 대기, 상세 보기'));
+  assert.doesNotMatch(textOf(view.tree), /삭제 설명 원문|긴 이유 원문/);
+  press(view, '제안 기존 운동, 확인 대기, 상세 보기'); await view.settle();
+  assert.match(textOf(view.tree), /삭제 설명 원문/); assert.match(textOf(view.tree), /변경 전/); assert.match(textOf(view.tree), /변경 후/); assert.match(textOf(view.tree), /없음 \(삭제\)/);
+});
+
+test('proposal cards use the device timezone across Korean and US date boundaries without losing precision', async () => {
+  const oldTimezone = process.env.TZ;
+  try {
+    const { ChatProposalCard } = await components; const proposal = inlineProposal('timezone', '시각 검사');
+    proposal.changeSet.changes[0].after.timeSlot = { startsAt: '2026-11-04T00:30:05.123456Z', endsAt: '2026-11-04T02:00:00Z', timezone: 'Pacific/Honolulu' };
+    const original = structuredClone(proposal); const writes: any[] = [];
+    const api = { async get() { return { proposal }; }, async post(path: string, body: any) { writes.push({ path, body }); return { outcome: 'applied', proposal: { ...proposal, status: 'applied' }, scheduleRevision: 2 }; } };
+    process.env.TZ = 'Asia/Seoul';
+    const korean = harness.renderer(ChatProposalCard, { api, id: 'timezone', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} }); await korean.settle();
+    assert.match(textOf(korean.tree), /2026년 11월 4일 오전 9:30:05\.123456 ~ 오전 11:00/);
+    assert.doesNotMatch(textOf(korean.tree), /GMT|UTC|Pacific\/Honolulu|2026-11-04T/);
+    press(korean, '수락'); await korean.settle(); assert.equal(writes.length, 1); assert.deepEqual(proposal, original);
+    korean.unmount();
+    process.env.TZ = 'America/Los_Angeles';
+    const american = harness.renderer(ChatProposalCard, { api, id: 'timezone', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} }); await american.settle();
+    assert.match(textOf(american.tree), /2026년 11월 3일 오후 4:30:05\.123456 ~ 오후 6:00/);
+    assert.doesNotMatch(textOf(american.tree), /GMT|UTC|Pacific\/Honolulu|2026-11-04T/); assert.deepEqual(proposal, original);
+  } finally { if (oldTimezone === undefined) delete process.env.TZ; else process.env.TZ = oldTimezone; }
+});
+
+test('compact changes expose update and delete approval scope and enforce validation', async () => {
+  const { ChatProposalCard } = await components; const start = inlineProposal('compact', '새 제목');
+  const after = { ...start.changeSet.changes[0].after, location: '홍대', category: 'work', durationMinutes: 60 };
+  const before = { ...after, id: 'event', revision: 1, title: '기존 제목', location: '강남', category: 'personal', durationMinutes: 30, sourceRefs: [] };
+  const update = { ...start, id: 'update', beforeItems: [before], changeSet: { changes: [{ changeId: 'update', operation: 'update', targetId: 'event', expectedRevision: 1, after }] } };
+  const removed = { ...update, id: 'removed', changeSet: { changes: [{ changeId: 'delete', operation: 'delete', targetId: 'event', expectedRevision: 1 }] } };
+  const invalid = { ...update, id: 'invalid', validation: { ...update.validation, valid: false, conflicts: [{ reason: 'overlap', targetIds: ['event'] }], missingFields: ['deadline'], protectedTargets: ['event'] } };
+  const byId: Record<string, any> = { update, removed, invalid }; let writes = 0;
+  const api = { async get(path: string) { return { proposal: byId[path.split('/').pop()!] }; }, async post() { writes++; } };
+  const props = { api, id: 'update', refreshVersion: 0, onScheduleChanged() {}, onRequestRevision() {} };
+  const view = harness.renderer(ChatProposalCard, props); await view.settle(); let text = textOf(view.tree);
+  for (const value of ['기존 제목', '새 제목', '변경 전', '변경 후', '강남', '홍대', '소요 시간:', '분류:']) assert.ok(text.includes(value), `missing ${value}`);
+  assert.doesNotMatch(text, /제안 이유|확인 기한:|GMT|UTC/); assert.ok(nodes(view.tree).some(node => node.props?.accessibilityLabel === '수락'));
+  view.update({ ...props, id: 'removed' }); await view.settle(); text = textOf(view.tree);
+  assert.match(text, /기존 제목/); assert.match(text, /변경 후: 삭제/);
+  view.update({ ...props, id: 'invalid' }); await view.settle(); text = textOf(view.tree);
+  assert.match(text, /시간이 겹칩니다/); assert.match(text, /빠진 정보: 마감/); assert.match(text, /보호된 일정: 기존 제목/);
+  assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '수락').props.disabled, true); assert.equal(writes, 0);
 });

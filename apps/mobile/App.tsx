@@ -18,7 +18,8 @@ import type { ApiClient } from './src/api/http';
 import ChatScreen, { type RecoveryRequest, type RevisionRequest } from './src/chat/ChatScreen';
 import { createChatClient } from './src/chat/client';
 import type { ChatEntryContext, CoordinationTarget, FormDraft } from './src/chat/client';
-import ProposalPanel from './src/proposals/ProposalPanel';
+import ProposalPanel, { ChatProposalCard } from './src/proposals/ProposalPanel';
+import type { Proposal } from './src/proposals/client';
 import MemoryPanel from './src/memory/MemoryPanel';
 import ScheduleCallPanel from './src/contacts/ScheduleCallPanel';
 import ReviewPanel from './src/review/ReviewPanel';
@@ -90,6 +91,19 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
     setProposalRefreshVersion(version => version + 1);
   }, []);
   const refreshProposals = useCallback(() => setProposalRefreshVersion(version => version + 1), []);
+  function requestProposalRevision(proposal: Proposal) {
+    if (operationGuard.hasUnresolved()) {
+      setNavigationError('처리 중인 요청의 결과를 먼저 확인해 주세요. 현재 대화와 제안을 유지했습니다.');
+      return;
+    }
+    const target = proposal.coordinationTarget;
+    setEntryContext(undefined); setRecoveryRequest(undefined);
+    setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
+      text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
+      coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
+    setTab('chat'); setPanel('main');
+  }
+
   useEffect(() => {
     if (onboarding === 'check' && profile.load.status === 'success') setOnboarding(profile.load.value ? 'hidden' : 'show');
   }, [onboarding, profile.load]);
@@ -205,9 +219,17 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         onCalendar={() => { setSelectedDate(new Date()); setTab('calendar'); setCalendarMode('day'); }} onOpenProposals={() => setPanel('proposals')} onOpenSettings={() => setPanel('profile')} /></Scene>
       <Scene visible={chatVisible}>
         <ChatScreen client={chatClient} timezone={timezone} scheduleClient={scheduleClient} selectedDate={selectedDate} refreshVersion={refreshVersion}
+          renderProposal={id => <ChatProposalCard api={api} id={id} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh}
+            onRequestRevision={requestProposalRevision} onOpenGoogleContacts={() => { setGoogleReturnTo('main'); setPanel('googleConnection'); }} />}
           onOpenProposals={() => setPanel('proposals')} onOpenReviewSchedule={() => { setReviewOpened(true); setPanel('review'); }} onProposalCreated={refreshProposals}
           coordinationTarget={coordinationTarget} onClearCoordinationTarget={() => setCoordinationTarget(undefined)} recoveryRequest={recoveryRequest} revisionRequest={revisionRequest}
-          entryContext={entryContext} onClearEntryContext={() => setEntryContext(undefined)} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
+          entryContext={entryContext} onClearEntryContext={() => {
+            if (operationGuard.hasUnresolved()) {
+              setNavigationError('처리 중인 요청의 결과를 먼저 확인해 주세요. 현재 대화와 제안을 유지했습니다.');
+              return;
+            }
+            setEntryContext(undefined);
+          }} onApplyDraft={applyDraft} onOpenScheduleCall={target => {
             if (scheduleCallTarget && (scheduleCallTarget.itemId !== target.itemId || scheduleCallTarget.expectedRevision !== target.expectedRevision)) {
               setNavigationError('진행 중인 전화 요청을 먼저 확인해 주세요.');
             } else if (!scheduleCallTarget) setScheduleCallTarget(target);
@@ -232,14 +254,7 @@ function ConnectedWorkspace({ api, timezone, onOpenSettings, member }: { api: Ap
         <Pressable accessibilityRole="link" accessibilityLabel="Streamline 아이콘 원본" onPress={() => { void Linking.openURL('https://github.com/webalys-hq/streamline-vectors/tree/main/core').catch(() => setNavigationError('아이콘 출처 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>Streamline 원본</Text></Pressable>
         <Pressable accessibilityRole="link" accessibilityLabel="CC BY 4.0 라이선스" onPress={() => { void Linking.openURL('https://creativecommons.org/licenses/by/4.0/').catch(() => setNavigationError('라이선스 링크를 열지 못했습니다.')); }} style={styles.backButton}><Text style={styles.settingsToggleText}>CC BY 4.0 라이선스</Text></Pressable>
       </ScrollView></Scene>
-      <Scene visible={panel === 'proposals'}><ProposalPanel onOpenGoogleContacts={() => { setGoogleReturnTo('proposals'); setPanel('googleConnection'); }} api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={proposal => {
-        const target = proposal.coordinationTarget;
-        setEntryContext(undefined); setRecoveryRequest(undefined);
-        setRevisionRequest({ key: JSON.stringify([proposal.id, proposal.revision]), proposalId: proposal.id,
-          text: `다음 제안을 바탕으로 수정한 새 제안을 만들어 주세요. 기존 제안을 변경하거나 승인하지 말고, 새 제안은 별도 검토와 승인을 받도록 해 주세요.\n\n제안 ID: ${proposal.id} · 버전: ${proposal.revision}\n제안 전체 변경과 변경 전 정보:\n${JSON.stringify({ mode: proposal.mode, coordinationTarget: target, reason: proposal.reason, changes: proposal.changeSet.changes, timingConstraints: proposal.changeSet.timingConstraints, beforeItems: proposal.beforeItems.map(({ sourceRefs: _sourceRefs, ...item }) => item) }, null, 2)}\n\n원하는 수정: `,
-          coordinationTarget: target ? { ...target, title: proposal.beforeItems.find(item => item.id === target.id)?.title ?? target.id } : undefined });
-        setTab('chat'); setPanel('main');
-      }} /></Scene>
+      <Scene visible={panel === 'proposals'}><ProposalPanel onOpenGoogleContacts={() => { setGoogleReturnTo('proposals'); setPanel('googleConnection'); }} api={api} refreshVersion={proposalRefreshVersion} onScheduleChanged={refresh} onBack={() => setPanel('main')} onRequestRevision={requestProposalRevision} /></Scene>
       {panel === 'calendarImport' && <CalendarImportPanel onOpenGoogle={() => { setGoogleReturnTo('calendarImport'); setPanel('googleConnection'); }} api={api} timezone={timezone} scheduleClient={scheduleClient} onBack={() => setPanel('main')} onScheduleChanged={refresh} />}
       {panel === 'phoneConnection' && <PhoneConnectionPanel api={api} onBack={() => setPanel(phoneReturnToCall && scheduleCallTarget ? 'scheduleCall' : 'main')} />}
       {panel === 'googleConnection' && <GoogleConnectionPanel api={api} onBack={() => { setPanel(googleReturnTo); setGoogleReturnTo('main'); }} onOpenCalendarImport={() => setPanel('calendarImport')} />}

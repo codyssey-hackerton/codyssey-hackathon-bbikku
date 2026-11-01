@@ -134,7 +134,7 @@ const components = build({
     builder.onResolve({ filter: /^\.\/src\/(chat\/ChatScreen|memory\/MemoryPanel|screens\/CalendarScreen|screens\/DayScreen|screens\/HomeScreen)$/ }, (args) => ({ path: args.path, namespace: 'app-screen' }));
     builder.onLoad({ filter: /.*/, namespace: 'app-screen' }, ({ path }) => ({
       contents: path.endsWith('ChatScreen')
-        ? 'const R=require("react"), {jsx}=require("react/jsx-runtime"); module.exports=function ChatScreen(props){const [marker]=R.useState(()=>++globalThis.__appIntegrationHarness.marker);return jsx("ChatScreen",{...props,marker})}'
+        ? 'const R=require("react"), {jsx}=require("react/jsx-runtime"); module.exports=function ChatScreen(props){const [marker]=R.useState(()=>++globalThis.__appIntegrationHarness.marker);return jsx("ChatScreen",{...props,marker,children:globalThis.__appIntegrationHarness.inlineProposalId ? props.renderProposal?.(globalThis.__appIntegrationHarness.inlineProposalId) : null})}'
         : path.endsWith('HomeScreen')
         ? 'const {jsx}=require("react/jsx-runtime"); module.exports=function HomeScreen(props){return jsx("HomeScreen",{...props,children:jsx("Pressable",{accessibilityLabel:"설정 열기",onPress:props.onOpenSettings})})}'
         : `const {jsx}=require('react/jsx-runtime'); module.exports=function Stub(props){return jsx(${JSON.stringify(path.split('/').pop())},props)}`,
@@ -207,7 +207,7 @@ function proposal(reason: string) {
 function response(proposals: unknown[]) { return new Response(JSON.stringify({ requestId: 'r', data: { proposals, nextCursor: null } })); }
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { harness.cleanup(); globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
+test.afterEach(() => { harness.cleanup(); delete (globalThis as any).__appIntegrationHarness.inlineProposalId; globalThis.fetch = originalFetch; (globalThis as any).__appIntegrationHarness.fontState = [true, null]; (globalThis as any).__appIntegrationHarness.openedLinks.length = 0; });
 
 test('기본 홈과 다섯 진입을 표시하고 추가 시트에서 AI 초안 요청으로 이동한다', async () => {
   const { App } = await components;
@@ -333,7 +333,7 @@ test('preloaded proposals refresh when chat creates a proposal without resetting
   assert.equal(reads, 2);
   assert.equal(chat(view).props.marker, marker);
   chat(view).props.onOpenProposals(); view.flush();
-  assert.match(textOf(view.tree), /새로운 제안/);
+  assert.match(textOf(view.tree), /제안 목록/); assert.match(textOf(view.tree), /일정/); assert.doesNotMatch(textOf(view.tree), /새로운 제안/);
   view.unmount();
 });
 
@@ -346,7 +346,7 @@ test('제안의 준비시간 관계는 연결된 일정과 확인 필요 여부�
     ? Response.json({ requestId: 'r', data: { proposal: withTiming } }) : response([withTiming]);
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
-  chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 시간 관계 제안, 확인 대기, 상세 보기'); await view.settle();
+  chat(view).props.onOpenProposals(); view.flush(); press(view, '제안 일정, 확인 대기, 상세 보기'); await view.settle();
   assert.match(textOf(view.tree), /준비와 이동/); assert.match(textOf(view.tree), /관련 약속 확인 필요/);
   assert.match(textOf(view.tree), /준비 15분 · 이동 0분 · 여유 미확인/); assert.match(textOf(view.tree), /준비 일정: 일정/);
   assert.match(textOf(view.tree), /이동 일정: 별도 일정 없음/); assert.doesNotMatch(textOf(view.tree), /기준 약속: event-1|연결된 변경 ID/);
@@ -392,7 +392,7 @@ test('a different account on the same API remounts state and ignores old-user li
   globalThis.fetch = async (_url, init) => {
     const auth = (init?.headers as Record<string, string>).Authorization;
     if (auth === 'Bearer old-user') return new Promise<Response>((resolve) => { resolveOld = resolve; });
-    return response([proposal('새 사용자 제안')]);
+    const item = proposal('새 사용자 제안'); item.changeSet.changes[0].after.title = '새 사용자 일정'; return response([item]);
   };
   const view = harness.renderer(App);
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'old-user'); press(view, '설정 적용');
@@ -401,11 +401,11 @@ test('a different account on the same API remounts state and ignores old-user li
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'new-user'); press(view, '설정 적용');
   await view.settle();
   assert.notEqual(chat(view).props.marker, oldMarker);
-  assert.match(textOf(view.tree), /새 사용자 제안/);
-  resolveOld(response([proposal('이전 사용자 제안')]));
+  assert.match(textOf(view.tree), /새 사용자 일정/);
+  const oldItem = proposal('이전 사용자 제안'); oldItem.changeSet.changes[0].after.title = '이전 사용자 일정'; resolveOld(response([oldItem]));
   await view.settle();
-  assert.doesNotMatch(textOf(view.tree), /이전 사용자 제안/);
-  assert.match(textOf(view.tree), /새 사용자 제안/);
+  assert.doesNotMatch(textOf(view.tree), /이전 사용자 일정/);
+  assert.match(textOf(view.tree), /새 사용자 일정/);
   view.unmount();
 });
 
@@ -744,7 +744,7 @@ test('proposal detail opens an editable revision draft with all changes and with
   press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용');
   await view.settle();
   chat(view).props.onOpenProposals(); view.flush();
-  press(view, '제안 원본 제안, 확인 대기, 상세 보기'); await view.settle();
+  press(view, '제안 일정 외 1개, 확인 대기, 상세 보기'); await view.settle();
   press(view, '수정 요청');
   const request = chat(view).props.revisionRequest;
   assert.equal(request.proposalId, 'p1');
@@ -1060,7 +1060,7 @@ test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하�
   };
   const view = harness.renderer(App);
   visiblePress(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'test'); visiblePress(view, '설정 적용'); await view.settle();
-  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); visiblePress(view, '뒤로'); visiblePress(view, '캘린더');
+  visiblePress(view, '루틴'); await view.settle(); visiblePress(view, '전체 루틴'); visiblePress(view, '캘린더');
   const calendar = node(view, 'CalendarScreen'); const timezone = calendar.props.timezone;
   const localDate = (date: Date) => {
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(part => [part.type, part.value]));
@@ -1070,7 +1070,7 @@ test('루틴 재진입 시 편집하지 않은 날짜만 선택일로 갱신하�
   visiblePress(view, '루틴'); await view.settle();
   assert.equal(input(view, '루틴 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 시작일').props.value, localDate(first)); assert.equal(input(view, '회차 종료일').props.value, localDate(first));
   enter(view, '루틴 이름', '작성 중'); enter(view, '루틴 시작일', '2027-02-01'); enter(view, '회차 시작일', '2027-02-02');
-  visiblePress(view, '뒤로'); const second = new Date('2027-01-20T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(second); view.flush();
+  visiblePress(view, '캘린더'); const second = new Date('2027-01-20T12:00:00Z'); node(view, 'CalendarScreen').props.onSelectDate(second); view.flush();
   visiblePress(view, '루틴'); await view.settle();
   assert.equal(input(view, '루틴 이름').props.value, '작성 중'); assert.equal(input(view, '루틴 시작일').props.value, '2027-02-01');
   assert.equal(input(view, '회차 시작일').props.value, '2027-02-02'); assert.equal(input(view, '회차 종료일').props.value, localDate(second)); view.unmount();
@@ -1262,5 +1262,45 @@ test('전화 미연결 안내에서 설정을 열고 돌아와도 입력한 번�
   visiblePress(view, '전화 연결 설정 열기'); await view.settle(); assert.match(textOf(visibleNodes(view.tree)), /전화 외부 연결/);
   visiblePress(view, '뒤로'); assert.equal(input(view, '받는 전화번호').props.value, '01012345678');
   assert.match(textOf(visibleNodes(view.tree)), /전화 계정 연결/); assert.equal(calls, 1);
+  view.unmount();
+});
+
+
+test('compact chat proposal can be accepted directly and its reason is optional', async t => {
+  const { App, operationGuard } = await components;
+  const owner = {}; t.after(() => operationGuard.clear(owner));
+  const item = proposal('운동을 추천하는 자세한 이유는 상세에서만 보여야 합니다.');
+  item.changeSet.changes[0].after.title = '운동';
+  const writes: string[] = [];
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (init?.method === 'POST') {
+      writes.push(path);
+      return apiResponse({ outcome: 'applied', proposal: { ...item, revision: 2, status: 'applied' }, scheduleRevision: 1 });
+    }
+    return path === '/v1/proposals/p1' ? apiResponse({ proposal: item }) : response([item]);
+  };
+  (globalThis as any).__appIntegrationHarness.inlineProposalId = 'p1';
+  const view = harness.renderer(App);
+  press(view, '개발 연결 설정'); enter(view, '개발 세션 토큰', 'dev-token'); press(view, '설정 적용'); await view.settle();
+  visiblePress(view, 'AI 비서'); await view.settle();
+  const marker = chat(view).props.marker;
+  assert.doesNotMatch(textOf(view.tree), /자세한 이유는 상세|제안 상세|GMT|확인 기한/);
+  assert.ok(visibleNodes(view.tree).some(item => item.props?.accessibilityLabel === '수락'));
+  visiblePress(view, '이유 보기'); await view.settle();
+  assert.match(textOf(view.tree), /자세한 이유는 상세/);
+  assert.doesNotMatch(textOf(view.tree), /없음 \(새 일정\)/);
+  assert.deepEqual(writes, []);
+  operationGuard.update(owner, { status: 'pending' });
+  chat(view).props.renderProposal('p1').props.onRequestRevision(item); view.flush();
+  assert.equal(chat(view).props.revisionRequest, undefined);
+  assert.equal(chat(view).props.marker, marker);
+  assert.match(textOf(view.tree), /현재 대화와 제안을 유지/);
+  operationGuard.clear(owner);
+  visiblePress(view, '수락'); await view.settle();
+  assert.deepEqual(writes, ['/v1/proposals/p1/decision']);
+  assert.equal(chat(view).props.marker, marker);
+  assert.ok(visibleNodes(view.tree).some(item => item.type === 'ChatScreen'));
+  assert.match(textOf(view.tree), /일정이 반영되었습니다/);
   view.unmount();
 });

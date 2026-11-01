@@ -98,7 +98,6 @@ export default function RoutinesPanel({ api, timezone, selectedDate, visible, on
     if (typeof fields.startDate === 'string') setStartTouched(true);
   }
   return <ScrollView contentContainerStyle={styles.container}>
-    <ActionButton label="뒤로" onPress={onBack} disabled={occurrenceBusy || action.state.status === 'pending' || (action.state.status === 'error' && action.state.uncertain)} secondary />
     <Text accessibilityRole="header" style={styles.title}>루틴</Text>
     <Text style={styles.text}>요일과 시간을 정하고 날짜를 선택해 할 일 회차를 만듭니다. 수정하거나 비활성화해도 이미 생성한 회차는 미래 일정까지 그대로 유지됩니다.</Text>
     {!formOnly && <>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
   StyleSheet, View,
@@ -10,13 +11,14 @@ import { colors } from '../ui/theme';
 import { Icon } from '../ui/Icon';
 import { ScreenBackground } from '../ui/ScreenBackground';
 import { ApiError } from '../api/http';
+import { operationGuard } from '../api/operationGuard';
 import { useMutation } from '../api/useMutation';
 import type { ScheduleClient } from '../schedule/client';
 import type { ChatClient, ChatContext, ChatEntryContext, ChatResponse, CoordinationTarget, FormDraft } from './client';
 export type { ChatEntryContext } from './client';
 import { ChatScheduleSummary } from './ChatScheduleSummary';
 
-type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; phoneTarget?: { itemId: string; expectedRevision: number } };
+type ChatEntry = { id: string; role: 'user' | 'assistant' | 'status'; text: string; proposalIds?: string[]; proposalMissing?: boolean; phoneTarget?: { itemId: string; expectedRevision: number } };
 type Input = Omit<ChatInput, 'requestId'> & { entryContext?: ChatContext };
 const fieldLabels: Record<string, string> = { kind: '종류', title: '제목', startsAt: '시작', endsAt: '종료', timezone: '시간대', durationMinutes: '소요 시간(분)', deadline: '마감', flexibility: '유연성', involvement: '참여 범위', completion: '완료 상태', category: '분류', weekdays: '반복 요일', startDate: '시작 날짜', startTime: '시작 시간', endDate: '종료 날짜', endTime: '종료 시간', localTime: '시작 시간', duration: '소요 시간(분)' };
 const weekdayLabels: Record<string, string> = { '1': '월', '2': '화', '3': '수', '4': '목', '5': '금', '6': '토', '7': '일' };
@@ -44,7 +46,7 @@ function errorMessage(error: unknown): string {
   return '요청 결과를 확인할 수 없습니다.';
 }
 
-export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft, onOpenScheduleCall }: {
+export default function ChatScreen({ client, timezone, scheduleClient, selectedDate, refreshVersion, onOpenProposals, onProposalCreated, onOpenReviewSchedule, coordinationTarget, onClearCoordinationTarget, recoveryRequest, revisionRequest, entryContext, onClearEntryContext, onApplyDraft, onOpenScheduleCall, renderProposal }: {
   client: ChatClient;
   timezone: string;
   scheduleClient: ScheduleClient;
@@ -61,6 +63,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   onClearEntryContext?: () => void;
   onApplyDraft?: (draft: FormDraft) => void;
   onOpenScheduleCall?: (target: { itemId: string; expectedRevision: number }) => void;
+  renderProposal?: (id: string) => ReactNode;
 }) {
   const [draft, setDraft] = useState('');
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryRequest[]>([]);
@@ -76,8 +79,10 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   const [longWait, setLongWait] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkMessage, setCheckMessage] = useState('');
+  const [guardEpoch, setGuardEpoch] = useState(0);
   const counter = useRef(0);
   const scrollRef = useRef<ScrollViewInstance>(null);
+  const scrollRequested = useRef(false);
   const sentRecovery = useRef<string | null>(null);
   const sentRevision = useRef<string | null>(null);
   const sentTarget = useRef<(CoordinationTarget & { title: string }) | undefined>(undefined);
@@ -93,6 +98,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       setConversationId(response.conversationId);
       const result = response.result;
       if (result.kind === 'failure') {
+        scrollRequested.current = true;
         setAgentError(result.message);
         sentRecovery.current = null;
         sentRevision.current = null;
@@ -113,13 +119,16 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
         sentRevision.current = null;
       }
       const replyId = `reply-${++counter.current}`;
-      setEntries((previous) => [
-        ...previous,
-        { id: replyId, role: 'assistant', text: result.message, ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) },
-        ...(result.kind === 'proposal'
-          ? [{ id: `${replyId}-status`, role: 'status' as const, text: '제안 목록에서 변경 전후와 이유를 검토하세요. 승인 전에는 적용되지 않습니다.' }]
-          : []),
-      ]);
+      scrollRequested.current = true;
+      setEntries((previous) => {
+        const seen = new Set(previous.flatMap(entry => entry.proposalIds ?? []));
+        const ids = result.kind === 'proposal' ? [...new Set(result.proposalIds.filter(id => !!id.trim() && id.length <= 200))] : [];
+        const proposalIds = ids.filter(id => !seen.has(id));
+        return [...previous, { id: replyId, role: 'assistant', text: result.message,
+          ...(proposalIds.length ? { proposalIds } : {}),
+          ...(result.kind === 'proposal' && !ids.length ? { proposalMissing: true } : {}),
+          ...(result.kind === 'phone_request' ? { phoneTarget: { itemId: result.itemId, expectedRevision: result.expectedRevision } } : {}) }];
+      });
       if (result.kind === 'proposal') onProposalCreated();
     },
   );
@@ -137,7 +146,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     return () => clearTimeout(timer);
   }, [action.state.status]);
   useEffect(() => {
-    if (busy || activeEntry === entryContext) return;
+    if (busy || activeEntry === entryContext || operationGuard.hasUnresolved()) return;
     const changedKey = activeEntry?.key !== entryContext?.key;
     setActiveEntry(entryContext);
     if (!changedKey) return;
@@ -146,7 +155,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     setConversationId(null);
     setEntries([]);
     setAgentError(null);
-  }, [busy, entryContext, activeEntry]);
+  }, [busy, entryContext, activeEntry, guardEpoch]);
   useEffect(() => {
     if (!recoveryRequest) return;
     setRecoveryDrafts((previous) => previous.some((item) => item.key === recoveryRequest.key) ? previous : [...previous, recoveryRequest]);
@@ -164,10 +173,23 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     }
   }, [coordinationTarget]);
   useEffect(() => {
-    if (busy || requestedMode === undefined) return;
+    if (busy || requestedMode === undefined || operationGuard.hasUnresolved()) return;
     setActiveRecoveryKey(requestedMode);
     setRequestedMode(undefined);
-  }, [busy, requestedMode]);
+  }, [busy, requestedMode, guardEpoch]);
+  useEffect(() => {
+    if (busy || (!entryChanging && requestedMode === undefined) || !operationGuard.hasUnresolved()) return;
+    const timer = setInterval(() => {
+      if (!operationGuard.hasUnresolved()) setGuardEpoch(value => value + 1);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [busy, entryChanging, requestedMode, guardEpoch]);
+
+  function blockedByOtherWrite() {
+    if (!operationGuard.hasUnresolved()) return false;
+    setAgentError('처리 중이거나 결과를 확인하지 못한 변경 요청을 먼저 확인해 주세요.');
+    return true;
+  }
 
   function editMessage(value: string) {
     if (activeRecovery) {
@@ -180,6 +202,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
   function send() {
     const message = messageDraft.trim();
     if (!message || action.state.status !== 'idle' || entryChanging) return;
+    if (blockedByOtherWrite()) return;
     setAgentError(null);
     setLastSent(message);
     sentRecovery.current = activeRecovery?.key ?? null;
@@ -191,6 +214,7 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
     sentTarget.current = target;
     sentEntry.current = selectedEntry;
     setSuggestedDraft(null);
+    scrollRequested.current = true;
     setEntries((previous) => [
       ...previous,
       { id: userId, role: 'user', text: message },
@@ -233,21 +257,23 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
       <View style={styles.heading}>
         <Text style={styles.title} accessibilityRole="header">AI 비서</Text>
         <View style={styles.links}>
-          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 검토</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onOpenProposals} style={styles.pill}><Icon name="shield" size={16} /><Text style={styles.pillText}>제안 기록</Text></Pressable>
           <Pressable accessibilityRole="button" onPress={onOpenReviewSchedule} style={styles.pill}><Icon name="clock" size={16} /><Text style={styles.pillText}>자동 검토 설정</Text></Pressable>
         </View>
         {activeEntry && !activeRecovery && !activeRevision && <View style={styles.target}>
           <Text style={styles.targetTitle}>{activeEntry.kind === 'item' ? `선택한 일정: ${activeEntry.title}` : activeEntry.kind === 'form' ? '작성 중인 입력 초안' : '새 일정 만들기'}</Text>
           <Text style={styles.targetHint}>{activeEntry.kind === 'form' ? '기존 입력을 보관하며 제안은 확인 후 선택해요. 일정은 자동 저장되지 않아요.' : '제안은 확인하고 승인하기 전까지 일정에 반영되지 않아요.'}</Text>
-          {onClearEntryContext && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={onClearEntryContext} style={styles.link}><Text style={styles.linkText}>맥락 닫기</Text></Pressable>}
+          {onClearEntryContext && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => { if (!blockedByOtherWrite()) onClearEntryContext(); }} style={styles.link}><Text style={styles.linkText}>맥락 닫기</Text></Pressable>}
         </View>}
         {displayedTarget && !activeEntry && !activeRecovery && <View style={styles.target}>
           <Text style={styles.targetTitle}>조정 검토 대상: {displayedTarget.title}</Text>
           <Text style={styles.targetHint}>대상 선택은 일정 변경이나 연락 승인이 아닙니다.</Text>
-          {!activeRevision && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClearCoordinationTarget} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>}
+          {!activeRevision && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={() => { if (!blockedByOtherWrite()) onClearCoordinationTarget(); }} style={styles.link}><Text style={styles.linkText}>대상 선택 해제</Text></Pressable>}
         </View>}
       </View>
-      <ScrollView ref={scrollRef} style={styles.conversation} contentContainerStyle={styles.messages} keyboardShouldPersistTaps="handled" onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}>
+      <ScrollView ref={scrollRef} style={styles.conversation} contentContainerStyle={styles.messages} keyboardShouldPersistTaps="handled" onContentSizeChange={() => {
+        if (scrollRequested.current) { scrollRequested.current = false; scrollRef.current?.scrollToEnd({ animated: true }); }
+      }}>
         {(recoveryDrafts.length > 0 || revisionDrafts.length > 0) && <View style={styles.target}>
           <Text style={styles.targetTitle}>{activeRevision ? '제안 수정 요청 초안' : activeRecovery ? '복구 상담 초안' : '보관된 대화 초안'}</Text>
           <Text style={styles.targetHint}>기존 대화 초안은 보관됩니다. 복구 상담은 보내기 전 수정할 수 있고 공동 조정 대상은 포함되지 않습니다.</Text>
@@ -257,17 +283,17 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
             {recoveryDrafts.map((item) => <Pressable key={item.key} accessibilityRole="button"
               accessibilityLabel={`${item.title} ${item.dateLabel} 복구 상담 초안`}
               accessibilityState={{ disabled: busy, selected: item.key === activeRecoveryKey }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(item.key); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(item.key); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>{item.title} 복구 상담</Text>
             </Pressable>)}
             {revisionDrafts.map((item) => <Pressable key={`revision:${item.key}`} accessibilityRole="button"
               accessibilityLabel={`제안 ${item.proposalId} 수정 요청 초안`}
               accessibilityState={{ disabled: busy, selected: `revision:${item.key}` === activeRecoveryKey }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(`revision:${item.key}`); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(`revision:${item.key}`); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>제안 {item.proposalId} 수정 요청</Text>
             </Pressable>)}
             {(activeRecovery || activeRevision) && <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy}
-              onPress={() => { setRequestedMode(undefined); setActiveRecoveryKey(null); }} style={[styles.pill, busy && styles.disabled]}>
+              onPress={() => { if (!blockedByOtherWrite()) { setRequestedMode(undefined); setActiveRecoveryKey(null); } }} style={[styles.pill, busy && styles.disabled]}>
               <Text style={styles.pillText}>기존 대화 초안으로</Text>
             </Pressable>}
           </View>
@@ -286,11 +312,16 @@ export default function ChatScreen({ client, timezone, scheduleClient, selectedD
               </Pressable>)}
           </View>}
         </View>}
-        {entries.map((entry) => <View key={entry.id} style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
-          <View style={styles.messageHeading}>{entry.role !== 'user' && <Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} />}<Text style={[styles.messageRole, entry.role === 'user' && styles.userMessageRole]}>{entry.role === 'user' ? '나' : entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>
-          <Text style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
+        {entries.map((entry) => <View key={entry.id} style={styles.messageGroup}>
+        <View style={[styles.message, entry.role === 'user' && styles.userMessage, entry.role === 'status' && styles.statusMessage]}>
+          {entry.role !== 'user' && <View style={styles.messageHeading}><Icon name={entry.role === 'assistant' ? 'sparkles' : 'shield'} size={14} color={colors.primary} /><Text style={styles.messageRole}>{entry.role === 'assistant' ? 'AI 응답' : '요청 상태'}</Text></View>}
+          <Text accessibilityLabel={entry.role === 'user' ? `내 메시지: ${entry.text}` : undefined} style={[styles.messageText, entry.role === 'user' && styles.userMessageText]}>{entry.text}</Text>
           {entry.phoneTarget && onOpenScheduleCall && <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }}
             onPress={() => onOpenScheduleCall(entry.phoneTarget!)} style={styles.link}><Text style={styles.linkText}>전화 요청 확인</Text></Pressable>}
+          {!!entry.proposalIds?.length && <Text style={styles.targetHint}>{renderProposal ? '아래 제안을 확인해 주세요. 승인 전에는 적용되지 않습니다.' : '제안 기록에서 확인해 주세요. 승인 전에는 적용되지 않습니다.'}</Text>}
+          {entry.proposalMissing && <Text style={styles.targetHint}>제안 정보를 확인할 수 없어요. 제안 기록을 확인해 주세요.</Text>}
+        </View>
+        {renderProposal && entry.proposalIds?.map(id => <View key={id}>{renderProposal(id)}</View>)}
         </View>)}
         {suggestedDraft && (activeEntry?.kind === 'form' || activeEntry?.kind === 'create') && suggestedDraft.key === activeEntry.key && activeEntry.key === entryContext?.key && !activeRecovery && !activeRevision && <View style={styles.draftCard}>
           <Text style={styles.targetTitle}>입력 제안 · 아직 반영되지 않음</Text>
@@ -344,11 +375,11 @@ const styles = StyleSheet.create({
   messages: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 18, gap: 12 },
   welcome: { paddingHorizontal: 4, paddingVertical: 8 },
   empty: { color: colors.muted, fontSize: 14, lineHeight: 22 },
+  messageGroup: { alignSelf: 'stretch', gap: 8 },
   message: { alignSelf: 'stretch', padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: '#EDF0F7', borderRadius: 20 },
   userMessage: { alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: '#17191D', borderColor: '#17191D', borderBottomRightRadius: 7 },
   statusMessage: { backgroundColor: '#EEF3FF', borderColor: '#E5ECFF' },
   messageRole: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  userMessageRole: { color: '#F2F5FF' },
   messageText: { color: colors.text, fontSize: 15, lineHeight: 23 },
   userMessageText: { color: colors.surface },
   loading: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 14, backgroundColor: colors.surface, borderRadius: 18 },
