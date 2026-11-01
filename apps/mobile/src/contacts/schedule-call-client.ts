@@ -1,7 +1,7 @@
 import { ApiError, type ApiClient } from '../api/http';
 import type { Mutation } from '../api/useMutation';
 
-export type ScheduleCallStatus = 'pending' | 'dispatching' | 'submitted' | 'outcome_unknown' | 'failed' | 'completed' | 'no_answer' | 'review_pending' | 'applied' | 'rejected';
+export type ScheduleCallStatus = 'pending' | 'dispatching' | 'submitted' | 'transcript_unavailable' | 'outcome_unknown' | 'failed' | 'completed' | 'no_answer' | 'review_pending' | 'applied' | 'rejected';
 export type ScheduleCallTarget = { itemId: string; expectedRevision: number } | { mode: 'inquiry'; brief: string };
 export type ScheduleCall = { id: string; revision: number; status: ScheduleCallStatus; toNumber: string; question: string;
   transcript?: { role: 'user' | 'agent'; text: string }[] } & (
@@ -10,7 +10,7 @@ export type ScheduleCall = { id: string; revision: number; status: ScheduleCallS
   { mode: 'inquiry'; brief: string });
 export type ScheduleCallOperation = ({ kind: 'create'; toNumber: string } & ScheduleCallTarget) |
   { kind: 'approve' | 'check' | 'propose'; call: ScheduleCall } | { kind: 'decision'; call: ScheduleCall; decision: 'accept' | 'reject' };
-const statuses: ScheduleCallStatus[] = ['pending', 'dispatching', 'submitted', 'outcome_unknown', 'failed', 'completed', 'no_answer', 'review_pending', 'applied', 'rejected'];
+const statuses: ScheduleCallStatus[] = ['pending', 'dispatching', 'submitted', 'transcript_unavailable', 'outcome_unknown', 'failed', 'completed', 'no_answer', 'review_pending', 'applied', 'rejected'];
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const id = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 200;
 const revision = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
@@ -38,6 +38,7 @@ function parseCall(data: unknown): ScheduleCall {
       !revision(call.itemRevision) || !text(call.title, 2000) || !text(call.question, 8192)) throw invalid();
   if (call.transcript !== undefined && (!Array.isArray(call.transcript) || call.transcript.length > 400 ||
       !call.transcript.every(entry => record(entry) && (entry.role === 'user' || entry.role === 'agent') && text(entry.text, 2000)))) throw invalid();
+  if (call.status === 'transcript_unavailable' && call.transcript !== undefined) throw invalid();
   if (call.reviewNote !== undefined && !text(call.reviewNote, 2000)) throw invalid();
   if (call.correction !== undefined && (!record(call.correction) ||
       !(call.correction.beforeLocation === null || text(call.correction.beforeLocation, 2000)) ||
@@ -73,11 +74,12 @@ export function createScheduleCallClient(api: ApiClient) {
       const body = { requestId, revision: expected.revision, ...(input.kind === 'decision' ? { decision: input.decision } : {}) };
       const call = sameSubject(expected, parseCall(await api.post<unknown>(path, body, { idempotencyKey, timeoutMs: input.kind === 'propose' ? 180_000 : 60_000 })));
       const accepted: Record<Exclude<ScheduleCallOperation['kind'], 'create'>, ScheduleCallStatus[]> = {
-        approve: ['dispatching', 'submitted', 'outcome_unknown', 'failed'], check: ['submitted', 'completed', 'no_answer', 'failed'],
+        approve: ['dispatching', 'submitted', 'outcome_unknown', 'failed'], check: ['submitted', 'transcript_unavailable', 'completed', 'no_answer', 'failed'],
         propose: ['review_pending'], decision: [input.kind === 'decision' && input.decision === 'accept' ? 'applied' : 'rejected'],
       };
       if (!accepted[input.kind].includes(call.status) || (input.kind !== 'check' && call.revision <= expected.revision) ||
-          (input.kind === 'check' && call.status !== 'submitted' && call.revision <= expected.revision)) throw invalid();
+          (input.kind === 'check' && (expected.status === 'transcript_unavailable' && call.status === 'submitted' ||
+            (call.revision <= expected.revision && !(call.status === expected.status && ['submitted', 'transcript_unavailable'].includes(call.status)))))) throw invalid();
       return call;
     },
   };

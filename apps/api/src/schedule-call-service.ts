@@ -25,7 +25,7 @@ export const scheduleCallCreation = z.union([
 const decision = revision.extend({ decision: z.enum(['accept', 'reject']) }).strict();
 type Credential = Extract<PhoneCredential, { provider: 'clawops'; mode: 'agent' }>;
 type Transcript = { role: 'user' | 'agent'; text: string }[];
-type CallStatus = 'pending' | 'dispatching' | 'submitted' | 'outcome_unknown' | 'failed' | 'completed' | 'no_answer' | 'review_pending' | 'applied' | 'rejected';
+type CallStatus = 'pending' | 'dispatching' | 'submitted' | 'transcript_unavailable' | 'outcome_unknown' | 'failed' | 'completed' | 'no_answer' | 'review_pending' | 'applied' | 'rejected';
 type StoredCall = { id: string; revision: number; status: CallStatus; question: string; toNumber: string;
   fingerprint: string; fromNumber: string; createdAt: string; providerCallId?: string; transcript?: Transcript;
   correction?: { beforeLocation: string | null; afterLocation: string; summary: string }; reviewNote?: string } &
@@ -203,7 +203,7 @@ export class ScheduleCallService {
   async check(userId: string, id: string, input: { revision: number }): Promise<{ call: ScheduleCall }> {
     const expected = parse(revision, input).revision; const credential = await this.credential(userId);
     const initial = find(await this.options.store.read(userId), id);
-    if (initial.revision !== expected || initial.status !== 'submitted' || !initial.providerCallId || initial.fingerprint !== fingerprint(credential)) throw conflict();
+    if (initial.revision !== expected || !['submitted', 'transcript_unavailable'].includes(initial.status) || !initial.providerCallId || initial.fingerprint !== fingerprint(credential)) throw conflict();
     const result = await createClawOpsReplies({ accountId: credential.accountId, apiKey: credential.apiKey, fetch: this.options.connections!.fetcher })
       .check({ callId: initial.providerCallId, fromNumber: initial.fromNumber, toNumber: initial.toNumber, createdAt: initial.createdAt });
     if (!result.ok) throw unavailable();
@@ -213,6 +213,11 @@ export class ScheduleCallService {
       if (result.complete) {
         if (result.events.length > 100 || result.events.reduce((sum, event) => sum + event.text.length, 0) > 32_000) throw unavailable();
         const next: StoredCall = { ...call, revision: call.revision + 1, status: 'completed', transcript: result.events.map(({ role, text }) => ({ role, text })) };
+        await this.options.store.transaction(userId, draft => draft.voiceSessions.set(key(id), next));
+        return { call: publicCall(next) };
+      }
+      if (result.callStatus === 'completed' && call.status !== 'transcript_unavailable') {
+        const next: StoredCall = { ...call, revision: call.revision + 1, status: 'transcript_unavailable' };
         await this.options.store.transaction(userId, draft => draft.voiceSessions.set(key(id), next));
         return { call: publicCall(next) };
       }

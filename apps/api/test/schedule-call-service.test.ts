@@ -15,16 +15,18 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 function fixture(options: { item?: ScheduleItem; model?: ModelPort; settings?: unknown; preflight?: () => Promise<void>; dispatch?: () => Promise<Response>; status?: string; complete?: boolean; dispatchTimeoutMs?: number } = {}) {
   const store = new MemoryPlanningStore(); Object.defineProperty(store, 'durable', { value: true });
   const planning = new PlanningService(store, () => now);
-  let active: PhoneCredential | undefined = credential; let posts = 0; let gets = 0;
+  let active: PhoneCredential | undefined = credential; let posts = 0; let gets = 0; let completeTranscript = options.complete !== false;
   const sentBodies: unknown[] = [];
   const fetcher: typeof fetch = async (url, init) => {
     const path = String(url);
     if (path.includes('/agents/')) { await options.preflight?.(); return Response.json(options.settings ?? { agentId: 'agent', maxDurationSeconds: 120, liveEvents: { events: ['transcript.final'] } }); }
     if (init?.method === 'POST') { posts++; sentBodies.push(JSON.parse(String(init.body))); return options.dispatch ? options.dispatch() : Response.json({ callId: 'call-1' }, { status: 201 }); }
     gets++;
-    if (path.includes('/live-events')) return Response.json({ data: options.complete === false ? [] : [
+    if (path.includes('/live-events')) return Response.json({ data: [
       { id: '1', event: 'stream.started', timestamp: '2026-11-01T00:00:01Z', detail: {} },
-      { id: '2', event: 'transcript.final', timestamp: '2026-11-01T00:00:02Z', detail: { utteranceId: 'u', role: 'user', text: '장소가 시청역으로 변경됐어요.' } },
+      { id: '2', event: 'transcript.final', timestamp: '2026-11-01T00:00:02Z', detail: completeTranscript
+        ? { utteranceId: 'u', role: 'user', text: '장소가 시청역으로 변경됐어요.' }
+        : { utteranceId: 'a', role: 'agent', text: '문의 내용을 확인하겠습니다.' } },
       { id: '3', event: 'stream.ended', timestamp: '2026-11-01T00:00:03Z', detail: { reason: 'completed' } },
     ], hasMore: false });
     return Response.json({ callId: 'call-1', accountId: 'account', from: '+821012345678', to: '+821099988877', direction: 'outbound', status: options.status ?? 'completed', dateCreated: '2026-11-01T00:00:00Z' });
@@ -32,7 +34,8 @@ function fixture(options: { item?: ScheduleItem; model?: ModelPort; settings?: u
   const model = options.model ?? { async decide() { return { kind: 'call_review', text: '시청역으로 변경되었다고 답했습니다.', location: '시청역' }; } };
   const service = new ScheduleCallService({ store, planning, connections: { read: async () => active, fetcher }, model, clock: () => now, dispatchTimeoutMs: options.dispatchTimeoutMs });
   const seed = () => store.transaction('alice', state => { state.items.set('event-1', structuredClone(options.item ?? base)); state.scheduleRevision = 1; });
-  return { store, service, seed, get posts() { return posts; }, get gets() { return gets; }, sentBodies, setCredential(value: PhoneCredential | undefined) { active = value; } };
+  return { store, service, seed, get posts() { return posts; }, get gets() { return gets; }, sentBodies,
+    setCredential(value: PhoneCredential | undefined) { active = value; }, setComplete(value: boolean) { completeTranscript = value; } };
 }
 const create = (f: ReturnType<typeof fixture>) => f.service.create('alice', { itemId: 'event-1', expectedRevision: 1, toNumber: '01099988877' });
 async function complete(f: ReturnType<typeof fixture>) {
@@ -106,7 +109,7 @@ test('a provider that ignores abort becomes outcome_unknown and a late success c
 
 test('incomplete transcript and changed credentials or schedule cannot produce or apply a correction', async () => {
   const f = fixture({ complete: false }); await f.seed(); const result = await complete(f);
-  assert.equal(result.checked.status, 'submitted');
+  assert.equal(result.checked.status, 'transcript_unavailable');
   await assert.rejects(() => f.service.propose('alice', result.created.id, { revision: result.checked.revision }));
   const g = fixture(); await g.seed(); const pending = (await create(g)).call;
   g.setCredential({ ...credential, apiKey: 'different' });
@@ -277,5 +280,27 @@ test('inquiry approval rejects changed subject or number during provider preflig
       state.voiceSessions.set(key, { ...stored, ...change });
     });
     gate.resolve(); await assert.rejects(approval, { code: 'conflict' }); assert.equal(f.posts, 0);
+  }
+});
+
+test('completed call without user transcript can be rechecked and later completed without another call', async () => {
+  for (const mode of ['schedule_check', 'inquiry'] as const) {
+    const f = fixture({ complete: false }); await f.seed();
+    const created = mode === 'inquiry'
+      ? (await f.service.create('alice', { mode, brief: '영업시간 문의', toNumber: '01099988877' })).call
+      : (await create(f)).call;
+    const submitted = (await f.service.approve('alice', created.id, { revision: created.revision })).call;
+    const missing = (await f.service.check('alice', created.id, { revision: submitted.revision })).call;
+    assert.equal(missing.status, 'transcript_unavailable'); assert.equal(missing.revision, submitted.revision + 1);
+    assert.equal(missing.transcript, undefined); assert.equal(missing.question, created.question);
+    await assert.rejects(() => f.service.propose('alice', created.id, { revision: missing.revision }));
+    await assert.rejects(() => f.service.decide('alice', created.id, { revision: missing.revision, decision: 'accept' }));
+    const again = (await f.service.check('alice', created.id, { revision: missing.revision })).call;
+    assert.deepEqual(again, missing); assert.equal(f.posts, 1);
+    f.setComplete(true);
+    const completed = (await f.service.check('alice', created.id, { revision: again.revision })).call;
+    assert.equal(completed.status, 'completed'); assert.equal(completed.revision, again.revision + 1);
+    assert.ok(completed.transcript?.some(event => event.role === 'user'));
+    assert.deepEqual((await f.store.read('alice')).items.get('event-1'), base); assert.equal(f.posts, 1);
   }
 });

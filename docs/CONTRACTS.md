@@ -387,13 +387,17 @@ Bearer `GET /v1/auth/me`는 `{member}`, `POST /v1/auth/logout {}`은 `{status:'l
 | POST /v1/schedule-calls | itemId, expectedRevision, toNumber, mode?:'schedule_check' 또는 mode:'inquiry', brief, toNumber | 일정 확인은 서버가 일정으로 질문을 구성한다. 일반 문의는 일정 ID 없이 문의 내용을 저장한다. 둘 다 pending 초안이며 발신 없음 |
 | GET /v1/schedule-calls/:id | 없음 | 저장 상태만 조회(no-store) |
 | POST /v1/schedule-calls/:id/approve | revision | 표시된 번호·질문에 대한 명시적 승인 후 발신 |
-| POST /v1/schedule-calls/:id/check | revision | 바인딩된 통화·계정·번호 검증 후 전사 조회 |
+| POST /v1/schedule-calls/:id/check | revision | 바인딩된 통화·계정·번호 검증 후 전사 조회. 통화 종료와 전사 확보는 별도로 표시 |
 | POST /v1/schedule-calls/:id/propose | revision | 완료·완결 전사만 기존 메인 모델로 장소 정정 검토 |
 | POST /v1/schedule-calls/:id/decision | revision, decision: accept/reject | 장소 변경 별도 승인 또는 거절 |
 
 `call`의 공통 필드는 `{id,revision,status,mode,question,toNumber,transcript?}`다. 일정 확인은 `mode:'schedule_check'`와 `itemId,itemRevision,title,correction?,reviewNote?`를 포함하며 기존 저장 데이터도 일정 확인으로 취급한다. 일반 문의는 `mode:'inquiry',brief`를 포함하고 일정·정정 필드는 없으며 `question===brief`다. 일반 문의는 `brief`를 앞뒤 공백 제거 후 UTF-16 기준 1~1000자로 검증하고 금지된 제어문자·방향 제어 문자와 유효하지 않은 유니코드를 거부한다. 탭·줄바꿈은 허용하나 ZWJ를 포함한 조합 이모지는 거부한다. 생성 시 일정 ID·revision을 혼합할 수 없고 저장된 번호·문의는 수정하지 않는다. 번호는 기존 E.164 정규화를 따른다. 변경하려면 새 초안을 만들고 다시 확인·승인한다.
 
-status는 pending/dispatching/submitted/outcome_unknown/failed/completed/no_answer/review_pending/applied/rejected이며 일반 문의에는 장소 검토·반영 상태가 없다. transcript는 `{role:'user'|'agent',text}[]`, 일정 확인의 correction은 `{beforeLocation:string|null,afterLocation:string,summary:string}`이며 명확한 정정이 없으면 생략한다. 결과 전사와 모델 요약은 신뢰할 수 없는 참고 자료로 표시하고 사용자가 확인한다.
+status는 pending/dispatching/submitted/outcome_unknown/failed/completed/transcript_unavailable/no_answer/review_pending/applied/rejected이며 일반 문의에는 장소 검토·반영 상태가 없다. transcript는 `{role:'user'|'agent',text}[]`, 일정 확인의 correction은 `{beforeLocation:string|null,afterLocation:string,summary:string}`이며 명확한 정정이 없으면 생략한다. 결과 전사와 모델 요약은 신뢰할 수 없는 참고 자료로 표시하고 사용자가 확인한다.
+
+결속된 제공자 통화가 종료(`callStatus:'completed'`)됐지만 상대 발화 누락 등으로 전사가 완결되지 않으면 `transcript_unavailable`로 표시한다. 이는 응답 없음이나 전사 내용의 증거가 아니며 transcript를 반환하거나 장소 정정·일정 반영을 허용하지 않는다. 첫 전환 때 revision을 1 올린다. 사용자가 현재 revision으로 명시 재조회했을 때도 미완결이면 상태와 revision을 유지하고, 완전한 전사를 확보한 경우에만 `completed`로 바꾸며 revision을 1 올린다. 새로운 확인은 새 requestId·Idempotency-Key를 사용하고 같은 키의 재시도는 원 결과를 재생한다. 조회 오류나 결속 검증 실패는 오류로 반환하고 기존 상태를 유지하며, 재조회는 재발신이 아니다. 제공자의 no-answer는 기존 `no_answer`이고 통화 진행 중에는 기존 상태를 유지한다.
+
+앱에서 대화로 돌아갈 때는 현재 전화 요청을 유지한다. 미확인 요청을 닫으려면 앱에서 해당 전사를 다시 조회할 수 없다는 안내를 확인한 뒤 별도로 닫기를 선택한다. 앱 재시작 뒤 전화 요청을 복원하는 기능은 이 계약에 포함되지 않는다.
 
 발신은 지속 저장소 및 사용자별 ClawOps 관리형 계정이 필요하다. 발신번호·Agent·API 자격의 fingerprint를 묶고, 일정 확인은 원 일정 전체 snapshot도 묶어 승인 직전 최신성을 확인한다. 표시된 서버 저장 번호와 질문에 대한 명시적 승인이 있어야 발신한다. dispatching을 먼저 커밋하며 불명 결과는 자동 재발신하지 않는다. approve/check/propose는 외부 API·모델 응답을 사용자 DB 락 밖에서 기다린다. create/decision은 기존 멱등 결과와 같은 트랜잭션에 저장한다. 통화 데이터는 기존 사용자별 voiceSessions의 `schedule-call:` namespace에 보관하고 공개 응답에 API 자격·제공자 통화 ID를 넣지 않는다.
 

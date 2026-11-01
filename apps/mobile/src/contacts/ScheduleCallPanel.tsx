@@ -25,6 +25,7 @@ export default function ScheduleCallPanel(props: ScheduleCallPanelProps) {
   const [message, setMessage] = useState('');
   const [reading, setReading] = useState(false);
   const [approvalRead, setApprovalRead] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
   const action = useMutation<ScheduleCallOperation, ScheduleCall>(op => requestClient.current!.execute(op), result => {
     setCall(result); setReadback(null); setMessage('');
     if (result.status === 'applied') onScheduleChanged();
@@ -35,7 +36,7 @@ export default function ScheduleCallPanel(props: ScheduleCallPanelProps) {
     if (locked || readLock.current) return;
     if (operationGuard.hasUnresolved()) { setMessage('처리 중이거나 결과를 확인하지 못한 요청을 먼저 확인해 주세요.'); return; }
     if (action.state.status === 'success') action.reset();
-    requestClient.current = client; lastKind.current = input.kind; setApprovalRead(false); setMessage(''); action.submit(input);
+    requestClient.current = client; lastKind.current = input.kind; setApprovalRead(false); setConfirmClose(false); setMessage(''); action.submit(input);
   }
   async function readStatus() {
     if (!call || readLock.current) return;
@@ -76,7 +77,7 @@ export default function ScheduleCallPanel(props: ScheduleCallPanelProps) {
       }} />}
       <Text accessibilityLiveRegion="polite">전화 상태: {statusLabel[call.status]}</Text>
       {call.status === 'pending' && <ActionButton label="승인하고 전화" disabled={locked} onPress={() => submit({ kind: 'approve', call })} />}
-      {call.status === 'submitted' && <ActionButton label="통화 결과 확인" disabled={locked} onPress={() => submit({ kind: 'check', call })} />}
+      {['submitted', 'transcript_unavailable'].includes(call.status) && <ActionButton label="통화 결과 확인" disabled={locked} onPress={() => submit({ kind: 'check', call })} />}
       {call.mode !== 'inquiry' && call.status === 'completed' && <ActionButton label="장소 정정 검토" disabled={locked} onPress={() => submit({ kind: 'propose', call })} />}
       {call.transcript && <View style={styles.card}><Text accessibilityRole="header" style={styles.label}>통화 내용</Text>
         <Text style={styles.hint}>전사는 외부 발화이며, 실제 내용과 다를 수 있습니다. 직접 확인해 주세요.</Text>
@@ -107,13 +108,20 @@ export default function ScheduleCallPanel(props: ScheduleCallPanelProps) {
       {errorCode === 'conflict' && !uncertain && <ActionButton label="일정 다시 조회" secondary onPress={() => { onScheduleChanged(); if (call) onClose(); else onFinish(); }} />}
       <ActionButton label="같은 요청 다시 시도" disabled={reading || requestClient.current !== client} onPress={action.retry} />
       {!uncertain && <ActionButton label="오류 닫기" secondary disabled={approvalNeedsRead || reading} onPress={action.reset} />}</View>}
-    {(!call || ['pending', 'failed', 'no_answer', 'applied', 'rejected'].includes(call.status) || (call.mode === 'inquiry' && call.status === 'completed')) &&
-      <ActionButton label="이 전화 요청 닫기" secondary disabled={!canClose || approvalNeedsRead} onPress={onFinish} />}
+    {(!call || ['pending', 'failed', 'no_answer', 'transcript_unavailable', 'applied', 'rejected'].includes(call.status) || (call.mode === 'inquiry' && call.status === 'completed')) &&
+      <ActionButton label="이 전화 요청 닫기" secondary disabled={!canClose || approvalNeedsRead} onPress={() => {
+        if (call?.status === 'transcript_unavailable') setConfirmClose(true); else onFinish();
+      }} />}
+    {confirmClose && call?.status === 'transcript_unavailable' && <View style={styles.card}>
+      <Text>이 요청을 닫으면 앱에서 이 통화의 전사를 다시 조회할 수 없습니다.</Text>
+      <ActionButton label="재조회 없이 닫기" disabled={!canClose} onPress={onFinish} />
+      <ActionButton label="계속 확인하기" secondary disabled={!canClose} onPress={() => setConfirmClose(false)} />
+    </View>}
     <ActionButton label="대화로 돌아가기" secondary disabled={!canClose} onPress={onClose} />
   </ScrollView>;
 }
 const statusLabel: Record<ScheduleCall['status'], string> = { pending: '승인 대기', dispatching: '발신 요청 중', submitted: '전화 요청 접수', outcome_unknown: '발신 결과 불명',
-  failed: '요청 실패', completed: '통화 내용 확인됨', no_answer: '응답 없음', review_pending: '변경 검토 필요', applied: '장소 변경 반영됨', rejected: '변경 거절됨' };
+  transcript_unavailable: '통화 종료 · 응답 전사 미확인', failed: '요청 실패', completed: '통화 내용 확인됨', no_answer: '응답 없음', review_pending: '변경 검토 필요', applied: '장소 변경 반영됨', rejected: '변경 거절됨' };
 const styles = StyleSheet.create({ content: { padding: 20, paddingBottom: 40, gap: 12 }, title: { fontSize: 22, fontWeight: '700', color: colors.text },
   card: { padding: 16, gap: 10, borderRadius: 18, backgroundColor: colors.surface }, label: { fontWeight: '700', color: colors.text },
   hint: { color: colors.muted, lineHeight: 20 }, input: { minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 12 },

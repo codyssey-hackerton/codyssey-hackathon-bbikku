@@ -20,7 +20,7 @@ test('chat → explicit call approval → Hongdae correction → separate approv
   const timeSlot = { startsAt: '2026-11-02T18:00:00+09:00', endsAt: '2026-11-02T19:00:00+09:00', timezone: 'Asia/Seoul' };
   const original = (await planning.command('alice', { expectedScheduleRevision: 0, changeSet: { changes: [{ changeId: 'seed', operation: 'create',
     after: { kind: 'event', title: '저녁 약속', location: '강남역', timeSlot, durationMinutes: null, deadline: null, flexibility: 'fixed', involvement: 'personal', completion: 'pending' } }] } })).items[0]!;
-  let calls = 0;
+  let calls = 0; let eventReads = 0; let inquiryTranscriptComplete = false;
   const credential = { provider: 'clawops' as const, mode: 'agent' as const, accountId: 'synthetic-account', apiKey: 'synthetic-key', agentId: 'synthetic-agent', fromNumber: '+827012345678' };
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input)); assert.equal(url.origin, 'https://api.claw-ops.com');
@@ -34,10 +34,11 @@ test('chat → explicit call approval → Hongdae correction → separate approv
       return Response.json({ callId: 'synthetic-call' }, { status: 201 });
     }
     if (url.pathname.endsWith('/live-events')) {
+      eventReads++;
       const event = (id: string, name: string, detail: object = {}) => ({ id, event: name, timestamp: now, detail });
       return Response.json({ data: [event('1', 'stream.started'),
         event('2', 'transcript.final', { utteranceId: 'a1', role: 'agent', text: '내일 오후 6시에 강남역이 맞나요?' }),
-        event('3', 'transcript.final', { utteranceId: 'u1', role: 'user', text: '아니, 홍대야. 시간은 똑같이 오후 6시.' }),
+        ...(calls === 1 || inquiryTranscriptComplete ? [event('3', 'transcript.final', { utteranceId: 'u1', role: 'user', text: '아니, 홍대야. 시간은 똑같이 오후 6시.' })] : []),
         event('4', 'stream.ended', { reason: 'completed' })], hasMore: false });
     }
     return Response.json({ callId: 'synthetic-call', accountId: credential.accountId, from: credential.fromNumber,
@@ -92,8 +93,16 @@ test('chat → explicit call approval → Hongdae correction → separate approv
   assert.equal(sentInquiry.statusCode, 200, sentInquiry.body); inquiryCall = sentInquiry.json().data.call;
   const replayInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/approve`, { revision: 1 }, 'inquiry-approve');
   assert.equal(replayInquiry.statusCode, 200); assert.equal(calls, 2);
-  const checkedInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/check`, { revision: inquiryCall.revision }, 'inquiry-check');
+  const firstCheckBody = { revision: inquiryCall.revision };
+  const checkedInquiry = await post(`/v1/schedule-calls/${inquiryCall.id}/check`, firstCheckBody, 'inquiry-check');
   assert.equal(checkedInquiry.statusCode, 200, checkedInquiry.body); inquiryCall = checkedInquiry.json().data.call;
+  assert.equal(inquiryCall.status, 'transcript_unavailable'); assert.equal(inquiryCall.transcript, undefined);
+  const countAfterCheck = eventReads; inquiryTranscriptComplete = true;
+  const replayCheck = await post(`/v1/schedule-calls/${inquiryCall.id}/check`, firstCheckBody, 'inquiry-check');
+  assert.deepEqual(replayCheck.json().data.call, inquiryCall); assert.equal(eventReads, countAfterCheck);
+  const rechecked = await post(`/v1/schedule-calls/${inquiryCall.id}/check`, { revision: inquiryCall.revision }, 'inquiry-recheck');
+  assert.equal(rechecked.statusCode, 200, rechecked.body); inquiryCall = rechecked.json().data.call;
+  assert.equal(eventReads, countAfterCheck + 1); assert.equal(calls, 2);
   assert.equal(inquiryCall.status, 'completed'); assert.equal(inquiryCall.question, '영업시간을 물어봐 주세요');
   assert.equal((await post(`/v1/schedule-calls/${inquiryCall.id}/propose`, { revision: inquiryCall.revision }, 'inquiry-propose')).statusCode, 400);
   assert.equal((await post(`/v1/schedule-calls/${inquiryCall.id}/decision`, { revision: inquiryCall.revision, decision: 'accept' }, 'inquiry-decision')).statusCode, 400);

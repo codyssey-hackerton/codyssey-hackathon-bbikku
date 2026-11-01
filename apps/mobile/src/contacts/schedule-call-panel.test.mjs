@@ -228,3 +228,49 @@ test('inquiry disallows control characters and unpaired surrogates before creati
  }
  assert.equal(writes, 0);
 });
+
+for (const mode of ['inquiry', 'schedule_check']) test(`${mode}: ended call with unavailable transcript can be explicitly rechecked without another call`, async t => {
+ const writes = []; let checks = 0, finished = 0, refreshed = 0;
+ const saved = mode === 'inquiry' ? { id: 'inquiry', revision: 1, status: 'pending', mode: 'inquiry', brief: '문의', question: '문의', toNumber: '+821012345678' } : base;
+ const api = { async post(path, body, options) { writes.push({ path, body, options });
+   if (path === '/v1/schedule-calls') return { call: saved };
+   if (path.endsWith('/approve')) return { call: { ...saved, revision: 3, status: 'submitted' } };
+   if (path.endsWith('/check')) {
+     checks++;
+     if (checks === 2) throw new ApiError('timeout', 'timeout', true);
+     if (checks < 4) return { call: { ...saved, revision: 4, status: 'transcript_unavailable' } };
+     return { call: { ...saved, revision: 5, status: 'completed', transcript } };
+   }
+   throw Error('unexpected write'); }, async get() { throw Error('unexpected read'); } };
+ const props = { api, onClose() {}, onFinish() { finished++; }, onScheduleChanged() { refreshed++; }, onOpenPhoneSettings() {} };
+ const view = mode === 'inquiry' ? render(ScheduleCallPanel, { ...props, mode: 'inquiry', brief: '문의' }) : setup(api, props);
+ t.after(view.close); enterNumber(view); press(view, '전화 내용 확인'); await view.settle(); press(view, '승인하고 전화'); await view.settle();
+ press(view, '통화 결과 확인'); await view.settle();
+ assert.match(text(view.tree), /통화 종료 · 응답 전사 미확인/); assert.doesNotMatch(text(view.tree), /응답 없음/);
+ assert.ok(!nodes(view.tree).some(node => ['승인하고 전화', '장소 정정 검토', '장소 변경 승인'].includes(node.props?.accessibilityLabel)));
+ assert.equal(nodes(view.tree).find(node => node.props?.accessibilityLabel === '이 전화 요청 닫기').props.disabled, false);
+ press(view, '이 전화 요청 닫기'); assert.equal(finished, 0); assert.match(text(view.tree), /앱에서 이 통화의 전사를 다시 조회할 수 없습니다/);
+ press(view, '계속 확인하기'); assert.equal(finished, 0);
+ press(view, '통화 결과 확인'); await view.settle(); assert.match(text(view.tree), /같은 요청만 다시 확인/);
+ press(view, '같은 요청 다시 시도'); await view.settle(); assert.match(text(view.tree), /통화 종료 · 응답 전사 미확인/);
+ const rechecks = writes.filter(write => write.path.endsWith('/check'));
+ assert.notEqual(rechecks[0].options.idempotencyKey, rechecks[1].options.idempotencyKey); assert.deepEqual(rechecks[1], rechecks[2]);
+ press(view, '통화 결과 확인'); await view.settle(); assert.match(text(view.tree), /상대방: 홍대입니다/);
+ assert.equal(writes.filter(write => write.path.endsWith('/approve')).length, 1);
+ assert.equal(writes.some(write => /\/(?:propose|decision)$/.test(write.path)), false); assert.equal(refreshed, 0); assert.equal(finished, 0);
+});
+
+test('closing a call without transcript requires explicit confirmation that rechecking will be unavailable', async t => {
+ let finished = 0;
+ const saved = { id: 'inquiry', revision: 1, status: 'pending', mode: 'inquiry', brief: '문의', question: '문의', toNumber: '+821012345678' };
+ const api = { async post(path) {
+  if (path === '/v1/schedule-calls') return { call: saved };
+  if (path.endsWith('/approve')) return { call: { ...saved, revision: 2, status: 'submitted' } };
+  if (path.endsWith('/check')) return { call: { ...saved, revision: 3, status: 'transcript_unavailable' } };
+  throw Error('unexpected write'); }, async get() {} };
+ const view = render(ScheduleCallPanel, { api, mode: 'inquiry', brief: '문의', onClose() {}, onFinish() { finished++; }, onScheduleChanged() {}, onOpenPhoneSettings() {} });
+ t.after(view.close); enterNumber(view);
+ for (const label of ['전화 내용 확인', '승인하고 전화', '통화 결과 확인']) { press(view, label); await view.settle(); }
+ press(view, '이 전화 요청 닫기'); assert.equal(finished, 0);
+ assert.match(text(view.tree), /앱에서 이 통화의 전사를 다시 조회할 수 없습니다/); press(view, '재조회 없이 닫기'); assert.equal(finished, 1);
+});
