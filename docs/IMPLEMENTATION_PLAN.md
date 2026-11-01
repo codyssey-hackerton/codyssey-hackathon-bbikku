@@ -2,6 +2,12 @@
 
 2026-10-31 · 00 MAIN. 기준: PRD §2 / ADR v1 / CONTRACTS v1. 문서 PR #1은 병합됐으며 이 계획은 그 기준의 개발·검증 진행을 기록한다. 아키텍처를 다시 선택하지 않는다.
 
+## 추천 우선 프롬프트 공개 반영 — 2026-11-01 최신 증분
+
+PR #22를 병합한 `main`은 `2fbc0c8802c8a4faef320d89a652280bf82b61a5`다. 06 배포 검증 보고에 따라, 공개·VPN API 두 프로세스를 정상 종료하고 진행 중 ledger·활성/도래 예약이 모두 0인 것을 재확인한 뒤 프롬프트 파일을 원자 교체하고 두 서비스를 재시작했다. 각 실행 소스의 프롬프트 Git blob `ca5170925ef8a94967d4773ee3dc719476c6bf99`가 해당 main과 일치하고 active/health 정상임을 확인했다. 기존 프롬프트를 백업했고 DB migration이나 직접 데이터 쓰기는 하지 않았다.
+
+프롬프트·추천 선택지 대상 5/5, API typecheck·diff check가 통과했다. 공개 웹 HTML/JS와 공개 API health는 200이며 기존 웹 JS에 해당 공개 API host가 포함됨을 확인했다. 웹 코드 변경이 없어 Vercel `dpl_5vyKEKKTG14VY3n2LDAYVYvsstU5` 배포는 유지했다. 아래 `c2cea26` 배포 기록 이후의 증분이며, 최신 프롬프트의 실제 모델 추천 품질·현재 회원 UI 세션·실전화/메일은 이번에 재검증하지 않았다.
+
 ## 개인화·캘린더 워크플로 공개 반영 — 2026-11-01
 
 작업 브랜치 `codex/preferences-chat-ux`의 코드 `c2cea261684537d4ca94a9f82ab53651ce36a711`을 푸시하고 VM의 공개·VPN API와 [공개 웹](https://pikku-bbikku-web-preview.vercel.app)에 반영했다. Vercel production 배포는 `dpl_5vyKEKKTG14VY3n2LDAYVYvsstU5`다. VM에서 실행하는 두 API의 추적 파일 475개는 해당 커밋의 Git blob과 모두 일치했다. `main`과 Draft PR #17은 변경하지 않았다.
